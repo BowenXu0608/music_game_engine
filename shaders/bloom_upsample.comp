@@ -1,0 +1,30 @@
+#version 450
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(set = 0, binding = 0) uniform sampler2D srcTex;
+layout(set = 0, binding = 1, rgba16f) uniform image2D dstTex;
+
+layout(push_constant) uniform PC {
+    vec2 srcTexelSize;
+} pc;
+
+void main() {
+    ivec2 dstCoord = ivec2(gl_GlobalInvocationID.xy);
+    vec2  uv       = (vec2(dstCoord) + 0.5) * pc.srcTexelSize * 0.5;
+
+    // 9-tap tent upsample
+    vec3 sum = vec3(0.0);
+    sum += texture(srcTex, uv + vec2(-1.0, -1.0) * pc.srcTexelSize).rgb * 0.0625;
+    sum += texture(srcTex, uv + vec2( 0.0, -1.0) * pc.srcTexelSize).rgb * 0.125;
+    sum += texture(srcTex, uv + vec2( 1.0, -1.0) * pc.srcTexelSize).rgb * 0.0625;
+    sum += texture(srcTex, uv + vec2(-1.0,  0.0) * pc.srcTexelSize).rgb * 0.125;
+    sum += texture(srcTex, uv).rgb                                       * 0.25;
+    sum += texture(srcTex, uv + vec2( 1.0,  0.0) * pc.srcTexelSize).rgb * 0.125;
+    sum += texture(srcTex, uv + vec2(-1.0,  1.0) * pc.srcTexelSize).rgb * 0.0625;
+    sum += texture(srcTex, uv + vec2( 0.0,  1.0) * pc.srcTexelSize).rgb * 0.125;
+    sum += texture(srcTex, uv + vec2( 1.0,  1.0) * pc.srcTexelSize).rgb * 0.0625;
+
+    vec3 existing = imageLoad(dstTex, dstCoord).rgb;
+    imageStore(dstTex, dstCoord, vec4(existing + sum, 1.0));
+}

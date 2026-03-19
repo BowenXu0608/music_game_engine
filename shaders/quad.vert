@@ -1,0 +1,26 @@
+#version 450
+
+layout(set = 0, binding = 0) uniform FrameUBO {
+    mat4  viewProj;
+    float time;
+} ubo;
+
+layout(push_constant) uniform PushConstants {
+    vec4 tint;
+    vec4 uvTransform;  // xy=offset, zw=scale
+    mat4 model;
+} pc;
+
+layout(location = 0) in vec2 inPos;
+layout(location = 1) in vec2 inUV;
+layout(location = 2) in vec4 inColor;
+
+layout(location = 0) out vec2 fragUV;
+layout(location = 1) out vec4 fragColor;
+
+void main() {
+    vec4 worldPos = pc.model * vec4(inPos, 0.0, 1.0);
+    gl_Position = ubo.viewProj * worldPos;
+    fragUV    = inUV * pc.uvTransform.zw + pc.uvTransform.xy;
+    fragColor = inColor * pc.tint;
+}
