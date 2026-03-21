@@ -12,7 +12,7 @@ enum class GameMode { Bandori, Cytus, Phigros, Arcaea, Lanota };
 class Engine {
 public:
     void init(uint32_t width, uint32_t height, const std::string& title,
-              const std::string& shaderDir);
+              const std::string& shaderDir, bool vsync = true);
     void shutdown();
     void run();
 

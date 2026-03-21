@@ -2,11 +2,12 @@
 #include <stdexcept>
 #include <array>
 
-void Renderer::init(GLFWwindow* window, const std::string& shaderDir, bool validation) {
+void Renderer::init(GLFWwindow* window, const std::string& shaderDir, bool validation, bool vsync) {
     m_shaderDir = shaderDir;
+    m_vsync     = vsync;
 
     m_ctx.init(window, validation);
-    m_swapchain.init(m_ctx, window);
+    m_swapchain.init(m_ctx, window, vsync);
     m_renderPass.init(m_ctx, m_swapchain.imageFormat());
     m_swapchain.createFramebuffers(m_ctx, m_renderPass.handle());
     m_bufMgr.init(m_ctx);
@@ -161,7 +162,7 @@ void Renderer::endFrame() {
 
 void Renderer::onResize(GLFWwindow* window) {
     vkDeviceWaitIdle(m_ctx.device());
-    m_swapchain.recreate(m_ctx, window);
+    m_swapchain.recreate(m_ctx, window, m_vsync);
     m_swapchain.createFramebuffers(m_ctx, m_renderPass.handle());
     auto ext = m_swapchain.extent();
     m_postProcess.resize(m_ctx, ext.width, ext.height);

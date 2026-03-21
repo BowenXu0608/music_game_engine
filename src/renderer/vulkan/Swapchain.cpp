@@ -4,7 +4,8 @@
 #include <algorithm>
 #include <limits>
 
-void Swapchain::init(VulkanContext& ctx, GLFWwindow* window) {
+void Swapchain::init(VulkanContext& ctx, GLFWwindow* window, bool vsync) {
+    m_vsync = vsync;
     create(ctx, window);
     createImageViews(ctx);
 }
@@ -13,7 +14,8 @@ void Swapchain::shutdown(VulkanContext& ctx) {
     cleanup(ctx);
 }
 
-void Swapchain::recreate(VulkanContext& ctx, GLFWwindow* window) {
+void Swapchain::recreate(VulkanContext& ctx, GLFWwindow* window, bool vsync) {
+    m_vsync = vsync;
     // Handle minimization
     int w = 0, h = 0;
     glfwGetFramebufferSize(window, &w, &h);
@@ -44,7 +46,7 @@ void Swapchain::create(VulkanContext& ctx, GLFWwindow* window) {
     vkGetPhysicalDeviceSurfacePresentModesKHR(pd, surface, &modeCount, modes.data());
 
     auto surfFmt  = chooseSurfaceFormat(formats);
-    auto presMode = choosePresentMode(modes);
+    auto presMode = choosePresentMode(modes, m_vsync);
     m_extent      = chooseExtent(caps, window);
     m_imageFormat = surfFmt.format;
 
@@ -147,10 +149,11 @@ VkSurfaceFormatKHR Swapchain::chooseSurfaceFormat(const std::vector<VkSurfaceFor
     return formats[0];
 }
 
-VkPresentModeKHR Swapchain::choosePresentMode(const std::vector<VkPresentModeKHR>& modes) {
+VkPresentModeKHR Swapchain::choosePresentMode(const std::vector<VkPresentModeKHR>& modes, bool vsync) {
+    if (vsync) return VK_PRESENT_MODE_FIFO_KHR;  // FIFO is always supported, caps to display refresh
     for (auto m : modes)
         if (m == VK_PRESENT_MODE_MAILBOX_KHR) return m;
-    return VK_PRESENT_MODE_FIFO_KHR;
+    return VK_PRESENT_MODE_FIFO_KHR;  // fallback if MAILBOX not available
 }
 
 VkExtent2D Swapchain::chooseExtent(const VkSurfaceCapabilitiesKHR& caps, GLFWwindow* window) {

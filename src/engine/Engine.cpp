@@ -9,7 +9,7 @@
 #include <iostream>
 
 void Engine::init(uint32_t width, uint32_t height, const std::string& title,
-                  const std::string& shaderDir) {
+                  const std::string& shaderDir, bool vsync) {
     if (!glfwInit()) throw std::runtime_error("Failed to init GLFW");
 
     glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
@@ -21,9 +21,9 @@ void Engine::init(uint32_t width, uint32_t height, const std::string& title,
     glfwSetKeyCallback(m_window, keyCallback);
 
 #ifdef ENABLE_VALIDATION_LAYERS
-    m_renderer.init(m_window, shaderDir, true);
+    m_renderer.init(m_window, shaderDir, true, vsync);
 #else
-    m_renderer.init(m_window, shaderDir, false);
+    m_renderer.init(m_window, shaderDir, false, vsync);
 #endif
 
     m_clock.start();

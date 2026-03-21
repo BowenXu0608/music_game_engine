@@ -18,7 +18,8 @@
 
 class Renderer {
 public:
-    void init(GLFWwindow* window, const std::string& shaderDir, bool validation = false);
+    void init(GLFWwindow* window, const std::string& shaderDir,
+              bool validation = false, bool vsync = true);
     void shutdown();
 
     // Called at start of frame — acquires swapchain image
@@ -79,6 +80,7 @@ private:
     VkCommandBuffer m_currentCmd    = VK_NULL_HANDLE;
     uint32_t        m_imageIndex    = 0;
     bool            m_framebufferResized = false;
+    bool            m_vsync         = true;
     std::string     m_shaderDir;
     float           m_time = 0.f;
 };

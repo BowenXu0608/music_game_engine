@@ -7,9 +7,9 @@ class VulkanContext;
 
 class Swapchain {
 public:
-    void init(VulkanContext& ctx, GLFWwindow* window);
+    void init(VulkanContext& ctx, GLFWwindow* window, bool vsync = true);
     void shutdown(VulkanContext& ctx);
-    void recreate(VulkanContext& ctx, GLFWwindow* window);
+    void recreate(VulkanContext& ctx, GLFWwindow* window, bool vsync);
 
     VkSwapchainKHR           handle()       const { return m_swapchain; }
     VkFormat                 imageFormat()  const { return m_imageFormat; }
@@ -26,12 +26,13 @@ private:
     void cleanup(VulkanContext& ctx);
 
     VkSurfaceFormatKHR chooseSurfaceFormat(const std::vector<VkSurfaceFormatKHR>& formats);
-    VkPresentModeKHR   choosePresentMode(const std::vector<VkPresentModeKHR>& modes);
+    VkPresentModeKHR   choosePresentMode(const std::vector<VkPresentModeKHR>& modes, bool vsync);
     VkExtent2D         chooseExtent(const VkSurfaceCapabilitiesKHR& caps, GLFWwindow* window);
 
     VkSwapchainKHR           m_swapchain   = VK_NULL_HANDLE;
     VkFormat                 m_imageFormat = VK_FORMAT_UNDEFINED;
     VkExtent2D               m_extent      = {};
+    bool                     m_vsync       = true;
     std::vector<VkImage>     m_images;
     std::vector<VkImageView> m_imageViews;
     std::vector<VkFramebuffer> m_framebuffers;
