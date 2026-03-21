@@ -63,9 +63,9 @@ void BandoriRenderer::onRender(Renderer& renderer) {
     // Lane dividers converge to vanishing point — one edge line per boundary
     for (int i = 0; i <= LANE_COUNT; ++i) {
         float wx   = (i - LANE_COUNT * 0.5f) * LANE_SPACING;
-        glm::vec2 near = w2s({wx, 0.f, HIT_ZONE_Z}, m_perspVP, sw, sh);
-        glm::vec2 far  = w2s({wx, 0.f, APPROACH_Z}, m_perspVP, sw, sh);
-        renderer.lines().drawLine(near, far, 1.5f, {1.f, 1.f, 1.f, 0.2f});
+        glm::vec2 nearPt = w2s({wx, 0.f, HIT_ZONE_Z}, m_perspVP, sw, sh);
+        glm::vec2 farPt  = w2s({wx, 0.f, APPROACH_Z}, m_perspVP, sw, sh);
+        renderer.lines().drawLine(nearPt, farPt, 1.5f, {1.f, 1.f, 1.f, 0.2f});
     }
 
     // Hit zone line across all lanes
