@@ -83,7 +83,7 @@ Music_game/
 ### Design: Hybrid ECS + Scene Graph
 
 - **ECS** (`ECS.h`) for game logic and data — `Registry` + `ComponentPool<T>` (dense storage, sparse map)
-- **Scene graph** (`SceneNode.h`) only for spatial hierarchy — used by Phigros and Lanota
+- **Scene graph** (`SceneNode.h`) only for spatial hierarchy — used by Phigros only
 
 ### SceneNode / SceneGraph
 
@@ -206,12 +206,14 @@ struct ChartData {
 ## Mode-Specific Rendering
 
 ### BanG Dream (Bandori)
-- Camera: `makeOrtho(0, w, h, 0)` — top-left origin, Y down
-- 7 lanes, `laneWidth = w/7`, `laneStartX = laneWidth * 0.5`
-- `noteY = hitZoneY + (note.time - songTime) * 600`; `hitZoneY = h * 0.15`
+- **Two cameras**: `m_perspVP` (perspective, 52° FOV) for 3D→screen projection; `m_camera` (ortho 0..w, 0..h) for batchers
+- Camera eye `{0, 1.8, 3.5}`, target `{0, 0, -20}` — slightly elevated, looking down the highway
+- 7 lanes in world space: `worldX = (laneX - 3) * 0.5f`, lane dividers from `Z=0` to `Z=-55`
+- Note position: `noteZ = -(note.time - songTime) * 14` — Z=0 = hit zone (bottom of screen), Z=-55 = vanishing (top)
+- `w2s()` projects world `{x, 0, z}` → screen; `pxSize()` gives perspective-correct pixel width
 - Colors: tap=`{1,0.8,0.2}`, hold=`{0.2,0.8,1}`, flick=`{1,0.3,0.3}`
-- Hit burst: `|timeDiff| < 0.05s` → `emitBurst(pos, color, 16, 250f, 10f, 0.6f)`
-- Primitives: `QuadBatch` (notes), `LineBatch` (lane dividers + hit zone line)
+- Hit burst: `|timeDiff| < 0.05s` → `emitBurst(screenPos, color, 16, 250f, 10f, 0.6f)`
+- Primitives: `QuadBatch` (notes), `LineBatch` (lane dividers converging to VP + hit zone line)
 
 ### Cytus
 - Camera: `makeOrtho(0, w, h, 0)`
@@ -238,12 +240,14 @@ struct ChartData {
 - Primitives: `MeshRenderer` (arcs, ground, tap notes) only — no QuadBatch or LineBatch
 
 ### Lanota
-- Camera: `makeOrtho(-hw, hw, hh, -hh)` — centered
-- Concentric rings: `radius = 200 + idx * 80`, `rotationSpeed = 0.4 + idx * 0.15` rad/s
-- Ring node `setRotationZ(currentAngle)`, notes fixed at `{cos(angle)*radius, sin(angle)*radius, 0}` in local space
-- Approach: `approachRadius = radius * (1 - timeDiff/2.0)`, world pos recomputed with current ring angle
-- Ring drawn as 64-segment closed polyline
-- Primitives: `LineBatch` (rings), `QuadBatch` (notes: 32px dark + 24px yellow)
+- **Two cameras**: `m_perspVP` (perspective, 60° FOV) for 3D→screen projection; `m_camera` (ortho 0..w, 0..h) for batchers
+- Camera eye `{0, 0, 4}`, target `{0, 0, 0}` — straight down the tunnel axis
+- Concentric rings at Z=0 hit-plane: `radius = 1.8 + idx * 0.6` world units, `rotationSpeed = 0.4 + idx * 0.15` rad/s
+- No SceneGraph — ring angle accumulates as `currentAngle += speed * dt`; note angle = `rd->angle + ring.currentAngle`
+- Note position: `{cos(angle)*radius, sin(angle)*radius, -timeDiff * 14}` — far negative Z = tiny dot at screen centre; Z=0 = full size on ring
+- `buildRingPolyline()` projects each of 64 circle points at Z=0 via `w2s()` — perspective foreshortening included
+- Note pixel size: `NOTE_WORLD_R * m_proj11y * sh * 0.5 / clip.w` — shrinks naturally with distance
+- Primitives: `LineBatch` (rings), `QuadBatch` (notes: 1.3× dark halo + 1× yellow fill)
 
 ---
 
@@ -699,46 +703,62 @@ Takes explicit `frameIndex` (unlike QuadBatch which tracks internally). No index
 ## Step 12 — BandoriRenderer
 
 ### Overview
-7-lane vertical scroller. Notes fall from above, hit zone at 15% from top. Particle bursts on hit.
+7-lane perspective highway. Lane dividers converge to a vanishing point. Notes emerge from infinity at the top of the screen and approach the hit zone at the bottom. Particle bursts on hit.
 
 ### Files
 - `src/game/modes/BandoriRenderer.h/.cpp`
 
-### Layout constants
+### Two-camera strategy
 ```cpp
-BANDORI_LANES     = 7
-BANDORI_NOTE_SIZE = 60.f
-scrollSpeed       = 600.f   // pixels per second
-hitZoneY          = h * 0.15f
-laneWidth         = w / 7
-laneStartX        = laneWidth * 0.5f   // center of lane 0
+// Perspective VP — used only for w2s() projection, never passed to renderer.setCamera()
+Camera persp = Camera::makePerspective(52.f, aspect, 0.5f, 300.f);
+persp.lookAt({0.f, 1.8f, 3.5f}, {0.f, 0.f, -20.f});
+m_perspVP = persp.viewProjection();
+m_proj11y = std::abs(persp.projection()[1][1]);  // |1/tan(fov/2)| for pxSize
+
+// Ortho screen camera — used by all batchers
+m_camera = Camera::makeOrtho(0.f, w, h, 0.f);  // y=0 bottom, y=h top
+renderer.setCamera(m_camera);
 ```
 
-### Note Y formula
+### World-space constants
 ```cpp
-noteY = hitZoneY + (note.time - songTime) * scrollSpeed;
-// Cull if noteY < -NOTE_SIZE or noteY > h + NOTE_SIZE
+LANE_COUNT    = 7
+LANE_SPACING  = 0.50f   // world units between lane centres
+HIT_ZONE_Z    = 0.f     // near end of highway (bottom of screen)
+APPROACH_Z    = -55.f   // far end / vanishing (top of screen)
+SCROLL_SPEED  = 14.f    // world units / second
+NOTE_WORLD_W  = 0.40f   // note width in world units
 ```
 
-### Looping
+### Projection helpers
 ```cpp
-double loopDuration = maxNoteTime + 1.0;
-m_songTime = fmod(songTime, loopDuration);
-if (m_songTime < prevSongTime) m_hitNotes.clear();  // reset on loop
-```
+// w2s: world pos → screen (y=0 bottom, y=h top)
+// Vulkan-corrected perspective: ndcY=+1 → screen bottom (y=0), ndcY=-1 → screen top (y=h)
+glm::vec2 w2s(glm::vec3 pos, const glm::mat4& vp, float sw, float sh) {
+    glm::vec4 clip = vp * glm::vec4(pos, 1.f);
+    return { (clip.x/clip.w * 0.5 + 0.5) * sw,
+             (0.5 - clip.y/clip.w * 0.5) * sh };
+}
 
-### Hit effect
-```cpp
-if (timeDiff > -0.05 && timeDiff < 0.05 && !m_hitNotes.contains(note.id)) {
-    m_hitNotes.insert(note.id);
-    renderer.particles().emitBurst({x, hitZoneY}, color, 16, 250.f, 10.f, 0.6f);
+// pxSize: perspective-correct pixel size
+float pxSize(float worldSz, float clipW, float proj11y, float sh) {
+    return worldSz * proj11y * sh * 0.5f / clipW;
 }
 ```
 
+### Note position
+```cpp
+float noteZ  = -(note.time - songTime) * SCROLL_SPEED;
+float worldX = (laneX - (LANE_COUNT - 1) * 0.5f) * LANE_SPACING;
+// noteZ == 0 → hit zone (bottom); noteZ == -55 → vanishing point (top)
+```
+
 ### Render calls
-- Notes: `quads().drawQuad(pos, {60, 24}, 0, color, {0,0,1,1}, whiteView, whiteSampler, ctx, desc)`
-- Lane dividers: `lines().drawLine({x,0}, {x,h}, 1.5, {1,1,1,0.2})`
-- Hit zone: `lines().drawLine({0,hitZoneY}, {w,hitZoneY}, 2, {1,1,0,0.8})`
+- Lane dividers: `drawLine(w2s({wx,0,HIT_ZONE_Z}), w2s({wx,0,APPROACH_Z}), 1.5, {1,1,1,0.2})`
+- Hit zone: `drawLine(w2s({left,0,0}), w2s({right,0,0}), 2, {1,1,0,0.8})`
+- Notes: `drawQuad(screen, {sz, sz*0.4}, 0, color, ...)` where `sz = pxSize(0.40, clip.w, ...)`
+- Hit burst: `particles().emitBurst(screen, color, 16, 250, 10, 0.6)`
 
 ---
 
@@ -827,44 +847,68 @@ renderer.quads().drawQuad(wpos, {50, 18}, ls.rotation, color, {0,0,1,1},
 ## Step 15 — LanotaRenderer
 
 ### Overview
-Concentric rotating rings as scene nodes. Notes are children at fixed local radius positions, orbiting as the ring rotates.
+Tunnel perspective — camera looks straight down the ring axis. Notes emerge from a vanishing point at screen centre and grow outward to their ring positions, creating a radial approach effect. No SceneGraph.
 
 ### Files
 - `src/game/modes/LanotaRenderer.h/.cpp`
 
-### Ring setup
-```
-ringIndex 0: radius=200, rotationSpeed=0.40 rad/s
-ringIndex 1: radius=280, rotationSpeed=0.55 rad/s
-…
-radius = BASE_RADIUS(200) + idx * 80
-rotationSpeed = 0.4 + idx * 0.15
+### Two-camera strategy (same pattern as BandoriRenderer)
+```cpp
+Camera persp = Camera::makePerspective(60.f, aspect, 0.1f, 200.f);
+persp.lookAt({0.f, 0.f, 4.f}, {0.f, 0.f, 0.f});  // straight down tunnel
+m_perspVP = persp.viewProjection();
+m_proj11y = std::abs(persp.projection()[1][1]);
+
+m_camera = Camera::makeOrtho(0.f, w, h, 0.f);  // batchers
+renderer.setCamera(m_camera);
 ```
 
-### Note local position (set once at init)
+### World-space constants
 ```cpp
-noteNode->localTransform.position = {cos(angle)*radius, sin(angle)*radius, 0};
-```
-Ring node `setRotationZ(currentAngle)` each frame → world matrix carries the orbit.
-
-### Approach animation
-```cpp
-// Approach radius from center → ring radius as timeDiff decreases 2→0
-float t = 1.f - max(0, timeDiff / 2.0f);
-float approachRadius = ring.radius * t;
-wpos = {cos(angle + ring.currentAngle) * approachRadius,
-        sin(angle + ring.currentAngle) * approachRadius};
+BASE_RADIUS    = 1.8f   // innermost ring radius in world units
+RING_SPACING   = 0.6f   // radius increment per ring
+NOTE_WORLD_R   = 0.22f  // note visual radius (world units)
+SCROLL_SPEED_Z = 14.f   // world units / second along Z
+APPROACH_SECS  = 2.5f   // seconds of approach window
 ```
 
-### Ring outline
+### Ring setup (no SceneGraph)
 ```cpp
-// 64-segment closed polyline
-buildRingPolyline(radius, pts);  // pts[65] with pts[64]==pts[0]
-renderer.lines().drawPolyline(pts, 2.f, {0.5,0.7,1,0.5}, /*closed=*/true);
+ring.radius        = BASE_RADIUS + idx * RING_SPACING;
+ring.rotationSpeed = 0.4f + idx * 0.15f;   // rad/s
+ring.currentAngle += ring.rotationSpeed * dt;  // updated in onUpdate
+```
+
+### Note world position
+```cpp
+float angle = rd->angle + ring.currentAngle;
+float noteZ = -timeDiff * SCROLL_SPEED_Z;  // large -Z = tiny dot; Z=0 = on ring
+glm::vec3 notePos = { cos(angle)*ring.radius, sin(angle)*ring.radius, noteZ };
+```
+- `timeDiff = 2.5s` → noteZ = -35 → clip.w ≈ 39 → tiny dot near screen centre
+- `timeDiff = 0` → noteZ = 0 → clip.w ≈ 4 → full size on ring circle
+
+### Perspective-correct note size
+```cpp
+float sz = NOTE_WORLD_R * m_proj11y * sh * 0.5f / clip.w;
+// At Z=0 (clip.w≈4, FOV60 720p): sz ≈ 34 px
+// At Z=-35 (clip.w≈39):          sz ≈  3 px  (approaching dot)
+```
+
+### Ring polyline (projected 3D circle)
+```cpp
+void buildRingPolyline(float radius, vector<vec2>& out) const {
+    for (int i = 0; i <= 64; ++i) {
+        float a = TWO_PI * i / 64;
+        out[i] = w2s({cos(a)*radius, sin(a)*radius, 0.f}, m_perspVP, sw, sh);
+    }
+}
+// Ring at Z=0 projects with perspective foreshortening — correct for the camera angle
+renderer.lines().drawPolyline(pts, 2.f, {0.5,0.7,1,0.5}, true);
 ```
 
 ### Note render
-Two overlaid quads: `{0,0,0,alpha*0.5}` 32×32 + `color` 24×24.
+Two quads per note: dark halo `(sz*1.3)` + yellow fill `(sz)`, both perspective-sized.
 
 ---
 
@@ -1065,7 +1109,7 @@ Audio and chart must be loaded/set before `engine.run()` for perfectly synchroni
 
 | File | Why critical |
 |---|---|
-| `src/core/SceneNode.h` | Transform hierarchy — Phigros and Lanota depend on this |
+| `src/core/SceneNode.h` | Transform hierarchy — Phigros depends on this |
 | `src/game/modes/GameModeRenderer.h` | Plugin interface — boundary between engine and game logic |
 | `src/game/chart/ChartTypes.h` | Unified note format — all loaders and renderers depend on this |
 | `src/renderer/Camera.h` | Ortho/perspective abstraction shared by all modes |
