@@ -84,6 +84,16 @@ if(GLSLC)
 
     add_custom_target(Shaders ALL DEPENDS ${SPIRV_OUTPUTS})
     add_dependencies(MusicGameEngine Shaders)
+
+    # Copy compiled SPVs next to the executable so "shaders/" relative path works
+    add_custom_command(TARGET MusicGameEngine POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E make_directory
+            $<TARGET_FILE_DIR:MusicGameEngine>/shaders
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            ${SPIRV_OUTPUTS}
+            $<TARGET_FILE_DIR:MusicGameEngine>/shaders
+        COMMENT "Copying SPV shaders to output directory"
+    )
 else()
     message(WARNING "glslc not found — shaders will not be compiled automatically")
 endif()

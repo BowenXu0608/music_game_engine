@@ -165,13 +165,26 @@ void PostProcess::createSceneTarget(VulkanContext& ctx, uint32_t w, uint32_t h, 
     sub.colorAttachmentCount = 1;
     sub.pColorAttachments    = &ref;
 
-    VkSubpassDependency dep{};
-    dep.srcSubpass    = VK_SUBPASS_EXTERNAL;
-    dep.dstSubpass    = 0;
-    dep.srcStageMask  = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-    dep.dstStageMask  = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-    dep.srcAccessMask = 0;
-    dep.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    // EXTERNAL→0: wait for prior frame's composite to finish before clearing+writing
+    VkSubpassDependency dep0{};
+    dep0.srcSubpass    = VK_SUBPASS_EXTERNAL;
+    dep0.dstSubpass    = 0;
+    dep0.srcStageMask  = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    dep0.dstStageMask  = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    dep0.srcAccessMask = 0;
+    dep0.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+
+    // 0→EXTERNAL: make scene writes visible to bloom compute + composite fragment
+    VkSubpassDependency dep1{};
+    dep1.srcSubpass    = 0;
+    dep1.dstSubpass    = VK_SUBPASS_EXTERNAL;
+    dep1.srcStageMask  = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    dep1.dstStageMask  = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT |
+                         VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+    dep1.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    dep1.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+
+    std::array<VkSubpassDependency, 2> deps{dep0, dep1};
 
     VkRenderPassCreateInfo rpci{};
     rpci.sType           = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
@@ -179,8 +192,8 @@ void PostProcess::createSceneTarget(VulkanContext& ctx, uint32_t w, uint32_t h, 
     rpci.pAttachments    = &att;
     rpci.subpassCount    = 1;
     rpci.pSubpasses      = &sub;
-    rpci.dependencyCount = 1;
-    rpci.pDependencies   = &dep;
+    rpci.dependencyCount = static_cast<uint32_t>(deps.size());
+    rpci.pDependencies   = deps.data();
     vkCreateRenderPass(ctx.device(), &rpci, nullptr, &m_sceneRenderPass);
 
     VkFramebufferCreateInfo fbci{};

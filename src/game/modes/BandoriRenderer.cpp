@@ -36,7 +36,7 @@ void BandoriRenderer::onResize(uint32_t w, uint32_t h) {
     float aspect = h > 0 ? static_cast<float>(w) / h : 1.f;
     Camera persp = Camera::makePerspective(FOV_Y_DEG, aspect, 0.5f, 300.f);
     // Camera sits slightly above and behind the hit zone, angled down the highway.
-    persp.lookAt({0.f, 1.8f, 3.5f}, {0.f, 0.f, -20.f});
+    persp.lookAt({0.f, 1.8f, 8.0f}, {0.f, 0.f, -20.f});
     m_perspVP  = persp.viewProjection();
     m_proj11y  = std::abs(persp.projection()[1][1]);
 
@@ -88,7 +88,7 @@ void BandoriRenderer::onRender(Renderer& renderer) {
         float timeDiff = static_cast<float>(note.time - m_songTime);
         float noteZ    = -timeDiff * SCROLL_SPEED;
         // Only render notes on the visible highway section
-        if (noteZ > 1.f || noteZ < APPROACH_Z - 2.f) continue;
+        if (noteZ > 2.f || noteZ < APPROACH_Z - 2.f) continue;
 
         float worldX = (laneX - (LANE_COUNT - 1) * 0.5f) * LANE_SPACING;
         glm::vec3 worldPos{worldX, 0.f, noteZ};
