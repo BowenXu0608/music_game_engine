@@ -27,6 +27,9 @@ public:
     // Called at end of frame — submits and presents
     void endFrame();
 
+    // Render ImGui (call before endFrame, after game mode render)
+    void renderImGui(VkCommandBuffer cmd);
+
     // Resize — call from GLFW framebuffer size callback
     void onResize(GLFWwindow* window);
 
@@ -52,6 +55,9 @@ public:
 
     uint32_t width()  const { return m_swapchain.extent().width; }
     uint32_t height() const { return m_swapchain.extent().height; }
+
+    VkRenderPass swapchainRenderPass() const { return m_renderPass.handle(); }
+    VkImageView sceneImageView() const { return m_postProcess.sceneView(); }
 
 private:
     void recordFrame(uint32_t imageIndex);

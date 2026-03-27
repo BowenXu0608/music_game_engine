@@ -15,6 +15,7 @@ set(GLFW_LIBRARY      "${TP}/glfw/lib-vc2022/glfw3.lib")
 set(GLM_INCLUDE_DIR   "${TP}/glm_extracted")
 set(VMA_INCLUDE_DIR   "${TP}/vma")
 set(STB_INCLUDE_DIR   "${TP}/stb")
+set(IMGUI_DIR         "${TP}/imgui")
 
 # ── Sources ──────────────────────────────────────────────────────────────────
 file(GLOB_RECURSE SOURCES
@@ -24,10 +25,22 @@ file(GLOB_RECURSE SOURCES
     src/game/modes/*.cpp
     src/game/chart/*.cpp
     src/engine/*.cpp
+    src/ui/*.cpp
     src/main.cpp
 )
 
-add_executable(MusicGameEngine ${SOURCES})
+# ImGui sources
+set(IMGUI_SOURCES
+    ${IMGUI_DIR}/imgui.cpp
+    ${IMGUI_DIR}/imgui_demo.cpp
+    ${IMGUI_DIR}/imgui_draw.cpp
+    ${IMGUI_DIR}/imgui_tables.cpp
+    ${IMGUI_DIR}/imgui_widgets.cpp
+    ${IMGUI_DIR}/backends/imgui_impl_glfw.cpp
+    ${IMGUI_DIR}/backends/imgui_impl_vulkan.cpp
+)
+
+add_executable(MusicGameEngine ${SOURCES} ${IMGUI_SOURCES})
 
 target_include_directories(MusicGameEngine PRIVATE
     src
@@ -36,6 +49,8 @@ target_include_directories(MusicGameEngine PRIVATE
     ${GLM_INCLUDE_DIR}
     ${VMA_INCLUDE_DIR}
     ${STB_INCLUDE_DIR}
+    ${IMGUI_DIR}
+    ${IMGUI_DIR}/backends
 )
 
 target_link_libraries(MusicGameEngine PRIVATE

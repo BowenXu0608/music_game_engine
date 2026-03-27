@@ -3,6 +3,8 @@
 #include "game/modes/GameModeRenderer.h"
 #include "engine/GameClock.h"
 #include "engine/AudioEngine.h"
+#include "ui/ImGuiLayer.h"
+#include "ui/SceneViewer.h"
 #include <GLFW/glfw3.h>
 #include <memory>
 #include <string>
@@ -30,6 +32,8 @@ private:
 
     GLFWwindow*                        m_window = nullptr;
     Renderer                           m_renderer;
+    ImGuiLayer                         m_imgui;
+    SceneViewer                        m_sceneViewer;
     GameClock                          m_clock;
     AudioEngine                        m_audio;
     std::unique_ptr<GameModeRenderer>  m_activeMode;

@@ -28,12 +28,14 @@ void Engine::init(uint32_t width, uint32_t height, const std::string& title,
 
     m_clock.start();
     m_audio.init();
+    m_imgui.init(m_window, m_renderer.context(), m_renderer.swapchainRenderPass());
     m_running = true;
 }
 
 void Engine::shutdown() {
     if (m_activeMode) m_activeMode->onShutdown(m_renderer);
     m_audio.shutdown();
+    m_imgui.shutdown();
     m_renderer.shutdown();
     glfwDestroyWindow(m_window);
     glfwTerminate();
@@ -82,6 +84,12 @@ void Engine::render() {
 
     if (m_activeMode)
         m_activeMode->onRender(m_renderer);
+
+    // Render ImGui UI
+    m_imgui.beginFrame();
+    m_sceneViewer.render(*this);
+    m_imgui.endFrame();
+    m_imgui.render(m_renderer.currentCmd());
 
     m_renderer.endFrame();
 }

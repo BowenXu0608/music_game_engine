@@ -121,9 +121,12 @@ void Renderer::endFrame() {
                        VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(float),
                        &m_postProcess.bloomStrength);
     vkCmdDraw(m_currentCmd, 3, 1, 0, 0);
-    m_renderPass.end(m_currentCmd);
 
+    // ImGui already rendered here, now close render pass
+    m_renderPass.end(m_currentCmd);
     m_cmdMgr.end(frame);
+
+    // Submit
 
     // Submit
     VkSemaphore waitSems[]   = { m_sync.imageAvailable(frame) };
