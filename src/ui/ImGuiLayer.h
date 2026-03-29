@@ -14,6 +14,8 @@ public:
     void endFrame();
     void render(VkCommandBuffer cmd);
 
+    VkDescriptorSet addTexture(VkImageView view, VkSampler sampler);
+
 private:
     VkDescriptorPool m_descriptorPool = VK_NULL_HANDLE;
     VkDevice m_device = VK_NULL_HANDLE;

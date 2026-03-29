@@ -9,13 +9,13 @@ void ImGuiLayer::init(GLFWwindow* window, VulkanContext& ctx, VkRenderPass rende
     m_device = ctx.device();
 
     VkDescriptorPoolSize pool_sizes[] = {
-        { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1 }
+        { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 10 }
     };
 
     VkDescriptorPoolCreateInfo pool_info = {};
     pool_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
     pool_info.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
-    pool_info.maxSets = 1;
+    pool_info.maxSets = 10;
     pool_info.poolSizeCount = 1;
     pool_info.pPoolSizes = pool_sizes;
 
@@ -72,4 +72,8 @@ void ImGuiLayer::endFrame() {
 
 void ImGuiLayer::render(VkCommandBuffer cmd) {
     ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), cmd);
+}
+
+VkDescriptorSet ImGuiLayer::addTexture(VkImageView view, VkSampler sampler) {
+    return ImGui_ImplVulkan_AddTexture(sampler, view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 }

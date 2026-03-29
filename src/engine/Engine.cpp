@@ -29,6 +29,14 @@ void Engine::init(uint32_t width, uint32_t height, const std::string& title,
     m_clock.start();
     m_audio.init();
     m_imgui.init(m_window, m_renderer.context(), m_renderer.swapchainRenderPass());
+
+    // Create ImGui descriptor for scene texture
+    VkDescriptorSet sceneTexSet = m_imgui.addTexture(
+        m_renderer.sceneImageView(),
+        m_renderer.postProcess().bloomSampler()
+    );
+    m_sceneViewer.setSceneTexture(sceneTexSet);
+
     m_running = true;
 }
 
@@ -72,7 +80,9 @@ void Engine::update(float dt) {
         m_clock.setSongTime(m_clock.songTime() + dt);
 
     m_renderer.particles().update(dt);
-    if (m_activeMode)
+
+    // Only update game if playing
+    if (m_activeMode && m_sceneViewer.isPlaying())
         m_activeMode->onUpdate(dt, m_clock.songTime());
 }
 
@@ -82,16 +92,21 @@ void Engine::render() {
         return;
     }
 
-    if (m_activeMode)
+    // Only render game if playing
+    if (m_activeMode && m_sceneViewer.isPlaying()) {
         m_activeMode->onRender(m_renderer);
+    }
+    // If stopped, scene buffer is already cleared by beginFrame
 
-    // Render ImGui UI
+    m_renderer.endFrame();
+
+    // Render ImGui UI after composite (no bloom on UI)
     m_imgui.beginFrame();
     m_sceneViewer.render(*this);
     m_imgui.endFrame();
     m_imgui.render(m_renderer.currentCmd());
 
-    m_renderer.endFrame();
+    m_renderer.finishFrame();
 }
 
 void Engine::loadAudio(const std::string& path) {

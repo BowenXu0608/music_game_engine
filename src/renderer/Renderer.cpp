@@ -106,27 +106,27 @@ void Renderer::endFrame() {
     m_postProcess.render(m_currentCmd, m_ctx,
                          m_postProcess.sceneView(), VK_NULL_HANDLE);
 
-    // Composite onto swapchain
-    m_renderPass.begin(m_currentCmd,
-                       m_swapchain.framebuffer(m_imageIndex),
-                       m_swapchain.extent());
+    // Begin swapchain render pass with clear (no composite - ImGui will show scene texture)
+    VkClearValue clearVal{};
+    clearVal.color = {{0.1f, 0.1f, 0.1f, 1.f}};
+    VkRenderPassBeginInfo rpbi{};
+    rpbi.sType           = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+    rpbi.renderPass      = m_renderPass.handle();
+    rpbi.framebuffer     = m_swapchain.framebuffer(m_imageIndex);
+    rpbi.renderArea      = {{0,0}, m_swapchain.extent()};
+    rpbi.clearValueCount = 1;
+    rpbi.pClearValues    = &clearVal;
+    vkCmdBeginRenderPass(m_currentCmd, &rpbi, VK_SUBPASS_CONTENTS_INLINE);
     setViewportScissor(m_currentCmd);
-    vkCmdBindPipeline(m_currentCmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                      m_postProcess.compositePipeline());
-    VkDescriptorSet compSet = m_postProcess.compositeSet();
-    vkCmdBindDescriptorSets(m_currentCmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                            m_postProcess.compositePipelineLayout(),
-                            0, 1, &compSet, 0, nullptr);
-    vkCmdPushConstants(m_currentCmd, m_postProcess.compositePipelineLayout(),
-                       VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(float),
-                       &m_postProcess.bloomStrength);
-    vkCmdDraw(m_currentCmd, 3, 1, 0, 0);
 
-    // ImGui already rendered here, now close render pass
+    // Swapchain render pass stays open for ImGui (no composite drawn)
+}
+
+void Renderer::finishFrame() {
+    int frame = m_sync.currentFrame();
+
     m_renderPass.end(m_currentCmd);
     m_cmdMgr.end(frame);
-
-    // Submit
 
     // Submit
     VkSemaphore waitSems[]   = { m_sync.imageAvailable(frame) };
@@ -160,7 +160,7 @@ void Renderer::endFrame() {
         m_framebufferResized = true;
 
     m_sync.advance();
-    m_time += 0.016f; // updated properly by Engine
+    m_time += 0.016f;
 }
 
 void Renderer::onResize(GLFWwindow* window) {

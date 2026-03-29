@@ -27,8 +27,8 @@ public:
     // Called at end of frame — submits and presents
     void endFrame();
 
-    // Render ImGui (call before endFrame, after game mode render)
-    void renderImGui(VkCommandBuffer cmd);
+    // Close swapchain render pass and submit (call after ImGui render)
+    void finishFrame();
 
     // Resize — call from GLFW framebuffer size callback
     void onResize(GLFWwindow* window);

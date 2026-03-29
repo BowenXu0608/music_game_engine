@@ -112,11 +112,11 @@ All pipelines use dynamic viewport/scissor (no recreation on resize).
 ### Swapchain Render Pass
 - Created by `RenderPass::create()`
 - Color attachment: B8G8R8A8_SRGB, `finalLayout = PRESENT_SRC_KHR`
-- Used for composite-to-screen pass only
+- Used for ImGui UI rendering (Unity-style editor)
 
 ---
 
-## Frame Loop
+## Frame Loop (Unity-Style Editor)
 
 ```cpp
 // Renderer::beginFrame()
@@ -124,23 +124,29 @@ All pipelines use dynamic viewport/scissor (no recreation on resize).
 2. vkAcquireNextImageKHR → imageIndex
 3. vkResetFences(inFlight[frame])
 4. Begin command buffer
-5. Begin scene render pass
+5. Begin scene render pass (offscreen RGBA16F)
 
-// Game mode renders here
-gameMode->onRender(renderer);
+// Game mode renders here (only if playing)
+if (playing) gameMode->onRender(renderer);
 
 // Renderer::endFrame()
 6. Update FrameUBO for all batchers
 7. Flush: quads → lines → meshes → particles
 8. End scene render pass
 9. PostProcess bloom compute passes
-10. Begin swapchain render pass
-11. Composite fullscreen triangle
+10. Begin swapchain render pass (clear to dark gray, no composite)
+
+// ImGui renders here (Engine::render())
+11. ImGui displays scene texture in viewport + UI panels
+
+// Renderer::finishFrame()
 12. End swapchain render pass
 13. Submit (wait imageAvailable, signal renderFinished + inFlight)
 14. Present (wait renderFinished)
 15. Advance frame counter
 ```
+
+**Key difference from traditional flow**: Scene is NOT composited fullscreen. Instead, ImGui displays the scene texture inside the Scene window viewport, allowing for a Unity-style editor interface.
 
 ---
 

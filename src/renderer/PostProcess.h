@@ -44,7 +44,7 @@ public:
     VkPipeline      compositePipeline() const { return m_compositePipeline; }
     VkPipelineLayout compositePipelineLayout() const { return m_compositePipelineLayout; }
 
-    float bloomStrength = 0.8f;
+    float bloomStrength = 0.2f;
 
 private:
     void createSceneTarget(VulkanContext& ctx, uint32_t w, uint32_t h, VkFormat fmt);
