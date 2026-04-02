@@ -1,0 +1,39 @@
+{
+  "title": "Demo Song",
+  "artist": "Test Artist",
+  "bpm": 120,
+  "offset": 0.0,
+  "notes": [
+    {
+      "type": "Single",
+      "lane": 3,
+      "time": 1.0
+    },
+    {
+      "type": "Single",
+      "lane": 4,
+      "time": 1.5
+    },
+    {
+      "type": "Long",
+      "lane": 2,
+      "time": 2.0,
+      "endTime": 3.0
+    },
+    {
+      "type": "Flick",
+      "lane": 5,
+      "time": 3.5
+    },
+    {
+      "type": "Single",
+      "lane": 1,
+      "time": 4.0
+    },
+    {
+      "type": "Single",
+      "lane": 6,
+      "time": 4.5
+    }
+  ]
+}

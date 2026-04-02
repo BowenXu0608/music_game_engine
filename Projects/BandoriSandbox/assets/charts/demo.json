@@ -1,0 +1,14 @@
+{
+  "title": "Demo Song",
+  "artist": "Test Artist",
+  "offset": 0.0,
+  "notes": [
+    {"id": 1, "time": 2.0, "type": "tap", "data": {"laneX": 0}},
+    {"id": 2, "time": 2.5, "type": "tap", "data": {"laneX": 1}},
+    {"id": 3, "time": 3.0, "type": "tap", "data": {"laneX": 2}},
+    {"id": 4, "time": 3.5, "type": "tap", "data": {"laneX": 3}},
+    {"id": 5, "time": 4.0, "type": "tap", "data": {"laneX": 4}},
+    {"id": 6, "time": 4.5, "type": "tap", "data": {"laneX": 5}},
+    {"id": 7, "time": 5.0, "type": "tap", "data": {"laneX": 6}}
+  ]
+}

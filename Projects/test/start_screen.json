@@ -1,0 +1,44 @@
+{
+  "background": {
+    "file": "",
+    "type": "none"
+  },
+  "logo": {
+    "bold": false,
+    "color": [
+      1.0,
+      1.0,
+      1.0,
+      1.0
+    ],
+    "fontSize": 48.0,
+    "glow": false,
+    "glowColor": [
+      1.0,
+      0.800000011920929,
+      0.20000000298023224,
+      0.800000011920929
+    ],
+    "glowRadius": 8.0,
+    "imageFile": "",
+    "italic": false,
+    "position": {
+      "x": 0.5,
+      "y": 0.30000001192092896
+    },
+    "scale": 1.0,
+    "text": "test",
+    "type": "text"
+  },
+  "tapText": "Tap to Start",
+  "tapTextPosition": {
+    "x": 0.5,
+    "y": 0.800000011920929
+  },
+  "tapTextSize": 24,
+  "transition": {
+    "customScript": "",
+    "duration": 0.5,
+    "effect": "fade"
+  }
+}

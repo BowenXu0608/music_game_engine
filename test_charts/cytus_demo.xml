@@ -1,0 +1,8 @@
+<?xml version="1.0"?>
+<chart>
+  <note time="1.0" x="0.3" y="0.5" type="0"/>
+  <note time="1.5" x="0.5" y="0.5" type="0"/>
+  <note time="2.0" x="0.7" y="0.5" type="0"/>
+  <note time="2.5" x="0.4" y="0.6" type="1" duration="1.0"/>
+  <note time="4.0" x="0.6" y="0.4" type="0"/>
+</chart>

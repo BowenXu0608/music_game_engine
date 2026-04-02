@@ -1,0 +1,16 @@
+{
+  "name": "BandoriSandbox",
+  "version": "1.0.0",
+  "engineVersion": "1.0.0",
+  "window": {
+    "width": 1280,
+    "height": 720,
+    "title": "Bandori Sandbox"
+  },
+  "paths": {
+    "charts": "assets/charts",
+    "audio": "assets/audio",
+    "shaders": "../../build/shaders"
+  },
+  "defaultChart": "assets/charts/demo.json"
+}

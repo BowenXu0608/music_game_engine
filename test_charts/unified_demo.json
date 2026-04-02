@@ -1,0 +1,58 @@
+{
+  "version": "1.0",
+  "metadata": {
+    "title": "Demo Song",
+    "artist": "Test Artist",
+    "charter": "System",
+    "difficulty": "Easy",
+    "level": 5
+  },
+  "audio": {
+    "file": "demo.ogg",
+    "offset": 0.0
+  },
+  "timing": {
+    "bpm": 120.0
+  },
+  "gameMode": "bandori",
+  "notes": [
+    {
+      "time": 1.0,
+      "type": "tap",
+      "lane": 3
+    },
+    {
+      "time": 1.5,
+      "type": "tap",
+      "lane": 4
+    },
+    {
+      "time": 2.0,
+      "type": "hold",
+      "lane": 2,
+      "duration": 1.0
+    },
+    {
+      "time": 3.5,
+      "type": "flick",
+      "lane": 5,
+      "direction": 1
+    },
+    {
+      "time": 4.0,
+      "type": "tap",
+      "lane": 1
+    },
+    {
+      "time": 4.5,
+      "type": "tap",
+      "lane": 6
+    },
+    {
+      "time": 5.0,
+      "type": "hold",
+      "lane": 3,
+      "duration": 0.5
+    }
+  ]
+}

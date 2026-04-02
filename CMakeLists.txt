@@ -8,7 +8,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 find_package(Vulkan REQUIRED)
 
 # ── Third-party paths ────────────────────────────────────────────────────────
-set(TP ${CMAKE_SOURCE_DIR}/third_party)
+set(TP ${CMAKE_CURRENT_SOURCE_DIR}/third_party)
 
 set(GLFW_INCLUDE_DIR  "${TP}/glfw/include")
 set(GLFW_LIBRARY      "${TP}/glfw/lib-vc2022/glfw3.lib")
@@ -18,15 +18,16 @@ set(STB_INCLUDE_DIR   "${TP}/stb")
 set(IMGUI_DIR         "${TP}/imgui")
 
 # ── Sources ──────────────────────────────────────────────────────────────────
-file(GLOB_RECURSE SOURCES
-    src/core/*.cpp
-    src/renderer/*.cpp
-    src/renderer/vulkan/*.cpp
-    src/game/modes/*.cpp
-    src/game/chart/*.cpp
-    src/engine/*.cpp
-    src/ui/*.cpp
-    src/main.cpp
+file(GLOB_RECURSE ENGINE_SOURCES
+    engine/src/core/*.cpp
+    engine/src/renderer/*.cpp
+    engine/src/renderer/vulkan/*.cpp
+    engine/src/game/modes/*.cpp
+    engine/src/game/chart/*.cpp
+    engine/src/gameplay/*.cpp
+    engine/src/engine/*.cpp
+    engine/src/ui/*.cpp
+    engine/src/input/*.cpp
 )
 
 # ImGui sources
@@ -40,10 +41,11 @@ set(IMGUI_SOURCES
     ${IMGUI_DIR}/backends/imgui_impl_vulkan.cpp
 )
 
-add_executable(MusicGameEngine ${SOURCES} ${IMGUI_SOURCES})
+add_library(MusicGameEngine STATIC ${ENGINE_SOURCES} ${IMGUI_SOURCES})
 
-target_include_directories(MusicGameEngine PRIVATE
-    src
+target_include_directories(MusicGameEngine PUBLIC
+    engine/include
+    engine/src
     ${Vulkan_INCLUDE_DIRS}
     ${GLFW_INCLUDE_DIR}
     ${GLM_INCLUDE_DIR}
@@ -53,13 +55,13 @@ target_include_directories(MusicGameEngine PRIVATE
     ${IMGUI_DIR}/backends
 )
 
-target_link_libraries(MusicGameEngine PRIVATE
+target_link_libraries(MusicGameEngine PUBLIC
     ${Vulkan_LIBRARIES}
     ${GLFW_LIBRARY}
 )
 
 # ── Windows defines ──────────────────────────────────────────────────────────
-target_compile_definitions(MusicGameEngine PRIVATE
+target_compile_definitions(MusicGameEngine PUBLIC
     NOMINMAX
     WIN32_LEAN_AND_MEAN
     VK_USE_PLATFORM_WIN32_KHR
@@ -73,8 +75,8 @@ find_program(GLSLC glslc HINTS
 )
 
 if(GLSLC)
-    set(SHADER_DIR    ${CMAKE_SOURCE_DIR}/shaders)
-    set(SHADER_OUT    ${CMAKE_BINARY_DIR}/shaders)
+    set(SHADER_DIR    ${CMAKE_CURRENT_SOURCE_DIR}/shaders)
+    set(SHADER_OUT    ${CMAKE_CURRENT_BINARY_DIR}/shaders)
     file(MAKE_DIRECTORY ${SHADER_OUT})
 
     set(SHADER_SOURCES
@@ -99,16 +101,11 @@ if(GLSLC)
 
     add_custom_target(Shaders ALL DEPENDS ${SPIRV_OUTPUTS})
     add_dependencies(MusicGameEngine Shaders)
-
-    # Copy compiled SPVs next to the executable so "shaders/" relative path works
-    add_custom_command(TARGET MusicGameEngine POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E make_directory
-            $<TARGET_FILE_DIR:MusicGameEngine>/shaders
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            ${SPIRV_OUTPUTS}
-            $<TARGET_FILE_DIR:MusicGameEngine>/shaders
-        COMMENT "Copying SPV shaders to output directory"
-    )
 else()
     message(WARNING "glslc not found — shaders will not be compiled automatically")
 endif()
+
+# Test executable
+add_executable(MusicGameEngineTest engine/src/main.cpp)
+target_link_libraries(MusicGameEngineTest PRIVATE MusicGameEngine)
+

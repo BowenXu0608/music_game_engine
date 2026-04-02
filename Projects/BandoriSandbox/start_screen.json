@@ -1,0 +1,9 @@
+{
+  "background": "",
+  "logo": "Play",
+  "logoPosition": {"x": 0.5, "y": 0.3},
+  "logoScale": 1,
+  "tapText": "Tap to Start",
+  "tapTextPosition": {"x": 0.5, "y": 0.8},
+  "tapTextSize": 24
+}
