@@ -4,7 +4,7 @@
 #include <cmath>
 #include <algorithm>
 
-void ArcaeaRenderer::onInit(Renderer& renderer, const ChartData& chart) {
+void ArcaeaRenderer::onInit(Renderer& renderer, const ChartData& chart, const GameModeConfig*) {
     for (auto& note : chart.notes) {
         if (note.type == NoteType::Arc) {
             ArcMesh am{};
@@ -12,7 +12,7 @@ void ArcaeaRenderer::onInit(Renderer& renderer, const ChartData& chart) {
             am.startTime = note.time;
             am.mesh      = buildArcMesh(renderer, am.data);
             m_arcs.push_back(std::move(am));
-        } else if (note.type == NoteType::Tap) {
+        } else if (note.type == NoteType::Tap || note.type == NoteType::Flick) {
             m_tapNotes.push_back(note);
         }
     }
@@ -130,13 +130,18 @@ void ArcaeaRenderer::onRender(Renderer& renderer) {
     for (auto& note : m_tapNotes) {
         float z = static_cast<float>(note.time - m_songTime) * SCROLL_SPEED;
         if (z < -2.f || z > 30.f) continue;
-        auto* tap = std::get_if<TapData>(&note.data);
-        if (!tap) continue;
+        float laneX = 0.f;
+        if (auto* tap = std::get_if<TapData>(&note.data))     laneX = tap->laneX;
+        else if (auto* fl = std::get_if<FlickData>(&note.data)) laneX = fl->laneX;
+        else continue;
 
         // Map laneX (0-5) to world X (-2.5 to 2.5)
-        float wx = (tap->laneX / 4.f - 0.5f) * 4.f;
+        float wx = (laneX / 4.f - 0.5f) * 4.f;
         glm::mat4 model = glm::translate(glm::mat4(1.f), {wx, 0.f, -z});
-        renderer.meshes().drawMesh(m_tapMesh, model, {1,1,1,1});
+        glm::vec4 tint = (note.type == NoteType::Flick)
+            ? glm::vec4{1.f, 0.35f, 0.35f, 1.f}
+            : glm::vec4{1.f, 1.f,   1.f,   1.f};
+        renderer.meshes().drawMesh(m_tapMesh, model, tint);
     }
 
     // Arc ribbons

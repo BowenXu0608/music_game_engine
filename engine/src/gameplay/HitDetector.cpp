@@ -8,15 +8,30 @@ void HitDetector::init(const ChartData& chart) {
     std::sort(m_activeNotes.begin(), m_activeNotes.end(),
               [](const NoteEvent& a, const NoteEvent& b) { return a.time < b.time; });
     m_nextNoteIndex = 0;
+    m_activeHolds.clear();
 }
 
-void HitDetector::update(double songTime) {
-    // Remove notes that passed without being hit (Miss detection)
-    m_activeNotes.erase(
-        std::remove_if(m_activeNotes.begin(), m_activeNotes.end(),
-            [songTime](const NoteEvent& note) { return note.time < songTime - 0.1; }),
-        m_activeNotes.end()
-    );
+std::vector<MissedNote> HitDetector::update(double songTime) {
+    std::vector<MissedNote> missed;
+
+    auto it = std::remove_if(m_activeNotes.begin(), m_activeNotes.end(),
+        [songTime, &missed](const NoteEvent& note) {
+            if (note.time < songTime - 0.1) {
+                MissedNote m;
+                m.noteId = note.id;
+                m.noteType = note.type;
+                m.lane = -1;
+                if (auto* tap = std::get_if<TapData>(&note.data))        m.lane = (int)tap->laneX;
+                else if (auto* hold = std::get_if<HoldData>(&note.data)) m.lane = (int)hold->laneX;
+                else if (auto* flick = std::get_if<FlickData>(&note.data)) m.lane = (int)flick->laneX;
+                missed.push_back(m);
+                return true;
+            }
+            return false;
+        });
+    m_activeNotes.erase(it, m_activeNotes.end());
+
+    return missed;
 }
 
 std::optional<HitResult> HitDetector::checkHit(int lane, double songTime) {
@@ -28,6 +43,8 @@ std::optional<HitResult> HitDetector::checkHit(int lane, double songTime) {
                 noteLane = static_cast<int>(std::get<TapData>(it->data).laneX);
             } else if (std::holds_alternative<HoldData>(it->data)) {
                 noteLane = static_cast<int>(std::get<HoldData>(it->data).laneX);
+            } else if (std::holds_alternative<FlickData>(it->data)) {
+                noteLane = static_cast<int>(std::get<FlickData>(it->data).laneX);
             }
 
             if (noteLane == lane) {

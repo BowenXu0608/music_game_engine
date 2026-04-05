@@ -1,0 +1,271 @@
+#include "AudioAnalyzer.h"
+#include <iostream>
+#include <sstream>
+#include <filesystem>
+#include <cstring>
+
+#ifdef _WIN32
+#include <windows.h>
+#endif
+
+namespace fs = std::filesystem;
+
+AudioAnalyzer::~AudioAnalyzer() {
+    cancel();
+}
+
+void AudioAnalyzer::startAnalysis(const std::string& audioPath) {
+    if (m_running.load()) return;
+
+    // Reset state
+    m_finished.store(false);
+    m_running.store(true);
+
+    // Launch background thread
+    if (m_thread.joinable()) m_thread.join();
+    m_thread = std::thread([this, audioPath]() {
+        auto result = runSubprocess(audioPath);
+        {
+            std::lock_guard<std::mutex> lock(m_resultMutex);
+            m_result = std::move(result);
+        }
+        m_finished.store(true);
+        m_running.store(false);
+    });
+}
+
+void AudioAnalyzer::pollCompletion() {
+    if (!m_finished.load()) return;
+
+    m_finished.store(false);
+    AudioAnalysisResult result;
+    {
+        std::lock_guard<std::mutex> lock(m_resultMutex);
+        result = std::move(m_result);
+    }
+
+    if (m_callback) m_callback(std::move(result));
+
+    if (m_thread.joinable()) m_thread.join();
+}
+
+void AudioAnalyzer::cancel() {
+    // TODO: kill subprocess if needed
+    m_running.store(false);
+    m_finished.store(false);
+    if (m_thread.joinable()) m_thread.join();
+}
+
+// ── Locate the analyzer tool ────────────────────────────────────────────────
+
+std::string AudioAnalyzer::findAnalyzerExecutable() const {
+#ifdef _WIN32
+    // Look relative to our own .exe
+    char exePath[MAX_PATH];
+    GetModuleFileNameA(nullptr, exePath, MAX_PATH);
+    fs::path exeDir = fs::path(exePath).parent_path();
+
+    // Check for standalone PyInstaller .exe
+    fs::path bundled = exeDir / "tools" / "madmom_analyzer.exe";
+    if (fs::exists(bundled)) return bundled.string();
+
+    // Check project root / tools
+    fs::path projectTools = exeDir / ".." / ".." / "tools" / "madmom_analyzer.exe";
+    if (fs::exists(projectTools)) return fs::canonical(projectTools).string();
+#endif
+    return "";
+}
+
+std::string AudioAnalyzer::findAnalyzerScript() const {
+#ifdef _WIN32
+    char exePath[MAX_PATH];
+    GetModuleFileNameA(nullptr, exePath, MAX_PATH);
+    fs::path exeDir = fs::path(exePath).parent_path();
+
+    // Check project root / tools
+    fs::path script = exeDir / ".." / ".." / "tools" / "analyze_audio.py";
+    if (fs::exists(script)) return fs::canonical(script).string();
+
+    // Also check relative to cwd
+    if (fs::exists("tools/analyze_audio.py"))
+        return fs::canonical("tools/analyze_audio.py").string();
+#endif
+    return "";
+}
+
+// ── Run subprocess with stdout pipe capture ─────────────────────────────────
+
+AudioAnalysisResult AudioAnalyzer::runSubprocess(const std::string& audioPath) {
+    AudioAnalysisResult result;
+
+#ifdef _WIN32
+    // Determine command line
+    std::string cmd;
+    std::string exeTool = findAnalyzerExecutable();
+    if (!exeTool.empty()) {
+        cmd = "\"" + exeTool + "\" \"" + audioPath + "\"";
+    } else {
+        std::string script = findAnalyzerScript();
+        if (!script.empty()) {
+            cmd = "python \"" + script + "\" \"" + audioPath + "\"";
+        } else {
+            result.errorMessage = "Madmom analyzer not found.\n"
+                "Place madmom_analyzer.exe in tools/ or ensure "
+                "tools/analyze_audio.py exists with Python + madmom installed.";
+            return result;
+        }
+    }
+
+    std::cout << "[AudioAnalyzer] Running: " << cmd << "\n";
+
+    // Create pipe for stdout capture
+    SECURITY_ATTRIBUTES sa{};
+    sa.nLength = sizeof(sa);
+    sa.bInheritHandle = TRUE;
+
+    HANDLE hReadPipe = nullptr, hWritePipe = nullptr;
+    if (!CreatePipe(&hReadPipe, &hWritePipe, &sa, 0)) {
+        result.errorMessage = "Failed to create pipe";
+        return result;
+    }
+    // Ensure the read end is not inherited
+    SetHandleInformation(hReadPipe, HANDLE_FLAG_INHERIT, 0);
+
+    // Launch process
+    STARTUPINFOA si{};
+    si.cb = sizeof(si);
+    si.hStdOutput = hWritePipe;
+    si.hStdError  = hWritePipe;
+    si.dwFlags    = STARTF_USESTDHANDLES;
+
+    PROCESS_INFORMATION pi{};
+
+    std::vector<char> cmdBuf(cmd.begin(), cmd.end());
+    cmdBuf.push_back('\0');
+
+    if (!CreateProcessA(nullptr, cmdBuf.data(), nullptr, nullptr, TRUE,
+                        CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi)) {
+        CloseHandle(hReadPipe);
+        CloseHandle(hWritePipe);
+        result.errorMessage = "Failed to launch analyzer process";
+        return result;
+    }
+
+    // Close write end in parent (so ReadFile gets EOF when child exits)
+    CloseHandle(hWritePipe);
+
+    // Read stdout
+    std::string output;
+    char buf[4096];
+    DWORD bytesRead;
+    while (ReadFile(hReadPipe, buf, sizeof(buf) - 1, &bytesRead, nullptr) && bytesRead > 0) {
+        buf[bytesRead] = '\0';
+        output += buf;
+    }
+    CloseHandle(hReadPipe);
+
+    // Wait for process to finish (120s timeout)
+    DWORD waitResult = WaitForSingleObject(pi.hProcess, 120000);
+    DWORD exitCode = 1;
+    GetExitCodeProcess(pi.hProcess, &exitCode);
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+
+    if (waitResult == WAIT_TIMEOUT) {
+        result.errorMessage = "Analysis timed out (>120s)";
+        return result;
+    }
+
+    if (exitCode != 0 && output.empty()) {
+        result.errorMessage = "Analyzer process failed (exit code " + std::to_string(exitCode) + ")";
+        return result;
+    }
+
+    std::cout << "[AudioAnalyzer] Output length: " << output.size() << " bytes\n";
+
+    return parseJson(output);
+#else
+    result.errorMessage = "AudioAnalyzer only supported on Windows";
+    return result;
+#endif
+}
+
+// ── Simple JSON parser for our known output format ──────────────────────────
+// We parse: {"status":"ok","bpm":128.0,"easy":[...],"medium":[...],"hard":[...]}
+// This avoids depending on nlohmann/json for this one use case.
+
+AudioAnalysisResult AudioAnalyzer::parseJson(const std::string& jsonStr) {
+    AudioAnalysisResult result;
+
+    // Check for "status": "error"
+    if (jsonStr.find("\"error\"") != std::string::npos &&
+        jsonStr.find("\"status\"") != std::string::npos) {
+        // Extract error message
+        auto msgPos = jsonStr.find("\"message\"");
+        if (msgPos != std::string::npos) {
+            auto start = jsonStr.find('"', msgPos + 9);
+            if (start != std::string::npos) {
+                auto end = jsonStr.find('"', start + 1);
+                result.errorMessage = jsonStr.substr(start + 1, end - start - 1);
+            }
+        }
+        if (result.errorMessage.empty())
+            result.errorMessage = "Analysis failed (unknown error)";
+        return result;
+    }
+
+    // Helper: extract a float array for a given key, e.g. "easy": [1.0, 2.0, ...]
+    auto extractArray = [&](const std::string& key) -> std::vector<float> {
+        std::vector<float> arr;
+        std::string searchKey = "\"" + key + "\"";
+        auto pos = jsonStr.find(searchKey);
+        if (pos == std::string::npos) return arr;
+
+        auto bracketStart = jsonStr.find('[', pos);
+        if (bracketStart == std::string::npos) return arr;
+        auto bracketEnd = jsonStr.find(']', bracketStart);
+        if (bracketEnd == std::string::npos) return arr;
+
+        std::string arrayStr = jsonStr.substr(bracketStart + 1, bracketEnd - bracketStart - 1);
+        std::istringstream iss(arrayStr);
+        std::string token;
+        while (std::getline(iss, token, ',')) {
+            try {
+                // Trim whitespace
+                size_t s = token.find_first_not_of(" \t\n\r");
+                if (s != std::string::npos)
+                    arr.push_back(std::stof(token.substr(s)));
+            } catch (...) {}
+        }
+        return arr;
+    };
+
+    // Extract BPM
+    auto bpmPos = jsonStr.find("\"bpm\"");
+    if (bpmPos != std::string::npos) {
+        auto colon = jsonStr.find(':', bpmPos);
+        if (colon != std::string::npos) {
+            try {
+                result.bpm = std::stof(jsonStr.substr(colon + 1));
+            } catch (...) { result.bpm = 120.f; }
+        }
+    }
+
+    result.easyMarkers   = extractArray("easy");
+    result.mediumMarkers = extractArray("medium");
+    result.hardMarkers   = extractArray("hard");
+
+    result.success = !result.easyMarkers.empty() ||
+                     !result.mediumMarkers.empty() ||
+                     !result.hardMarkers.empty();
+
+    if (!result.success && result.errorMessage.empty())
+        result.errorMessage = "No beats detected in audio";
+
+    std::cout << "[AudioAnalyzer] Parsed: bpm=" << result.bpm
+              << " easy=" << result.easyMarkers.size()
+              << " medium=" << result.mediumMarkers.size()
+              << " hard=" << result.hardMarkers.size() << "\n";
+
+    return result;
+}

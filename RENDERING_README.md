@@ -1,6 +1,9 @@
-# Rendering System Documentation
+# System 1 — Rendering System (Quick Reference)
 
-## Overview
+**Last updated:** 2026-04-03  
+**Status:** ✅ Complete
+
+> For full detail see [RENDERING_SYSTEM.md](RENDERING_SYSTEM.md). This file is a quick reference.
 
 Vulkan-based rendering system for a multi-mode music game engine supporting BanG Dream, Phigros, Arcaea, Cytus, and Lanota. Built with C++20 on Windows.
 

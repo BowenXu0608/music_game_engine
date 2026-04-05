@@ -11,12 +11,18 @@ struct HitResult {
     NoteType noteType;
 };
 
+struct MissedNote {
+    uint32_t noteId;
+    NoteType noteType;
+    int      lane;   // -1 if unknown
+};
+
 class HitDetector {
 public:
     static constexpr float HIT_RADIUS_PX = 90.0f;
 
     void init(const ChartData& chart);
-    void update(double songTime);
+    std::vector<MissedNote> update(double songTime);
 
     // Lane-based hit (Bandori, Cytus, Lanota)
     std::optional<HitResult> checkHit(int lane, double songTime);

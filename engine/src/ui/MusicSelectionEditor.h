@@ -1,4 +1,5 @@
 #pragma once
+#include "ProjectHub.h"  // GameModeConfig, GameModeType, DropDimension
 #include "AssetBrowser.h"
 #include "renderer/vulkan/TextureManager.h"
 #include <vulkan/vulkan.h>
@@ -25,6 +26,7 @@ struct SongInfo {
     std::string chartHard;
     int         score = 0;            // 0..1000000
     std::string achievement;          // "", "FC", "AP"
+    GameModeConfig gameMode;          // per-song game mode config
 };
 
 struct MusicSetInfo {

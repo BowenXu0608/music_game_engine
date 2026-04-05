@@ -4,7 +4,7 @@
 #include <cmath>
 #include <algorithm>
 
-void PhigrosRenderer::onInit(Renderer& renderer, const ChartData& chart) {
+void PhigrosRenderer::onInit(Renderer& renderer, const ChartData& chart, const GameModeConfig*) {
     m_lineEvents = chart.judgmentLines;
     onResize(renderer.width(), renderer.height());
 
@@ -133,9 +133,8 @@ void PhigrosRenderer::onRender(Renderer& renderer) {
                 : 1.f;
 
             glm::vec4 color = {1.f, 0.9f, 0.3f, alpha};
-            if (auto* pd = std::get_if<PhigrosNoteData>(&note.data)) {
-                if (pd->subType == NoteType::Hold) color = {0.3f, 0.8f, 1.f, alpha};
-            }
+            if (note.type == NoteType::Hold)  color = {0.3f, 0.8f, 1.f, alpha};
+            if (note.type == NoteType::Flick) color = {1.f, 0.35f, 0.35f, alpha};
 
             renderer.quads().drawQuad(
                 wpos, {50.f, 18.f}, ls.rotation,

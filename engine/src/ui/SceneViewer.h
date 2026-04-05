@@ -12,6 +12,7 @@ public:
     void setPlaying(bool playing) { m_playing = playing; }
 
     void setSceneTexture(VkDescriptorSet texSet) { m_sceneTexSet = texSet; }
+    VkDescriptorSet sceneTexture() const { return m_sceneTexSet; }
 
 private:
     bool m_playing = true;

@@ -14,4 +14,8 @@ private:
     static ChartData loadArcaea(const std::string& path);
     static ChartData loadCytus(const std::string& path);
     static ChartData loadLanota(const std::string& path);
+
+    // Fills NoteEvent::beatPosition for every note using chart.timingPoints.
+    // Must be called after both timingPoints and notes are populated.
+    static void computeBeatPositions(ChartData& chart);
 };

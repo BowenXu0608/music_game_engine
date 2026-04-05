@@ -6,7 +6,8 @@
 
 class PhigrosRenderer : public GameModeRenderer {
 public:
-    void onInit(Renderer& renderer, const ChartData& chart) override;
+    void onInit(Renderer& renderer, const ChartData& chart,
+                const GameModeConfig* config = nullptr) override;
     void onResize(uint32_t w, uint32_t h) override;
     void onUpdate(float dt, double songTime) override;
     void onRender(Renderer& renderer) override;

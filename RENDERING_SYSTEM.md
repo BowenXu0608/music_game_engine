@@ -1,10 +1,18 @@
-# Music Game Engine — Rendering System Plan
+# System 1 + System 3 + System 6 — Rendering, Core Engine & Game Mode Plugins
 
-## Overview
+**Last updated:** 2026-04-03  
+**Status:** ✅ Complete
 
-Multi-mode music game engine supporting **BanG Dream**, **Phigros**, **Arcaea**, **Cytus**, and **Lanota**.
-Stack: **C++20 + Vulkan**, Windows.
+This document covers three closely related systems:
+- **System 1 — Rendering:** Vulkan backend + batcher layer + shaders
+- **System 3 — Core Engine:** ECS, SceneGraph, Engine loop, GameClock, build system
+- **System 6 — Game Mode Plugins:** GameModeRenderer interface + 5 plugin implementations
+
+Multi-mode music game engine supporting **BanG Dream**, **Phigros**, **Arcaea**, **Cytus**, and **Lanota**.  
+Stack: **C++20 + Vulkan**, Windows.  
 All rendering reduces to transformed primitives (quads, lines, meshes). Game modes are plugins — the engine is mode-agnostic.
+
+See also: [README.md](README.md) | [INPUT_SYSTEM.md](INPUT_SYSTEM.md) | [EDITOR_SYSTEM.md](EDITOR_SYSTEM.md)
 
 ---
 

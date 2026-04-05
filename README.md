@@ -1,78 +1,219 @@
 # Music Game Engine
 
-A C++20/Vulkan-based rhythm game engine with a Unity Hub-style editor for mobile rhythm game development.
+A C++20/Vulkan-based rhythm game engine with a Unity Hub-style editor for mobile rhythm game development.  
+Supports **BanG Dream**, **Phigros**, **Arcaea**, **Cytus**, and **Lanota** as plugin game modes.
+
+**Last updated:** 2026-04-05
 
 ---
 
-## Architecture
-
-**Engine as Library** — `MusicGameEngine` builds as a static library  
-**Project Hub** — Unity Hub-style launcher for browsing and creating projects  
-**Start Screen Editor** — per-project start screen designer with live preview  
-**Standalone Projects** — each game project links against the engine library
+## Project Structure
 
 ```
-MusicGameEngine/
+Music_game/
 ├── engine/
-│   ├── include/MusicGameEngine/   # Public API headers
+│   ├── include/MusicGameEngine/       # Public API headers
 │   └── src/
-│       ├── core/                  # ECS, SceneGraph, Transform
-│       ├── engine/                # Engine, AudioEngine, GameClock
+│       ├── core/                      # System 3: ECS, SceneGraph, Transform
+│       ├── engine/                    # System 3: Engine, AudioEngine, GameClock
 │       ├── game/
-│       │   ├── chart/             # ChartLoader, ChartTypes (UCF)
-│       │   └── modes/             # BandoriRenderer, PhigrosRenderer, …
-│       ├── gameplay/              # HitDetector, JudgmentSystem, ScoreTracker
-│       ├── input/                 # InputManager, GestureRecognizer, TouchTypes
-│       ├── renderer/              # Vulkan pipeline, QuadBatch, LineBatch, …
-│       └── ui/                    # ImGui editor (ProjectHub, StartScreenEditor, …)
-├── Projects/                      # Game projects (one folder each)
+│       │   ├── chart/                 # System 2: ChartLoader, ChartTypes (UCF)
+│       │   └── modes/                 # System 6: BandoriRenderer, PhigrosRenderer, …
+│       ├── gameplay/                  # System 5: HitDetector, JudgmentSystem, ScoreTracker
+│       ├── input/                     # System 4: InputManager, GestureRecognizer, TouchTypes
+│       ├── renderer/                  # System 1: Vulkan pipeline, QuadBatch, LineBatch, …
+│       └── ui/                        # System 7: ImGui editor (ProjectHub → SongEditor)
+├── Projects/                          # Game projects (one folder each)
 │   └── BandoriSandbox/
-├── shaders/                       # GLSL source files
-├── third_party/                   # GLFW, GLM, VMA, ImGui, stb, nlohmann
+├── shaders/                           # GLSL source → compiled to build/shaders/*.spv
+├── third_party/                       # GLFW, GLM, VMA, ImGui, stb, nlohmann
 └── build/
     └── Debug/
-        └── MusicGameEngineTest.exe    # Hub launcher
+        └── MusicGameEngineTest.exe    # Hub launcher; supports --test <project_path> for standalone test game mode
 ```
 
 ---
 
-## Features
+## 7 Systems Overview
 
-### Rendering System
-- Vulkan-based graphics pipeline (VulkanMemoryAllocator)
-- Quad batching (8 192 quads per batch)
-- Line/curve rendering (4 096 lines)
-- Mesh rendering with instancing
-- Particle system (2 048 particles)
-- Post-processing (bloom downsample/upsample compute, composite)
+| # | System | Status | Doc |
+|---|---|---|---|
+| 1 | [Rendering](#system-1--rendering) | ✅ Complete | [RENDERING_SYSTEM.md](RENDERING_SYSTEM.md) |
+| 2 | [Resource Management](#system-2--resource-management) | ✅ Complete | [RESOURCE_MANAGEMENT.md](RESOURCE_MANAGEMENT.md) |
+| 3 | [Core Engine](#system-3--core-engine) | ✅ Complete | [CORE_ENGINE.md](CORE_ENGINE.md) |
+| 4 | [Input & Gesture](#system-4--input--gesture) | ✅ Complete | [INPUT_SYSTEM.md](INPUT_SYSTEM.md) |
+| 5 | [Gameplay](#system-5--gameplay) | ✅ Complete | [INPUT_SYSTEM.md](INPUT_SYSTEM.md) |
+| 6 | [Game Mode Plugins](#system-6--game-mode-plugins) | ✅ Complete | [GAME_MODES.md](GAME_MODES.md) |
+| 7 | [Editor UI](#system-7--editor-ui) | ✅ Complete | [EDITOR_SYSTEM.md](EDITOR_SYSTEM.md) |
 
-### Editor (ImGui)
-- **Project Hub** — browse, create, and open game projects
-- **Start Screen Editor** — design start screens with live Vulkan preview
-- Resizable split panels, drag-and-drop asset management
-- See [EDITOR_SYSTEM.md](EDITOR_SYSTEM.md) for full details
+---
 
-### Game Modes
-- **Bandori** — 7-lane vertical scrolling highway
-- **Phigros** — judgment line rotation system
-- **Arcaea** — arc-based sky note gameplay
-- **Cytus** — scan-line mechanics
-- **Lanota** — concentric ring system
+## System 1 — Rendering
 
-### Input System
-- Keyboard input (keys 1–7 for lanes)
-- Touch gesture recognition: Tap, Hold, Flick, Slide, Arc, Sky Note
-- Hit detection with timing windows
-- Score and combo tracking
+Vulkan-based graphics pipeline. Two sub-layers: Vulkan backend + Batcher layer.
 
-### Audio
-- Miniaudio-based playback
-- DSP clock synchronization
+**Vulkan Backend** (`engine/src/renderer/vulkan/`):
+- `VulkanContext` — instance, physical/logical device, queues, surface
+- `Swapchain` — swap chain, image views, framebuffers
+- `RenderPass` — render pass management
+- `Pipeline` — graphics pipeline builder (`PipelineConfig`)
+- `BufferManager` — VMA-backed buffers (`VMA_IMPLEMENTATION` here)
+- `TextureManager` — stb_image → VMA image alloc (`STB_IMAGE_IMPLEMENTATION` here)
+- `DescriptorManager` — pool + set0 UBO + set1 sampler layouts
+- `CommandManager` — per-frame command buffer alloc/begin/end
+- `SyncObjects` — `MAX_FRAMES_IN_FLIGHT = 3`, semaphores, fences
 
-### Chart Support
-- **Unified Chart Format (UCF)** — single JSON format for all game modes
-- Legacy format parsers: Bandori, Arcaea, Cytus, Phigros, Lanota
-- Auto-detection of chart format
+**Batcher Layer** (`engine/src/renderer/`):
+- `QuadBatch` — textured quads (max 8192/frame)
+- `LineBatch` — line segments CPU-expanded to quads (max 4096/frame)
+- `MeshRenderer` — per-mesh 3D draw with depth test
+- `ParticleSystem` — ring buffer 2048 particles, additive blend
+- `PostProcess` — bloom compute mip chain (5-level) + composite pass
+- `Camera.h` — unified ortho + perspective, header-only
+- `Renderer.h/.cpp` — top-level owner, exposes `whiteView()`, `whiteSampler()`, `descriptors()`
+
+**Shaders** (`shaders/`): quad, line, mesh, bloom_downsample/upsample (compute), composite
+
+> Full details: [RENDERING_SYSTEM.md](RENDERING_SYSTEM.md)
+
+---
+
+## System 2 — Resource Management
+
+All external file I/O: textures, audio, charts, asset browsing, GIFs.
+
+- **TextureManager** — stb_image → GPU via VMA; ImGui texture handle management
+- **AudioEngine** — miniaudio wrapper (`engine/src/engine/AudioEngine.h/.cpp`); play/stop/seek/position
+- **ChartLoader + ChartTypes** — unified `ChartData` / `NoteEvent` schema; auto-detects format
+- **AssetBrowser** (`engine/src/ui/AssetBrowser.h`) — thumbnail grid, `"ASSET_PATH"` drag-drop, import, delete
+- **GifPlayer** (`engine/src/ui/GifPlayer.h/.cpp`) — animated GIF via per-frame Vulkan textures
+
+**Chart formats supported:**
+
+| Format | Extension | Game |
+|---|---|---|
+| Unified Chart Format (UCF) | `.json` with `"version"` | All modes |
+| Bandori (legacy) | `.json` (no version) | BanG Dream |
+| Arcaea (legacy) | `.aff` | Arcaea |
+| Cytus (legacy) | `.xml` | Cytus |
+| Phigros (legacy) | `.pec` / `.pgr` | Phigros |
+| Lanota (legacy) | `.lan` | Lanota |
+
+**Project folder layout:**
+```
+Projects/<ProjectName>/
+├── project.json
+├── start_screen.json
+├── music_selection.json
+└── assets/
+    ├── charts/     — .json chart files
+    ├── audio/      — .mp3 / .ogg / .wav
+    └── textures/   — .png / .jpg / .gif
+```
+
+> Full details: [RESOURCE_MANAGEMENT.md](RESOURCE_MANAGEMENT.md)
+
+---
+
+## System 3 — Core Engine
+
+Foundational runtime: data model, main loop, timing.
+
+- **ECS** (`engine/src/core/ECS.h`) — `EntityID`, `ComponentPool<T>`, `Registry`; dense storage, sparse map
+- **SceneNode / SceneGraph** (`engine/src/core/SceneNode.h`) — parent-child transform hierarchy; used by PhigrosRenderer
+- **Transform** (`engine/src/core/Transform.h`) — TRS + quaternion; `toMatrix()`
+- **Engine** (`engine/src/engine/Engine.h/.cpp`) — main loop, owns all subsystems as members, owns GLFW callbacks and user pointer
+- **GameClock** (`engine/src/engine/GameClock.h`) — wall clock + DSP time override for chart sync; header-only
+
+> Architecture details in [RENDERING_SYSTEM.md](RENDERING_SYSTEM.md) (Core Architecture section)
+
+---
+
+## System 4 — Input & Gesture
+
+Multi-touch input pipeline. Supports desktop (GLFW mouse simulation) and mobile (Android JNI / iOS UITouch).
+
+- **TouchTypes.h** — `TouchPoint`, `GestureEvent`, `TouchThresholds` (all `constexpr`)
+- **GestureRecognizer** — per-finger state machine: PotentialTap → Holding / Sliding → emits Tap / Flick / HoldBegin / HoldEnd / SlideBegin / SlideMove / SlideEnd
+- **InputManager.h** — keyboard + touch aggregator; `injectTouch(id, phase, pos, t)` is the single entry point for all platforms
+
+**Gesture thresholds:**
+
+| Constant | Value | Meaning |
+|---|---|---|
+| `TAP_SLOP_PX` | 20 px | Max drift for a tap |
+| `TAP_MAX_DURATION_S` | 0.15 s | Hold fires after this |
+| `FLICK_MIN_VELOCITY` | 400 px/s | Min speed for flick |
+| `SLIDE_SLOP_PX` | 25 px | Min movement for slide |
+| `VELOCITY_WINDOW_S` | 0.08 s | Velocity averaging window |
+
+> Full details: [INPUT_SYSTEM.md](INPUT_SYSTEM.md)
+
+---
+
+## System 5 — Gameplay
+
+Hit detection, judgment grading, and score tracking.
+
+- **HitDetector** — three hit modes: lane-based (Bandori/Cytus/Lanota), position-based (Arcaea), line-projection (Phigros)
+- **JudgmentSystem** — timing → Perfect/Good/Bad/Miss for all note types (tap, flick, hold, slide, arc, skyNote)
+- **JudgmentDisplay** — visual judgment feedback (not yet wired to HUD)
+- **ScoreTracker** — score (Perfect=1000, Good=500, Bad=100, Miss=0) + combo + maxCombo
+- **Hit Effects** — particle bursts on judgment: Perfect = green, Good = blue, Bad = red, Miss = no effect. Miss detection dispatches judgments properly when notes pass their timing window.
+
+**Timing windows:**
+
+| Judgment | Window |
+|---|---|
+| Perfect | ±20 ms |
+| Good | ±60 ms |
+| Bad | ±100 ms |
+| Miss | >100 ms or note passed |
+
+> Full details: [INPUT_SYSTEM.md](INPUT_SYSTEM.md)
+
+---
+
+## System 6 — Game Mode Plugins
+
+Plugin architecture: `GameModeRenderer` abstract interface + 5 implementations.
+
+| Plugin | Game | Notes |
+|---|---|---|
+| `BandoriRenderer` | BanG Dream | 5-lane highway, perspective, eye_z ≥8 |
+| `PhigrosRenderer` | Phigros | Rotating judgment lines, uses SceneGraph |
+| `ArcaeaRenderer` | Arcaea | 3D perspective, arc ribbons via MeshRenderer |
+| `CytusRenderer` | Cytus | Horizontal scanning line |
+| `LanotaRenderer` | Lanota | Concentric ring tunnel perspective |
+
+`Engine` holds active mode as `std::unique_ptr<GameModeRenderer>`.  
+Game modes render via `Renderer&` — never allocate Vulkan resources directly.
+
+The `GameModeRenderer` base class provides a `showJudgment()` virtual method for per-mode judgment display, and `onInit` accepts an optional `GameModeConfig` for runtime configuration.
+
+> Full details: [RENDERING_SYSTEM.md](RENDERING_SYSTEM.md) (Game Mode Integration section)
+
+---
+
+## System 7 — Editor UI
+
+Unity Hub-style editor built on ImGui + Vulkan. Layer-based flow:
+
+```
+ProjectHub → StartScreenEditor → MusicSelectionEditor → SongEditor → (GamePlay)
+```
+
+| Layer | Purpose |
+|---|---|
+| **Project Hub** | Browse + create projects, folder scaffolding |
+| **Start Screen Editor** | Background, logo, tap text, transition, audio; live preview |
+| **Music Selection Editor** | Arcaea-style card stack wheels, hierarchy panel, cover picker |
+| **Song Editor** | DAW-style layout (scene preview + chart timeline simultaneous), left sidebar config, Madmom beat analysis (auto-generate markers for 3 difficulties), toolbar (Analyze/Place All/Clear), audio playback controls, difficulty selector (Easy/Medium/Hard) with per-difficulty notes, camera controls, HUD config (score/combo position and style), chart persistence (save/load as unified JSON) |
+| **Scene Viewer** | Gameplay viewport, Play/Stop, stats |
+| **Test Game** | Green button on all editor pages; launches full game flow preview |
+| **Asset Browser** | Unified import system (`importAssetsToProject`), shared across all pages, "All Files" default |
+
+> Full details: [EDITOR_SYSTEM.md](EDITOR_SYSTEM.md)
 
 ---
 
@@ -81,7 +222,7 @@ MusicGameEngine/
 ### Requirements
 - CMake 3.20+
 - C++20 compiler (MSVC 2022 recommended on Windows)
-- Vulkan SDK (1.3+)
+- Vulkan SDK 1.3+
 - GLFW, GLM, VulkanMemoryAllocator — pre-bundled in `third_party/`
 
 ### Steps
@@ -92,197 +233,13 @@ cmake --build build --config Debug
 
 Shaders are compiled automatically by `glslc` (found via `VULKAN_SDK`) and copied to `build/Debug/shaders/`.
 
----
-
-## Usage
-
-### Running the Editor
-
+### Running
 ```bash
 cd build/Debug
 ./MusicGameEngineTest.exe
 ```
 
 The editor opens at the **Project Hub**. Use the mouse to interact with all panels. Press **ESC** to exit.
-
----
-
-## Editor — Page 1: Project Hub
-
-The hub is the first screen you see. It lists all projects found in the `Projects/` folder.
-
-```
-┌─────────────────────────────────────┐
-│  Music Game Engine - Project Hub    │
-│                                     │
-│  [+ Create Game]                    │
-│  ─────────────────────────────────  │
-│  MyGame                      v1.0.0 │
-│  BandoriSandbox              v1.0.0 │
-└─────────────────────────────────────┘
-```
-
-### Opening a project
-
-Click any project button to open it. The editor switches to the **Start Screen Editor** for that project.
-
-### Creating a new project
-
-1. Click **+ Create Game**
-2. Type a project name in the dialog (spaces are converted to `_`)
-3. Press **Create** or hit Enter
-
-A new project folder is created under `Projects/<name>/` with the following structure:
-
-```
-Projects/<name>/
-├── project.json           — window size, asset paths, engine version
-├── start_screen.json      — start screen configuration
-└── assets/
-    ├── charts/
-    │   └── demo.json      — empty chart stub
-    ├── audio/             — music and sound effect files
-    └── textures/          — image assets
-```
-
-The editor automatically opens the new project in the Start Screen Editor.
-
----
-
-## Editor — Page 2: Start Screen Editor
-
-The Start Screen Editor lets you design the opening screen of your game — background, logo, tap text, audio, and transition effect — with a **live preview**.
-
-### Layout
-
-```
-┌──────────────────┬────────────────────────┐
-│                  │  Properties            │
-│    Preview       │  ▼ Background          │
-│                  │  ▼ Logo                │
-│   [live render]  │  ▼ Tap Text            │
-│                  │  ▼ Transition Effect   │
-│                  │  ▼ Audio               │
-├──────────────────┴────────────────────────┤
-│  Asset Panel  [thumbnail strip]           │
-├───────────────────────────────────────────┤
-│ < Back  Save  Load  Reset  Next: Music > │
-└───────────────────────────────────────────┘
-```
-
-Drag the **splitter bars** (thin lines between panels) to resize any region.
-
----
-
-### Preview Panel
-
-Shows a real-time render of the start screen using the actual Vulkan renderer:
-
-- **Background** — renders the set image/GIF at full panel size
-- **Logo** — text rendered in Roboto-Medium at the configured size, color, and position; or an image file
-- **Tap text** — rendered at the configured size and position
-- All positions are **normalized** (0.0 = left/top, 1.0 = right/bottom)
-
----
-
-### Properties Panel
-
-#### Background
-Set the background by **dragging an image or GIF thumbnail** from the Asset Panel onto the background drop zone. The drop zone highlights blue when you hover over it during a drag.
-
-- Shows a mini-preview of the current background when set
-- **Clear** — removes the background
-
-Supported: `.png`, `.jpg`, `.gif` (animated), `.mp4`/`.webm` (shows filename placeholder)
-
-#### Logo
-Choose between **Text** and **Image** logo types.
-
-**Text logo:**
-- Type the logo text
-- Adjust **Font Size** (12 – 96 px), **Color**, **Bold**, **Italic**
-- Enable **Glow / Outline** for a glowing border effect
-
-**Image logo:**
-- Drag an image thumbnail from the Asset Panel onto the logo drop zone
-- **Clear** removes it
-
-Both types share:
-- **Position** — two sliders for X and Y (normalized)
-- **Scale** — 0.1 to **10.0** for very large logos
-
-#### Tap Text
-- Edit the text (e.g. "Tap to Start")
-- **Position** — X and Y sliders (normalized)
-- **Size** — 12 to **120 px**, applied to the live preview in real time
-
-#### Transition Effect
-Configures the animation when the player taps:
-- **Fade to Black**, **Slide Left**, **Zoom In**, **Ripple** — built-in presets
-- **Custom** — supply a Lua script path (runtime executor planned)
-- **Duration** — 0.1 to 2.0 seconds
-
-#### Audio
-Configure the music and sound effects for the start screen.
-
-**Background Music:**
-1. Import an audio file via **Open File...** or drag it from File Explorer onto the window
-2. The file appears as a "MUS" tile in the Asset Panel
-3. Drag the tile onto the **Background Music** drop zone
-4. Adjust **Volume** (0.0 – 1.0) and toggle **Loop**
-
-**Tap Sound Effect:**
-- Same process — drag an audio tile onto the **Tap Sound Effect** drop zone
-- Adjust **Volume**
-
-Supported audio formats: `.mp3`, `.ogg`, `.wav`, `.flac`, `.aac`
-
----
-
-### Asset Panel
-
-Displays all files in `{project}/assets/` as a scrollable thumbnail strip.
-
-| Tile type | Appearance | Draggable to |
-|---|---|---|
-| Image (`.png` `.jpg`) | 80×80 pixel thumbnail | Background zone, Logo zone |
-| GIF (`.gif`) | 80×80 thumbnail (first frame) | Background zone |
-| Video (`.mp4` `.webm`) | Dark placeholder | Background zone |
-| Audio (`.mp3` `.ogg` etc.) | Blue tile labeled "MUS" | BGM zone, SFX zone |
-
-**Interactions:**
-- **Hover** — highlights the tile with a blue border; tooltip shows full relative path
-- **Drag** — drag any tile to a Properties drop zone to assign it
-- **Right-click → Delete** — permanently deletes the file from disk, clears any references in the Properties panel, and refreshes the strip
-
-**Importing files:**
-
-| Method | How |
-|---|---|
-| Open File... | Click the button; native Windows dialog with filters for Images, Audio, Videos, All Files. Multi-select supported. |
-| Drag from File Explorer | Drag files from Windows File Explorer directly onto the engine window. Files are imported automatically. |
-
-Imported files are routed to the correct subfolder:
-
-| File type | Destination |
-|---|---|
-| Images & GIFs | `assets/textures/` |
-| Audio | `assets/audio/` |
-| Videos | `assets/videos/` |
-
----
-
-### Nav Bar (always visible)
-
-| Button | Action |
-|---|---|
-| `< Back` | Return to Project Hub |
-| `Save` | Write all settings to `start_screen.json` |
-| `Load` | Reload settings from `start_screen.json` |
-| `Reset` | Restore all fields to defaults (does not save) |
-| `Next: Music Selection >` | Advance to Music Selection (not yet implemented) |
-
-A status message (e.g. "Saved!", "Imported 2 file(s)") appears briefly after each action.
 
 ---
 
@@ -295,40 +252,54 @@ A status message (e.g. "Saved!", "Imported 2 file(s)") appears briefly after eac
 
 ---
 
-## Timing Windows
+## Test Game
 
-| Note type | Perfect | Good | Bad |
-|---|---|---|---|
-| Tap / Flick | ±20 ms | ±60 ms | ±100 ms |
-| Hold start | ±20 ms | — | — |
-| Hold end | — | ±50 ms | — |
-| Sky Note | ±30 ms | ±80 ms | ±120 ms |
-| Slide / Arc | position accuracy + completion ratio | | |
+The **Test Game** button (available in the Song Editor) launches a separate `MusicGameEngineTest.exe --test <project_path>` process in its own window. This mirrors the workflow in RPG Maker or Unity's Play button — the editor window remains fully interactive and unaffected while the test game runs independently.
 
----
+The test game window runs the full game flow:
 
-## Internal Architecture
+1. **Start Screen** — tap to continue
+2. **Music Selection** — pick a song
+3. **Gameplay** — play the chart with hit detection, judgment, and scoring
 
-```
-Engine
-├── Renderer (Vulkan)
-│   ├── QuadBatch, LineBatch, MeshRenderer, ParticleSystem
-│   └── PostProcess (bloom compute, composite)
-├── AudioEngine (miniaudio)
-├── InputManager (GLFW)
-├── HitDetector → JudgmentSystem → ScoreTracker
-├── SceneGraph (ECS hybrid)
-└── GameModeRenderer (active mode plugin)
-```
+Press **ESC** at any time to close the test game window and return to editing.
 
 ---
 
 ## Documentation
 
-| File | Contents |
-|---|---|
-| [EDITOR_SYSTEM.md](EDITOR_SYSTEM.md) | Full editor architecture, all UI fields, JSON schemas, implementation status |
-| [RENDERING_SYSTEM.md](RENDERING_SYSTEM.md) | Vulkan rendering pipeline details |
-| [INPUT_SYSTEM.md](INPUT_SYSTEM.md) | Input system design and gesture recognition |
-| [CHART_PARSER.md](CHART_PARSER.md) | Chart loading system and format parsers |
-| [UNIFIED_CHART_FORMAT.md](UNIFIED_CHART_FORMAT.md) | UCF JSON specification |
+One document per system:
+
+| System | Document | Contents |
+|---|---|---|
+| System 1 | [RENDERING_SYSTEM.md](RENDERING_SYSTEM.md) | Vulkan backend, batchers, shaders, frame loop, performance, lessons learned |
+| System 2 | [RESOURCE_MANAGEMENT.md](RESOURCE_MANAGEMENT.md) | TextureManager, AudioEngine, ChartLoader, UCF format, AssetBrowser, GifPlayer |
+| System 3 | [CORE_ENGINE.md](CORE_ENGINE.md) | ECS, SceneGraph, Transform, Engine main loop, GameClock, build system |
+| System 4+5 | [INPUT_SYSTEM.md](INPUT_SYSTEM.md) | Gesture recognition, hit detection, judgment, score, platform integration |
+| System 6 | [GAME_MODES.md](GAME_MODES.md) | GameModeRenderer interface + BandoriRenderer, PhigrosRenderer, ArcaeaRenderer, CytusRenderer, LanotaRenderer |
+| System 7 | [EDITOR_SYSTEM.md](EDITOR_SYSTEM.md) | ProjectHub, StartScreen, MusicSelection, SongEditor, GameFlowPreview, AssetBrowser |
+
+---
+
+## Recent Additions (2026-04-04 ~ 2026-04-05)
+
+- **ChartLoader completion** — all 6 format parsers fully implemented with complete note type coverage (drag, arctap, ring, slide, flick direction, arc easing)
+- **Beat Analysis via Madmom** — `tools/analyze_audio.py` + `AudioAnalyzer` C++ class; auto-generates markers for Easy (downbeats), Medium (all beats), Hard (beats + onsets)
+- **DAW-style SongEditor layout** — scene preview and chart timeline visible simultaneously; left sidebar for config
+- **Gameplay lead-in** — 2-second visual lead-in before audio starts; configurable audio offset per song
+- **HUD foreground fix** — score/combo now uses `ImGui::GetForegroundDrawList()` for guaranteed visibility
+- **Bug fixes** — waveform LOD dangling reference crash; MusicSelectionEditor Play button bounds check
+
+---
+
+## Future Plans
+
+### Priority 1: Mobile Platform
+Android JNI multi-touch (bridge designed), iOS UITouch bridge (bridge designed), Vulkan Android surface.
+
+### Priority 2: Configurable Timing & Replay
+Per-song judgment windows (Perfect/Good/Bad/Miss) — ✅ done (editor UI sliders).  
+Remaining: wire to gameplay HitDetector, replay system (record + deterministic replay), auto-play mode.
+
+### Priority 3: Advanced Chart Editor
+Remaining: BPM grid snapping, copy/paste note patterns, undo/redo, note drag-to-reposition.

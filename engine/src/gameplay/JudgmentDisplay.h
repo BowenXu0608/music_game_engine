@@ -27,10 +27,10 @@ struct JudgmentDisplay {
 
     glm::vec4 color() const {
         switch (type) {
-            case Judgment::Perfect: return {1.f, 0.9f, 0.2f, alpha()};
-            case Judgment::Good:    return {0.2f, 1.f, 0.3f, alpha()};
-            case Judgment::Bad:     return {1.f, 0.5f, 0.2f, alpha()};
-            case Judgment::Miss:    return {1.f, 0.2f, 0.2f, alpha()};
+            case Judgment::Perfect: return {0.2f, 1.f, 0.3f, alpha()};   // green
+            case Judgment::Good:    return {0.3f, 0.6f, 1.f, alpha()};   // blue
+            case Judgment::Bad:     return {1.f, 0.25f, 0.2f, alpha()};  // red
+            case Judgment::Miss:    return {0.6f, 0.6f, 0.6f, alpha()};  // gray
         }
         return {1.f, 1.f, 1.f, alpha()};
     }

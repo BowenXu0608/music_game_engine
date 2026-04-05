@@ -11,7 +11,7 @@ enum class NoteType { Tap, Hold, Flick, Drag, Arc, ArcTap, Ring, Slide };
 
 struct TapData  { float laneX; };
 struct HoldData { float laneX; float duration; };
-struct FlickData{ float laneX; int direction; };  // direction: -1=left, 1=right
+struct FlickData{ float laneX; int direction = 0; };  // direction: -1=left, 0=up, 1=right
 
 struct ArcData {
     glm::vec2 startPos, endPos;
@@ -36,6 +36,7 @@ struct NoteEvent {
     double   time;
     NoteType type;
     uint32_t id;
+    double   beatPosition = 0.0;  // accumulated beats from song start (set by computeBeatPositions)
     std::variant<TapData, HoldData, FlickData,
                  ArcData, PhigrosNoteData, LanotaRingData> data;
 };

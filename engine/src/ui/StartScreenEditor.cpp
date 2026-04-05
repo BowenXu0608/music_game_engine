@@ -140,50 +140,11 @@ VkDescriptorSet StartScreenEditor::getThumb(const std::string& relPath) {
 // ── importFiles ───────────────────────────────────────────────────────────────
 
 void StartScreenEditor::importFiles(const std::vector<std::string>& srcPaths) {
-    if (m_projectPath.empty()) {
-        m_statusMsg = "Error: no project loaded";
-        m_statusTimer = 4.f;
-        return;
-    }
-
-    fs::path absProject = fs::absolute(fs::path(m_projectPath));
-    int copied = 0;
-    std::string lastError;
-
-    for (const auto& src : srcPaths) {
-        std::string ext = fs::path(src).extension().string();
-        std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
-
-        fs::path destDir;
-        if (ext == ".png" || ext == ".jpg" || ext == ".jpeg" || ext == ".gif")
-            destDir = absProject / "assets" / "textures";
-        else if (ext == ".mp4" || ext == ".webm")
-            destDir = absProject / "assets" / "videos";
-        else if (ext == ".mp3" || ext == ".ogg" || ext == ".wav" || ext == ".flac" || ext == ".aac")
-            destDir = absProject / "assets" / "audio";
-        else
-            destDir = absProject / "assets";
-
-        try {
-            fs::create_directories(destDir);
-            fs::path dest = destDir / fs::path(src).filename();
-            fs::copy_file(src, dest, fs::copy_options::overwrite_existing);
-            ++copied;
-            std::cout << "[import] OK: " << dest << "\n";
-        } catch (const std::exception& e) {
-            lastError = e.what();
-            std::cout << "[import] FAIL: " << e.what() << "\n";
-        }
-    }
-
+    int copied = importAssetsToProject(m_projectPath, srcPaths);
     if (copied > 0) {
         m_statusMsg   = "Imported " + std::to_string(copied) + " file(s)";
         m_statusTimer = 3.f;
-    } else {
-        m_statusMsg   = "Import failed: " + lastError;
-        m_statusTimer = 5.f;
     }
-
     m_assetsScanned = false;
 }
 
@@ -378,10 +339,58 @@ void StartScreenEditor::render(Engine* engine) {
     // Tick status message
     if (m_statusTimer > 0.f) m_statusTimer -= ImGui::GetIO().DeltaTime;
 
+    // ── Test mode: full-screen game start screen ──────────────────────────────
+    if (engine && engine->isTestMode()) {
+        ImVec2 displaySz = ImGui::GetIO().DisplaySize;
+        ImGui::SetNextWindowPos(ImVec2(0, 0));
+        ImGui::SetNextWindowSize(displaySz);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
+        ImGui::Begin("##test_start", nullptr,
+            ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove);
+
+        ImVec2 origin = ImGui::GetCursorScreenPos();
+        renderGamePreview(origin, displaySz);
+        ImGui::Dummy(displaySz);
+
+        // Transition overlay (fade to black)
+        if (engine->isTestTransitioning()) {
+            float t = engine->testTransProgress();
+            float eased = t * t * (3.f - 2.f * t);
+            int alpha = (int)(255 * eased);
+            ImGui::GetWindowDrawList()->AddRectFilled(
+                ImVec2(0, 0), displaySz, IM_COL32(0, 0, 0, alpha));
+        }
+
+        // Click anywhere to advance to Music Selection (with transition)
+        if (!engine->isTestTransitioning() && ImGui::IsWindowHovered() && ImGui::IsMouseClicked(0)) {
+            engine->musicSelectionEditor().load(m_projectPath);
+            engine->testTransitionTo(EditorLayer::MusicSelection);
+        }
+
+        ImGui::End();
+        ImGui::PopStyleVar();
+        return;
+    }
+
     ImGui::SetNextWindowPos(ImVec2(0, 0));
     ImGui::SetNextWindowSize(ImGui::GetIO().DisplaySize);
     ImGui::Begin("Start Screen Editor", nullptr,
                  ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoResize);
+
+    // ── Test Game button — top right ─────────────────────────────────────────
+    {
+        ImVec2 startPos = ImGui::GetCursorStartPos();
+        ImVec2 winSize  = ImGui::GetWindowSize();
+        ImGui::SetCursorPos(ImVec2(winSize.x - 120, startPos.y));
+        ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.15f, 0.55f, 0.2f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered,  ImVec4(0.2f, 0.65f, 0.25f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive,   ImVec4(0.1f, 0.45f, 0.15f, 1.0f));
+        if (ImGui::Button("Test Game", ImVec2(104, 28))) {
+            if (engine) engine->enterTestMode(EditorLayer::StartScreen);
+        }
+        ImGui::PopStyleColor(3);
+        ImGui::SetCursorPos(startPos);
+    }
 
     ImVec2 contentSize = ImGui::GetContentRegionAvail();
     const float splitterThick = 4.f;
@@ -479,20 +488,6 @@ void StartScreenEditor::render(Engine* engine) {
 // ── renderPreview ─────────────────────────────────────────────────────────────
 
 void StartScreenEditor::renderPreview() {
-    // Tab toggle: Editor | Game Preview
-    ImGui::RadioButton("Editor", &m_previewTab, 0); ImGui::SameLine();
-    ImGui::RadioButton("Game Preview", &m_previewTab, 1);
-    ImGui::Separator();
-
-    if (m_previewTab == 1) {
-        // Game flow preview mode
-        ImVec2 avail = ImGui::GetContentRegionAvail();
-        ImVec2 origin = ImGui::GetCursorScreenPos();
-        if (m_engine)
-            m_engine->gameFlowPreview().render(origin, avail, m_engine);
-        ImGui::Dummy(avail);
-        return;
-    }
 
     ImVec2 previewSize = ImGui::GetContentRegionAvail();
     ImDrawList* dl = ImGui::GetWindowDrawList();
@@ -886,10 +881,10 @@ void StartScreenEditor::renderAssets() {
         ofn.hwndOwner    = m_window ? glfwGetWin32Window(m_window) : nullptr;
         ofn.lpstrFile    = szFile;
         ofn.nMaxFile     = static_cast<DWORD>(sizeof(szFile) / sizeof(wchar_t));
-        ofn.lpstrFilter  = L"Images & GIFs\0*.png;*.jpg;*.jpeg;*.gif\0"
-                           L"Audio\0*.mp3;*.MP3;*.ogg;*.wav;*.flac;*.aac\0"
-                           L"Videos\0*.mp4;*.webm\0"
-                           L"All Files\0*.*\0";
+        ofn.lpstrFilter  = L"All Files\0*.*\0"
+                           L"Audio\0*.mp3;*.ogg;*.wav;*.flac;*.aac\0"
+                           L"Images & GIFs\0*.png;*.jpg;*.jpeg;*.gif\0"
+                           L"Videos\0*.mp4;*.webm\0";
         ofn.nFilterIndex = 1;
         ofn.Flags        = OFN_PATHMUSTEXIST | OFN_FILEMUSTEXIST |
                            OFN_ALLOWMULTISELECT | OFN_EXPLORER;

@@ -1,5 +1,6 @@
 #pragma once
 #include "renderer/Renderer.h"
+#include "renderer/vulkan/TextureManager.h"
 #include "game/modes/GameModeRenderer.h"
 #include "engine/GameClock.h"
 #include "engine/AudioEngine.h"
@@ -33,14 +34,32 @@ public:
     void run();
     void runHub();
 
-    void setMode(GameModeRenderer* renderer, const ChartData& chart);
+    void setMode(GameModeRenderer* renderer, const ChartData& chart,
+                 const GameModeConfig* config = nullptr);
     void loadAudio(const std::string& path);
     void switchLayer(EditorLayer layer) { m_currentLayer = layer; }
+
+    void launchGameplay(const SongInfo& song, Difficulty difficulty,
+                        const std::string& projectPath);
+    void launchGameplayDirect(const SongInfo& song, const ChartData& chart,
+                              const std::string& projectPath);
+    void exitGameplay();
     StartScreenEditor& startScreenEditor() { return m_startScreenEditor; }
     MusicSelectionEditor& musicSelectionEditor() { return m_musicSelectionEditor; }
     SongEditor& songEditor() { return m_songEditor; }
     GameFlowPreview& gameFlowPreview() { return m_gameFlowPreview; }
     ProjectHub& hub() { return m_hub; }
+    AudioEngine& audio() { return m_audio; }
+    Renderer& renderer() { return m_renderer; }
+    GameClock& clock() { return m_clock; }
+
+    // Preview: set up a renderer and render one frame at the given time
+    void setupPreviewMode(const GameModeConfig& config, const ChartData& chart,
+                          const std::string& projectPath = "");
+    void renderPreviewFrame(double songTime);
+    void clearPreviewMode();
+    bool hasPreviewMode() const { return m_previewMode != nullptr; }
+    VkDescriptorSet sceneTexture() const { return m_sceneViewer.sceneTexture(); }
 
     // Expose InputManager so platform code (Android JNI, iOS bridge) can inject touches
     InputManager& inputManager() { return m_input; }
@@ -54,6 +73,12 @@ private:
     void handleGestureLaneBased(const GestureEvent& evt, double songTime);
     void handleGestureArcaea(const GestureEvent& evt, double songTime);
     void handleGesturePhigros(const GestureEvent& evt, double songTime);
+
+    static std::unique_ptr<GameModeRenderer> createRenderer(const GameModeConfig& config);
+    void togglePause();
+    void renderGameplayHUD();
+    void renderPauseOverlay();
+    void renderResultsOverlay();
 
     static void framebufferResizeCallback(GLFWwindow* window, int w, int h);
     static void keyCallback(GLFWwindow* window, int key, int scancode, int action, int mods);
@@ -79,7 +104,41 @@ private:
     ScoreTracker                       m_score;
     std::unique_ptr<GameModeRenderer>  m_activeMode;
     std::unordered_map<int32_t, uint32_t> m_activeTouches; // touchId → noteId for holds
+    EditorLayer                        m_preGameplayLayer = EditorLayer::MusicSelection;
+    GameModeConfig                     m_gameplayConfig;  // config for current gameplay session
+    bool                               m_gameplayPaused = false;
+    bool                               m_showResults = false;
+    float                              m_gameplayLeadIn = 0.f;   // countdown before audio starts
+    bool                               m_audioStarted = false;
+    std::string                        m_pendingAudioPath;       // audio to load after lead-in
     bool                               m_framebufferResized = false;
     bool                               m_running = false;
     bool                               m_hubMode = false;
+
+    // ── Preview mode (scene preview in editor) ───────────────────────────
+    std::unique_ptr<GameModeRenderer>  m_previewMode;
+
+    // ── Gameplay background image ──────────────────────────────────────────
+    Texture     m_bgTexture;
+    bool        m_bgLoaded = false;
+    void loadBackgroundTexture(const std::string& projectPath, const std::string& bgImage);
+    void clearBackgroundTexture();
+
+    // ── Test/Play mode (full-screen game, no editor panels) ─────────────────
+    bool        m_testMode = false;
+    EditorLayer m_testReturnLayer = EditorLayer::SongEditor;
+
+    // Transition state for test mode page changes
+    bool        m_testTransitioning = false;
+    float       m_testTransProgress = 0.f;
+    EditorLayer m_testTransFrom = EditorLayer::StartScreen;
+    EditorLayer m_testTransTo   = EditorLayer::MusicSelection;
+
+public:
+    bool isTestMode() const { return m_testMode; }
+    bool isTestTransitioning() const { return m_testTransitioning; }
+    float testTransProgress() const { return m_testTransProgress; }
+    void enterTestMode(EditorLayer returnLayer);
+    void exitTestMode();
+    void testTransitionTo(EditorLayer target);
 };

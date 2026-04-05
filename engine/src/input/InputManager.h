@@ -65,7 +65,9 @@ private:
     int keyToLane(int key) {
         static const std::unordered_map<int, int> keyMap = {
             {GLFW_KEY_1, 0}, {GLFW_KEY_2, 1}, {GLFW_KEY_3, 2}, {GLFW_KEY_4, 3},
-            {GLFW_KEY_5, 4}, {GLFW_KEY_6, 5}, {GLFW_KEY_7, 6}
+            {GLFW_KEY_5, 4}, {GLFW_KEY_6, 5}, {GLFW_KEY_7, 6}, {GLFW_KEY_8, 7},
+            {GLFW_KEY_9, 8}, {GLFW_KEY_0, 9},
+            {GLFW_KEY_Q, 10}, {GLFW_KEY_W, 11}
         };
         auto it = keyMap.find(key);
         return it != keyMap.end() ? it->second : -1;

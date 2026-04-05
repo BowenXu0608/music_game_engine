@@ -1,4 +1,9 @@
-# Input System
+# System 4 + System 5 — Input & Gameplay (User Guide)
+
+**Last updated:** 2026-04-03  
+**Status:** ✅ Complete
+
+> For full technical detail see [INPUT_SYSTEM.md](INPUT_SYSTEM.md). This file is the user-facing guide.
 
 A multi-touch input pipeline for the Music Game Engine, targeting Android and iOS. Supports Tap, Flick, Hold, and Slide gestures across all 5 game modes. Desktop mouse input is automatically simulated as a single touch for development.
 

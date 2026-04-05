@@ -108,31 +108,7 @@ VkDescriptorSet MusicSelectionEditor::getThumb(const std::string& relPath) {
 // ── importFiles ──────────────────────────────────────────────────────────────
 
 void MusicSelectionEditor::importFiles(const std::vector<std::string>& srcPaths) {
-    if (m_projectPath.empty()) return;
-
-    fs::path absProject = fs::absolute(fs::path(m_projectPath));
-    int copied = 0;
-
-    for (const auto& src : srcPaths) {
-        std::string ext = fs::path(src).extension().string();
-        std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
-
-        fs::path destDir;
-        if (ext == ".png" || ext == ".jpg" || ext == ".jpeg" || ext == ".gif")
-            destDir = absProject / "assets" / "textures";
-        else if (ext == ".mp3" || ext == ".ogg" || ext == ".wav" || ext == ".flac" || ext == ".aac")
-            destDir = absProject / "assets" / "audio";
-        else
-            destDir = absProject / "assets";
-
-        try {
-            fs::create_directories(destDir);
-            fs::path dest = destDir / fs::path(src).filename();
-            fs::copy_file(src, dest, fs::copy_options::overwrite_existing);
-            ++copied;
-        } catch (...) {}
-    }
-
+    int copied = importAssetsToProject(m_projectPath, srcPaths);
     if (copied > 0) {
         m_statusMsg   = "Imported " + std::to_string(copied) + " file(s)";
         m_statusTimer = 3.f;
@@ -176,6 +152,58 @@ void MusicSelectionEditor::load(const std::string& projectPath) {
                     song.chartHard   = songJ.value("chartHard", "");
                     song.score       = songJ.value("score", 0);
                     song.achievement = songJ.value("achievement", "");
+                    // per-song game mode config
+                    if (songJ.contains("gameMode") && songJ["gameMode"].is_object()) {
+                        auto& gm = songJ["gameMode"];
+                        std::string t = gm.value("type", "dropNotes");
+                        if (t == "circle")        song.gameMode.type = GameModeType::Circle;
+                        else if (t == "scanLine") song.gameMode.type = GameModeType::ScanLine;
+                        else                      song.gameMode.type = GameModeType::DropNotes;
+                        song.gameMode.trackCount = gm.value("trackCount", 7);
+                        std::string dim = gm.value("dimension", "2D");
+                        song.gameMode.dimension = (dim == "3D") ? DropDimension::ThreeD
+                                                                : DropDimension::TwoD;
+                        song.gameMode.audioOffset  = gm.value("audioOffset", 0.f);
+                        song.gameMode.perfectMs    = gm.value("perfectMs", 50.f);
+                        song.gameMode.goodMs       = gm.value("goodMs", 100.f);
+                        song.gameMode.badMs        = gm.value("badMs", 150.f);
+                        song.gameMode.perfectScore = gm.value("perfectScore", 1000);
+                        song.gameMode.goodScore    = gm.value("goodScore", 600);
+                        song.gameMode.badScore     = gm.value("badScore", 200);
+                        song.gameMode.fcImage      = gm.value("fcImage", "");
+                        song.gameMode.apImage      = gm.value("apImage", "");
+
+                        // HUD text configs
+                        auto loadHud = [](const json& j, const char* key, HudTextConfig& h) {
+                            if (!j.contains(key) || !j[key].is_object()) return;
+                            auto& hj = j[key];
+                            if (hj.contains("pos") && hj["pos"].is_array() && hj["pos"].size() >= 2) {
+                                h.pos[0] = hj["pos"][0].get<float>();
+                                h.pos[1] = hj["pos"][1].get<float>();
+                            }
+                            h.fontSize = hj.value("fontSize", h.fontSize);
+                            h.scale    = hj.value("scale", h.scale);
+                            h.bold     = hj.value("bold", h.bold);
+                            h.glow     = hj.value("glow", h.glow);
+                            h.glowRadius = hj.value("glowRadius", h.glowRadius);
+                            if (hj.contains("color") && hj["color"].is_array() && hj["color"].size() >= 4)
+                                for (int i = 0; i < 4; ++i) h.color[i] = hj["color"][i].get<float>();
+                            if (hj.contains("glowColor") && hj["glowColor"].is_array() && hj["glowColor"].size() >= 4)
+                                for (int i = 0; i < 4; ++i) h.glowColor[i] = hj["glowColor"][i].get<float>();
+                        };
+                        loadHud(gm, "scoreHud", song.gameMode.scoreHud);
+                        loadHud(gm, "comboHud", song.gameMode.comboHud);
+
+                        // Camera
+                        if (gm.contains("cameraEye") && gm["cameraEye"].is_array() && gm["cameraEye"].size() >= 3)
+                            for (int i = 0; i < 3; ++i) song.gameMode.cameraEye[i] = gm["cameraEye"][i].get<float>();
+                        if (gm.contains("cameraTarget") && gm["cameraTarget"].is_array() && gm["cameraTarget"].size() >= 3)
+                            for (int i = 0; i < 3; ++i) song.gameMode.cameraTarget[i] = gm["cameraTarget"][i].get<float>();
+                        song.gameMode.cameraFov = gm.value("cameraFov", 55.f);
+
+                        // Background
+                        song.gameMode.backgroundImage = gm.value("backgroundImage", "");
+                    }
                     set.songs.push_back(std::move(song));
                 }
             }
@@ -212,6 +240,51 @@ void MusicSelectionEditor::save() {
             songJ["chartHard"]   = song.chartHard;
             songJ["score"]       = song.score;
             songJ["achievement"] = song.achievement;
+            // per-song game mode config
+            json gmJ;
+            switch (song.gameMode.type) {
+                case GameModeType::DropNotes: gmJ["type"] = "dropNotes"; break;
+                case GameModeType::Circle:    gmJ["type"] = "circle";    break;
+                case GameModeType::ScanLine:  gmJ["type"] = "scanLine";  break;
+            }
+            gmJ["trackCount"] = song.gameMode.trackCount;
+            if (song.gameMode.type == GameModeType::DropNotes)
+                gmJ["dimension"] = (song.gameMode.dimension == DropDimension::TwoD) ? "2D" : "3D";
+            gmJ["audioOffset"]  = song.gameMode.audioOffset;
+            gmJ["perfectMs"]    = song.gameMode.perfectMs;
+            gmJ["goodMs"]       = song.gameMode.goodMs;
+            gmJ["badMs"]        = song.gameMode.badMs;
+            gmJ["perfectScore"] = song.gameMode.perfectScore;
+            gmJ["goodScore"]    = song.gameMode.goodScore;
+            gmJ["badScore"]     = song.gameMode.badScore;
+            gmJ["fcImage"]      = song.gameMode.fcImage;
+            gmJ["apImage"]      = song.gameMode.apImage;
+
+            // HUD text configs
+            auto saveHud = [](json& parent, const char* key, const HudTextConfig& h) {
+                json hj;
+                hj["pos"]       = {h.pos[0], h.pos[1]};
+                hj["fontSize"]  = h.fontSize;
+                hj["scale"]     = h.scale;
+                hj["bold"]      = h.bold;
+                hj["color"]     = {h.color[0], h.color[1], h.color[2], h.color[3]};
+                hj["glow"]      = h.glow;
+                hj["glowColor"] = {h.glowColor[0], h.glowColor[1], h.glowColor[2], h.glowColor[3]};
+                hj["glowRadius"]= h.glowRadius;
+                parent[key] = hj;
+            };
+            saveHud(gmJ, "scoreHud", song.gameMode.scoreHud);
+            saveHud(gmJ, "comboHud", song.gameMode.comboHud);
+
+            // Camera
+            gmJ["cameraEye"]    = {song.gameMode.cameraEye[0], song.gameMode.cameraEye[1], song.gameMode.cameraEye[2]};
+            gmJ["cameraTarget"] = {song.gameMode.cameraTarget[0], song.gameMode.cameraTarget[1], song.gameMode.cameraTarget[2]};
+            gmJ["cameraFov"]    = song.gameMode.cameraFov;
+
+            // Background
+            gmJ["backgroundImage"] = song.gameMode.backgroundImage;
+
+            songJ["gameMode"] = gmJ;
             songsArr.push_back(songJ);
         }
         sj["songs"] = songsArr;
@@ -244,10 +317,55 @@ void MusicSelectionEditor::render(Engine* engine) {
     m_setScrollCurrent  += (m_setScrollTarget  - m_setScrollCurrent)  * std::min(1.f, lerpSpeed * dt);
     m_songScrollCurrent += (m_songScrollTarget - m_songScrollCurrent) * std::min(1.f, lerpSpeed * dt);
 
+    // ── Test mode: full-screen music selection ─────────────────────────────────
+    if (engine && engine->isTestMode()) {
+        ImVec2 displaySz = ImGui::GetIO().DisplaySize;
+        ImGui::SetNextWindowPos(ImVec2(0, 0));
+        ImGui::SetNextWindowSize(displaySz);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
+        ImGui::Begin("##test_musicsel", nullptr,
+            ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove);
+
+        ImVec2 origin = ImGui::GetCursorScreenPos();
+        renderGamePreview(origin, displaySz);
+
+        // Fade-in from black (reverse of transition progress, briefly at start)
+        // Reset fade on re-entry (detect layer switch)
+        static EditorLayer lastLayer = EditorLayer::ProjectHub;
+        static float fadeIn = 1.f;
+        if (lastLayer != EditorLayer::MusicSelection) fadeIn = 1.f;
+        lastLayer = EditorLayer::MusicSelection;
+        fadeIn -= ImGui::GetIO().DeltaTime * 2.f;
+        if (fadeIn > 0.f) {
+            int alpha = (int)(255 * fadeIn);
+            ImGui::GetWindowDrawList()->AddRectFilled(
+                ImVec2(0, 0), displaySz, IM_COL32(0, 0, 0, alpha));
+        }
+
+        ImGui::End();
+        ImGui::PopStyleVar();
+        return;
+    }
+
     ImGui::SetNextWindowPos(ImVec2(0, 0));
     ImGui::SetNextWindowSize(ImGui::GetIO().DisplaySize);
     ImGui::Begin("Music Selection", nullptr,
                  ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoResize);
+
+    // ── Test Game button — top right ─────────────────────────────────────────
+    {
+        ImVec2 startPos = ImGui::GetCursorStartPos();
+        ImVec2 winSize  = ImGui::GetWindowSize();
+        ImGui::SetCursorPos(ImVec2(winSize.x - 120, startPos.y));
+        ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.15f, 0.55f, 0.2f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered,  ImVec4(0.2f, 0.65f, 0.25f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive,   ImVec4(0.1f, 0.45f, 0.15f, 1.0f));
+        if (ImGui::Button("Test Game", ImVec2(104, 28))) {
+            if (engine) engine->enterTestMode(EditorLayer::MusicSelection);
+        }
+        ImGui::PopStyleColor(3);
+        ImGui::SetCursorPos(startPos);
+    }
 
     // Scan assets once per project
     if (!m_assetsScanned && !m_projectPath.empty()) {
@@ -327,19 +445,6 @@ void MusicSelectionEditor::render(Engine* engine) {
 // ── renderPreview ────────────────────────────────────────────────────────────
 
 void MusicSelectionEditor::renderPreview(float width, float height) {
-    // Tab toggle: Editor | Game Preview
-    ImGui::RadioButton("Editor", &m_previewTab, 0); ImGui::SameLine();
-    ImGui::RadioButton("Game Preview", &m_previewTab, 1);
-    ImGui::Separator();
-
-    if (m_previewTab == 1) {
-        ImVec2 avail = ImGui::GetContentRegionAvail();
-        ImVec2 origin = ImGui::GetCursorScreenPos();
-        if (m_engine)
-            m_engine->gameFlowPreview().render(origin, avail, m_engine);
-        ImGui::Dummy(avail);
-        return;
-    }
 
     ImVec2 avail = ImGui::GetContentRegionAvail();
     ImDrawList* dl = ImGui::GetWindowDrawList();
@@ -868,8 +973,9 @@ void MusicSelectionEditor::renderPlayButton(ImVec2 origin, float width) {
     float bx = origin.x - btnW * 0.5f;
     float by = origin.y;
 
-    // Check if we have a valid selection
-    bool canPlay = (m_selectedSet >= 0 && m_selectedSong >= 0);
+    // Check if we have a valid selection (bounds-checked)
+    bool canPlay = (m_selectedSet >= 0 && m_selectedSet < (int)m_sets.size() &&
+                    m_selectedSong >= 0 && m_selectedSong < (int)m_sets[m_selectedSet].songs.size());
 
     ImU32 bgCol   = canPlay ? IM_COL32(50, 120, 220, 240) : IM_COL32(60, 60, 70, 180);
     ImU32 textCol = canPlay ? IM_COL32(255, 255, 255, 255) : IM_COL32(120, 120, 130, 200);
@@ -906,10 +1012,8 @@ void MusicSelectionEditor::renderPlayButton(ImVec2 origin, float width) {
     // Clickable
     ImGui::SetCursorScreenPos(ImVec2(bx, by));
     if (ImGui::InvisibleButton("##play_btn", ImVec2(btnW, btnH)) && canPlay) {
-        // TODO: Launch gameplay with selected song + difficulty
-        std::cout << "[MusicSelection] Play: set=" << m_sets[m_selectedSet].name
-                  << " song=" << m_sets[m_selectedSet].songs[m_selectedSong].name
-                  << " diff=" << (int)m_selectedDifficulty << "\n";
+        auto& song = m_sets[m_selectedSet].songs[m_selectedSong];
+        m_engine->launchGameplay(song, m_selectedDifficulty, m_projectPath);
     }
 }
 
@@ -1269,9 +1373,9 @@ void MusicSelectionEditor::renderAssets() {
         ofn.hwndOwner    = m_window ? glfwGetWin32Window(m_window) : nullptr;
         ofn.lpstrFile    = szFile;
         ofn.nMaxFile     = static_cast<DWORD>(sizeof(szFile) / sizeof(wchar_t));
-        ofn.lpstrFilter  = L"Images\0*.png;*.jpg;*.jpeg;*.gif\0"
+        ofn.lpstrFilter  = L"All Files\0*.*\0"
                            L"Audio\0*.mp3;*.ogg;*.wav;*.flac;*.aac\0"
-                           L"All Files\0*.*\0";
+                           L"Images\0*.png;*.jpg;*.jpeg;*.gif\0";
         ofn.nFilterIndex = 1;
         ofn.Flags        = OFN_PATHMUSTEXIST | OFN_FILEMUSTEXIST |
                            OFN_ALLOWMULTISELECT | OFN_EXPLORER;

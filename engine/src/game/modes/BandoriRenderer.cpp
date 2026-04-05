@@ -1,5 +1,6 @@
 #include "BandoriRenderer.h"
 #include "renderer/Renderer.h"
+#include "ui/ProjectHub.h"
 #include <glm/gtc/matrix_transform.hpp>
 #include <cmath>
 #include <algorithm>
@@ -24,8 +25,28 @@ float BandoriRenderer::pxSize(float worldSz, float clipW, float proj11y, float s
     return worldSz * proj11y * sh * 0.5f / clipW;
 }
 
-void BandoriRenderer::onInit(Renderer& renderer, const ChartData& chart) {
+void BandoriRenderer::onInit(Renderer& renderer, const ChartData& chart,
+                             const GameModeConfig* config) {
+    m_renderer = &renderer;
     m_notes = chart.notes;
+
+    // Apply camera config
+    if (config) {
+        m_camEye    = {config->cameraEye[0], config->cameraEye[1], config->cameraEye[2]};
+        m_camTarget = {config->cameraTarget[0], config->cameraTarget[1], config->cameraTarget[2]};
+        m_camFov    = config->cameraFov;
+        m_laneCount = config->trackCount;
+    }
+
+    // Also check lane count from chart data (in case notes use higher lanes)
+    for (auto& n : m_notes) {
+        int lane = -1;
+        if (auto* tap = std::get_if<TapData>(&n.data))        lane = (int)tap->laneX;
+        else if (auto* hold = std::get_if<HoldData>(&n.data)) lane = (int)hold->laneX;
+        else if (auto* flick = std::get_if<FlickData>(&n.data)) lane = (int)flick->laneX;
+        if (lane >= m_laneCount) m_laneCount = lane + 1;
+    }
+
     onResize(renderer.width(), renderer.height());
 }
 
@@ -34,24 +55,31 @@ void BandoriRenderer::onResize(uint32_t w, uint32_t h) {
     m_height = h;
 
     float aspect = h > 0 ? static_cast<float>(w) / h : 1.f;
-    Camera persp = Camera::makePerspective(FOV_Y_DEG, aspect, 0.5f, 300.f);
-    // Camera sits slightly above and behind the hit zone, angled down the highway.
-    persp.lookAt({0.f, 1.8f, 8.0f}, {0.f, 0.f, -20.f});
+
+    // Camera from config (user-adjustable in editor)
+    Camera persp = Camera::makePerspective(m_camFov, aspect, 0.1f, 300.f);
+    persp.lookAt(m_camEye, m_camTarget);
     m_perspVP  = persp.viewProjection();
     m_proj11y  = std::abs(persp.projection()[1][1]);
 
-    // Batchers still use a flat screen-space ortho camera (y=0 bottom, y=h top).
+    // Calculate lane spacing so highway width matches ~90% of screen at the hit zone
+    // Project two test points at z=0 to find screen-space width per world unit
+    glm::vec2 leftTest  = w2s({-1.f, 0.f, HIT_ZONE_Z}, m_perspVP, (float)w, (float)h);
+    glm::vec2 rightTest = w2s({ 1.f, 0.f, HIT_ZONE_Z}, m_perspVP, (float)w, (float)h);
+    float pxPerWorldUnit = (rightTest.x - leftTest.x) * 0.5f; // px per 1 world unit
+    if (pxPerWorldUnit > 0.f) {
+        float desiredPx = (float)w * 0.30f; // highway fills 30% of screen width (centered)
+        float totalWorldW = desiredPx / pxPerWorldUnit;
+        m_laneSpacing = totalWorldW / m_laneCount;
+        m_noteWorldW  = m_laneSpacing; // notes fill the full lane width
+    }
+
     m_camera = Camera::makeOrtho(0.f, static_cast<float>(w),
                                   static_cast<float>(h), 0.f);
 }
 
 void BandoriRenderer::onUpdate(float dt, double songTime) {
-    double maxTime = 0.0;
-    for (auto& n : m_notes) maxTime = std::max(maxTime, n.time);
-    double loopDuration = maxTime + 1.0;
-    double prevSongTime = m_songTime;
-    m_songTime = loopDuration > 0.0 ? fmod(songTime, loopDuration) : songTime;
-    if (m_songTime < prevSongTime) m_hitNotes.clear();
+    m_songTime = songTime;
 
     for (auto& display : m_judgmentDisplays) {
         display.update(dt);
@@ -65,20 +93,21 @@ void BandoriRenderer::onRender(Renderer& renderer) {
     float sh = static_cast<float>(m_height);
 
     // Lane dividers converge to vanishing point — one edge line per boundary
-    for (int i = 0; i <= LANE_COUNT; ++i) {
-        float wx   = (i - LANE_COUNT * 0.5f) * LANE_SPACING;
+    for (int i = 0; i <= m_laneCount; ++i) {
+        float wx   = (i - m_laneCount * 0.5f) * m_laneSpacing;
         glm::vec2 nearPt = w2s({wx, 0.f, HIT_ZONE_Z}, m_perspVP, sw, sh);
         glm::vec2 farPt  = w2s({wx, 0.f, APPROACH_Z}, m_perspVP, sw, sh);
         renderer.lines().drawLine(nearPt, farPt, 1.5f, {1.f, 1.f, 1.f, 0.2f});
     }
 
-    // Hit zone line across all lanes
+    // Hit zone line across all lanes (bright, thick)
     {
-        float leftX  = -(LANE_COUNT * 0.5f) * LANE_SPACING;
-        float rightX =  (LANE_COUNT * 0.5f) * LANE_SPACING;
+        float leftX  = -(m_laneCount * 0.5f) * m_laneSpacing;
+        float rightX =  (m_laneCount * 0.5f) * m_laneSpacing;
         glm::vec2 l = w2s({leftX,  0.f, HIT_ZONE_Z}, m_perspVP, sw, sh);
         glm::vec2 r = w2s({rightX, 0.f, HIT_ZONE_Z}, m_perspVP, sw, sh);
-        renderer.lines().drawLine(l, r, 2.f, {1.f, 1.f, 0.f, 0.8f});
+        renderer.lines().drawLine(l, r, 4.f, {1.f, 0.9f, 0.2f, 1.f});  // bright yellow
+        renderer.lines().drawLine(l, r, 8.f, {1.f, 0.9f, 0.2f, 0.3f}); // glow
     }
 
     // Notes
@@ -94,23 +123,21 @@ void BandoriRenderer::onRender(Renderer& renderer) {
         // Only render notes on the visible highway section
         if (noteZ > 2.f || noteZ < APPROACH_Z - 2.f) continue;
 
-        float worldX = (laneX - (LANE_COUNT - 1) * 0.5f) * LANE_SPACING;
+        float worldX = (laneX - (m_laneCount - 1) * 0.5f) * m_laneSpacing;
         glm::vec3 worldPos{worldX, 0.f, noteZ};
         glm::vec4 clip = m_perspVP * glm::vec4(worldPos, 1.f);
         if (clip.w <= 0.f) continue;
 
         glm::vec2 screen = w2s(worldPos, m_perspVP, sw, sh);
-        float sz = pxSize(NOTE_WORLD_W, clip.w, m_proj11y, sh);
+        float sz = pxSize(m_noteWorldW, clip.w, m_proj11y, sh);
         if (sz < 2.f) continue;
 
         glm::vec4 color = {1.f, 0.8f, 0.2f, 1.f};
         if (note.type == NoteType::Hold)  color = {0.2f, 0.8f, 1.f, 1.f};
         if (note.type == NoteType::Flick) color = {1.f, 0.3f, 0.3f, 1.f};
 
-        if (timeDiff > -0.05f && timeDiff < 0.05f && !m_hitNotes.count(note.id)) {
-            m_hitNotes.insert(note.id);
-            renderer.particles().emitBurst(screen, color, 16, 250.f, 10.f, 0.6f);
-        }
+        // Skip rendering notes that were already hit (they get particle effect instead)
+        if (m_hitNotes.count(note.id)) continue;
 
         renderer.quads().drawQuad(
             screen, {sz, sz * 0.4f}, 0.f,
@@ -119,28 +146,52 @@ void BandoriRenderer::onRender(Renderer& renderer) {
             renderer.context(), renderer.descriptors());
     }
 
-    // Render judgment displays
-    for (int lane = 0; lane < LANE_COUNT; ++lane) {
-        auto& display = m_judgmentDisplays[lane];
-        if (!display.isActive()) continue;
-
-        float laneX = (lane - (LANE_COUNT - 1) * 0.5f) * LANE_SPACING;
-        glm::vec2 hitPos = w2s({laneX, 0.f, HIT_ZONE_Z}, m_perspVP, sw, sh);
-        hitPos.y -= 80.f;
-
-        float size = 100.f * display.alpha();
-        renderer.quads().drawQuad(
-            hitPos, {size, size * 0.4f}, 0.f,
-            display.color(), {0.f, 0.f, 1.f, 1.f},
-            renderer.whiteView(), renderer.whiteSampler(),
-            renderer.context(), renderer.descriptors());
-    }
+    // Judgment displays removed — using particle effects only
 }
 
 void BandoriRenderer::showJudgment(int lane, Judgment judgment) {
-    if (lane >= 0 && lane < LANE_COUNT) {
-        m_judgmentDisplays[lane].spawn(judgment, {0.f, 0.f});
+    if (lane < 0 || lane >= m_laneCount) return;
+
+    m_judgmentDisplays[lane].spawn(judgment, {0.f, 0.f});
+
+    // Mark the closest note in this lane as hit
+    float bestDist = 999.f;
+    uint32_t bestId = 0;
+    bool found = false;
+    for (auto& note : m_notes) {
+        if (m_hitNotes.count(note.id)) continue;
+        int noteLane = -1;
+        if (auto* tap = std::get_if<TapData>(&note.data))        noteLane = (int)tap->laneX;
+        else if (auto* hold = std::get_if<HoldData>(&note.data)) noteLane = (int)hold->laneX;
+        else if (auto* flick = std::get_if<FlickData>(&note.data)) noteLane = (int)flick->laneX;
+        if (noteLane != lane) continue;
+        float d = std::abs((float)(note.time - m_songTime));
+        if (d > 0.15f) continue;
+        if (d < bestDist) { bestDist = d; bestId = note.id; found = true; }
+    }
+    if (found) m_hitNotes.insert(bestId);
+
+    // Particle effect — Miss gets nothing, others get colored burst
+    if (judgment != Judgment::Miss && m_renderer) {
+        float sw = (float)m_width, sh = (float)m_height;
+        float laneX = (lane - (m_laneCount - 1) * 0.5f) * m_laneSpacing;
+        glm::vec2 hitPos = w2s({laneX, 0.f, HIT_ZONE_Z}, m_perspVP, sw, sh);
+
+        glm::vec4 pColor;
+        int pCount = 12;
+        switch (judgment) {
+            case Judgment::Perfect: pColor = {0.2f, 1.f, 0.3f, 1.f}; pCount = 20; break;
+            case Judgment::Good:    pColor = {0.3f, 0.6f, 1.f, 1.f}; pCount = 14; break;
+            case Judgment::Bad:     pColor = {1.f, 0.25f, 0.2f, 1.f}; pCount = 8; break;
+            default: break;
+        }
+        m_renderer->particles().emitBurst(hitPos, pColor, pCount, 200.f, 8.f, 0.5f);
     }
 }
 
-void BandoriRenderer::onShutdown(Renderer& renderer) {}
+void BandoriRenderer::onShutdown(Renderer& renderer) {
+    m_renderer = nullptr;
+    m_notes.clear();
+    m_hitNotes.clear();
+    for (auto& d : m_judgmentDisplays) d = JudgmentDisplay{};
+}
