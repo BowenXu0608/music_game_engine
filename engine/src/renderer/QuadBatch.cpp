@@ -118,6 +118,44 @@ void QuadBatch::drawQuad(glm::vec2 pos, glm::vec2 size, float rotation,
     }
 }
 
+void QuadBatch::drawQuadCorners(glm::vec2 p0, glm::vec2 p1, glm::vec2 p2, glm::vec2 p3,
+                                glm::vec4 color, glm::vec4 uvTransform,
+                                VkImageView texture, VkSampler sampler,
+                                VulkanContext& ctx, DescriptorManager& descMgr) {
+    if (m_vertices.size() / 4 >= MAX_QUADS) return;
+
+    glm::vec2 corners[4] = {p0, p1, p2, p3};
+    glm::vec2 uvs[4]     = {{0,0},{1,0},{1,1},{0,1}};
+
+    for (int i = 0; i < 4; ++i) {
+        QuadVertex v{};
+        v.pos   = corners[i];
+        v.uv    = uvs[i] * glm::vec2(uvTransform.z, uvTransform.w)
+                         + glm::vec2(uvTransform.x, uvTransform.y);
+        v.color = color;
+        m_vertices.push_back(v);
+    }
+
+    uint32_t quadIdx = static_cast<uint32_t>(m_vertices.size() / 4) - 1;
+    if (m_batches.empty() || m_batches.back().texture != texture) {
+        Batch b{};
+        b.texture    = texture;
+        b.sampler    = sampler;
+        b.indexStart = quadIdx * 6;
+        b.indexCount = 6;
+        auto it = m_texSetCache.find(texture);
+        if (it == m_texSetCache.end()) {
+            b.texSet = descMgr.allocateTextureSet(ctx, texture, sampler);
+            m_texSetCache[texture] = b.texSet;
+        } else {
+            b.texSet = it->second;
+        }
+        m_batches.push_back(b);
+    } else {
+        m_batches.back().indexCount += 6;
+    }
+}
+
 void QuadBatch::flush(VkCommandBuffer cmd, VulkanContext& ctx, DescriptorManager& descMgr) {
     if (m_vertices.empty()) return;
 

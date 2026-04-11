@@ -1,6 +1,7 @@
 #pragma once
 #include "ProjectHub.h"  // GameModeConfig, GameModeType, DropDimension
 #include "AssetBrowser.h"
+#include "ImageEditor.h"
 #include "renderer/vulkan/TextureManager.h"
 #include <vulkan/vulkan.h>
 #include <GLFW/glfw3.h>
@@ -48,6 +49,7 @@ public:
     const std::string& projectPath() const { return m_projectPath; }
     SongInfo* getSelectedSong();
     void renderGamePreview(ImVec2 origin, ImVec2 size);
+    void importFiles(const std::vector<std::string>& srcPaths);
 
 private:
     // ── Panel rendering ──────────────────────────────────────────────────────
@@ -111,8 +113,8 @@ private:
     // ── Asset browser ────────────────────────────────────────────────────────
     AssetList m_assets;
     bool      m_assetsScanned = false;
+    // ImageEditor m_imageEditor;
     void renderAssets();
-    void importFiles(const std::vector<std::string>& srcPaths);
 
     // ── Preview tab ──────────────────────────────────────────────────────────
     int m_previewTab = 0;  // 0=Editor, 1=Game Preview

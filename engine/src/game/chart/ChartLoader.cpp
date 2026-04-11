@@ -46,6 +46,19 @@ static size_t findMatchingBracket(const std::string& s, size_t start) {
     return std::string::npos;
 }
 
+// Find the matching closing brace for an opening '{' at position `start`,
+// correctly handling nested braces and brackets so notes containing
+// "waypoints": [{...}, {...}] still have their outer brace identified.
+static size_t findMatchingBrace(const std::string& s, size_t start) {
+    int depth = 1;
+    for (size_t i = start + 1; i < s.size(); ++i) {
+        char c = s[i];
+        if (c == '{') ++depth;
+        else if (c == '}') { if (--depth == 0) return i; }
+    }
+    return std::string::npos;
+}
+
 ChartData ChartLoader::loadUnified(const std::string& path) {
     ChartData chart;
     std::ifstream f(path);
@@ -72,18 +85,62 @@ ChartData ChartLoader::loadUnified(const std::string& path) {
     chart.artist = findValue("artist");
     chart.offset = std::stof(findValue("offset").empty() ? "0" : findValue("offset"));
 
-    // Parse timing block → single TimingPoint at t=0
-    // UCF schema: "timing": { "bpm": 120.0, "timeSignature": "4/4" }
+    // Parse timing block → TimingPoints
+    // UCF schema: "timing": { "bpm": 120.0, "timeSignature": "4/4", "bpm_changes": [...] }
     {
-        std::string bpmStr = findValue("bpm");
-        TimingPoint tp{};
-        tp.time  = 0.0;
-        tp.bpm   = bpmStr.empty() ? 120.f : std::stof(bpmStr);
-        tp.meter = 4;
+        int defaultMeter = 4;
         std::string ts = findValue("timeSignature");
         if (!ts.empty() && ts[0] >= '1' && ts[0] <= '9')
-            tp.meter = std::stoi(ts);
-        chart.timingPoints.push_back(tp);
+            defaultMeter = std::stoi(ts);
+
+        // Check for bpm_changes array (dynamic BPM)
+        auto bpmChangesPos = content.find("\"bpm_changes\"");
+        if (bpmChangesPos != std::string::npos) {
+            auto arrStart = content.find('[', bpmChangesPos);
+            if (arrStart != std::string::npos) {
+                auto arrEnd = findMatchingBracket(content, arrStart);
+                if (arrEnd == std::string::npos) arrEnd = content.find(']', arrStart);
+                std::string arrStr = content.substr(arrStart + 1, arrEnd - arrStart - 1);
+
+                size_t objPos = 0;
+                while ((objPos = arrStr.find('{', objPos)) != std::string::npos) {
+                    auto objEnd = arrStr.find('}', objPos);
+                    if (objEnd == std::string::npos) break;
+                    std::string obj = arrStr.substr(objPos, objEnd - objPos + 1);
+
+                    auto getVal = [&](const std::string& k) -> std::string {
+                        auto p = obj.find("\"" + k + "\"");
+                        if (p == std::string::npos) return "";
+                        p = obj.find(':', p) + 1;
+                        while (p < obj.size() && (obj[p] == ' ' || obj[p] == '\t')) p++;
+                        auto e = p;
+                        while (e < obj.size() && obj[e] != ',' && obj[e] != '}') e++;
+                        return obj.substr(p, e - p);
+                    };
+
+                    std::string tStr = getVal("time");
+                    std::string bpmStr = getVal("bpm");
+                    if (!tStr.empty() && !bpmStr.empty()) {
+                        TimingPoint tp{};
+                        tp.time  = std::stod(tStr);
+                        tp.bpm   = std::stof(bpmStr);
+                        tp.meter = defaultMeter;
+                        chart.timingPoints.push_back(tp);
+                    }
+                    objPos = objEnd + 1;
+                }
+            }
+        }
+
+        // Fallback: single BPM at t=0
+        if (chart.timingPoints.empty()) {
+            std::string bpmStr = findValue("bpm");
+            TimingPoint tp{};
+            tp.time  = 0.0;
+            tp.bpm   = bpmStr.empty() ? 120.f : std::stof(bpmStr);
+            tp.meter = defaultMeter;
+            chart.timingPoints.push_back(tp);
+        }
     }
 
     // Parse notes array (handles nested arrays safely)
@@ -97,7 +154,10 @@ ChartData ChartLoader::loadUnified(const std::string& path) {
         uint32_t noteID = 0;
         size_t pos = 0;
         while ((pos = notesStr.find('{', pos)) != std::string::npos) {
-            auto objEnd = notesStr.find('}', pos);
+            // Use brace matching so notes containing nested objects (e.g.
+            // "waypoints": [{...}, {...}]) still have their outer brace
+            // identified correctly.
+            auto objEnd = findMatchingBrace(notesStr, pos);
             if (objEnd == std::string::npos) break;
             std::string noteObj = notesStr.substr(pos, objEnd - pos + 1);
 
@@ -130,15 +190,134 @@ ChartData ChartLoader::loadUnified(const std::string& path) {
             ev.time = std::stod(getVal("time"));
             std::string type = getVal("type");
 
+            auto clampSpan = [&]() {
+                int s = getInt("laneSpan", 1);
+                if (s < 1) s = 1;
+                if (s > 3) s = 3;
+                return s;
+            };
             if (type == "tap") {
                 ev.type = NoteType::Tap;
-                ev.data = TapData{getFloat("lane")};
+                ev.data = TapData{getFloat("lane"), clampSpan()};
             } else if (type == "slide") {
                 ev.type = NoteType::Slide;
-                ev.data = TapData{getFloat("lane")};
+                TapData td{};
+                td.laneX    = getFloat("lane");
+                td.laneSpan = clampSpan();
+                td.duration = getFloat("duration");
+                // "samples": [t1, t2, ...] — slide tick offsets
+                auto sp = noteObj.find("\"samples\"");
+                if (sp != std::string::npos) {
+                    auto lb = noteObj.find('[', sp);
+                    auto rb = noteObj.find(']', lb);
+                    if (lb != std::string::npos && rb != std::string::npos) {
+                        std::string body = noteObj.substr(lb + 1, rb - lb - 1);
+                        size_t q = 0;
+                        while (q < body.size()) {
+                            while (q < body.size() && (body[q]==' '||body[q]==','||body[q]=='\t')) q++;
+                            if (q >= body.size()) break;
+                            size_t e = q;
+                            while (e < body.size() && body[e] != ',' && body[e] != ' ') e++;
+                            try { td.samplePoints.push_back(std::stof(body.substr(q, e - q))); }
+                            catch (...) {}
+                            q = e;
+                        }
+                    }
+                }
+                ev.data = std::move(td);
             } else if (type == "hold") {
                 ev.type = NoteType::Hold;
-                ev.data = HoldData{getFloat("lane"), getFloat("duration")};
+                HoldData hd{};
+                hd.laneX    = getFloat("lane");
+                hd.duration = getFloat("duration");
+                hd.laneSpan = clampSpan();
+
+                // Cross-lane fields (optional; omitted for straight holds)
+                std::string endLaneStr = getVal("endLane");
+                if (!endLaneStr.empty()) {
+                    hd.endLaneX = std::stof(endLaneStr);
+                    std::string tStr = getVal("transition");
+                    if      (tStr == "angle90")  hd.transition = HoldTransition::Angle90;
+                    else if (tStr == "curve")    hd.transition = HoldTransition::Curve;
+                    else if (tStr == "rhomboid") hd.transition = HoldTransition::Rhomboid;
+                    else                         hd.transition = HoldTransition::Straight;
+                    hd.transitionLen = getFloat("transitionLen");
+                    std::string tsStr = getVal("transitionStart");
+                    hd.transitionStart = tsStr.empty() ? -1.f : std::stof(tsStr);
+                } else {
+                    hd.endLaneX = -1.f;
+                }
+
+                // Multi-waypoint path: parse "waypoints": [{t,lane,len,style}, ...]
+                auto wpKey = noteObj.find("\"waypoints\"");
+                if (wpKey != std::string::npos) {
+                    auto lb = noteObj.find('[', wpKey);
+                    auto rb = noteObj.find(']', lb);
+                    if (lb != std::string::npos && rb != std::string::npos) {
+                        std::string body = noteObj.substr(lb + 1, rb - lb - 1);
+                        size_t p = 0;
+                        while ((p = body.find('{', p)) != std::string::npos) {
+                            auto e = body.find('}', p);
+                            if (e == std::string::npos) break;
+                            std::string obj = body.substr(p, e - p + 1);
+                            auto getF = [&](const std::string& k, float def) {
+                                auto kp = obj.find("\"" + k + "\"");
+                                if (kp == std::string::npos) return def;
+                                kp = obj.find(':', kp) + 1;
+                                while (kp < obj.size() && (obj[kp]==' '||obj[kp]=='\t')) kp++;
+                                size_t ee = kp;
+                                while (ee < obj.size() && obj[ee] != ',' && obj[ee] != '}') ee++;
+                                try { return std::stof(obj.substr(kp, ee - kp)); } catch (...) { return def; }
+                            };
+                            auto getS = [&](const std::string& k) {
+                                auto kp = obj.find("\"" + k + "\"");
+                                if (kp == std::string::npos) return std::string();
+                                kp = obj.find(':', kp) + 1;
+                                while (kp < obj.size() && (obj[kp]==' '||obj[kp]=='\t'||obj[kp]=='"')) kp++;
+                                size_t ee = kp;
+                                while (ee < obj.size() && obj[ee] != ',' && obj[ee] != '}' && obj[ee] != '"') ee++;
+                                return obj.substr(kp, ee - kp);
+                            };
+                            HoldWaypoint hw{};
+                            hw.tOffset       = getF("t", 0.f);
+                            hw.lane          = (int)getF("lane", 0.f);
+                            hw.transitionLen = getF("len", 0.f);
+                            std::string st = getS("style");
+                            if      (st == "angle90")  hw.style = HoldTransition::Angle90;
+                            else if (st == "rhomboid") hw.style = HoldTransition::Rhomboid;
+                            else if (st == "straight") hw.style = HoldTransition::Straight;
+                            else                       hw.style = HoldTransition::Curve;
+                            hd.waypoints.push_back(hw);
+                            p = e + 1;
+                        }
+                        if (!hd.waypoints.empty()) {
+                            hd.endLaneX = static_cast<float>(hd.waypoints.back().lane);
+                        }
+                    }
+                }
+
+                // Sample points: parse "samples": [t1, t2, ...]
+                auto sp = noteObj.find("\"samples\"");
+                if (sp != std::string::npos) {
+                    auto lb = noteObj.find('[', sp);
+                    auto rb = noteObj.find(']', lb);
+                    if (lb != std::string::npos && rb != std::string::npos) {
+                        std::string body = noteObj.substr(lb + 1, rb - lb - 1);
+                        size_t q = 0;
+                        while (q < body.size()) {
+                            while (q < body.size() && (body[q] == ' ' || body[q] == ',' || body[q] == '\t')) q++;
+                            if (q >= body.size()) break;
+                            size_t e = q;
+                            while (e < body.size() && body[e] != ',' && body[e] != ' ') e++;
+                            try {
+                                hd.samplePoints.push_back({std::stof(body.substr(q, e - q))});
+                            } catch (...) {}
+                            q = e;
+                        }
+                    }
+                }
+
+                ev.data = hd;
             } else if (type == "flick") {
                 ev.type = NoteType::Flick;
                 ev.data = FlickData{getFloat("lane"), getInt("direction")};
@@ -164,11 +343,86 @@ ChartData ChartLoader::loadUnified(const std::string& path) {
                 ev.data = TapData{getFloat("lane")};
             } else if (type == "ring") {
                 ev.type = NoteType::Ring;
-                ev.data = LanotaRingData{getFloat("angle"), getInt("ringIndex")};
+                int span = getInt("laneSpan");
+                if (span < 1) span = 1;
+                if (span > 3) span = 3;
+                ev.data = LanotaRingData{getFloat("angle"), getInt("ringIndex"), span};
             } else {
                 // Unknown type — skip
                 pos = objEnd + 1;
                 continue;
+            }
+
+            // ── Scan-line coordinates block: "scan": {x, y, endY, path} ─
+            // Distributes the fields across whichever variant is currently
+            // assigned to ev.data. Only written by the scan-line editor.
+            auto scanKey = noteObj.find("\"scan\"");
+            if (scanKey != std::string::npos) {
+                auto lb = noteObj.find('{', scanKey);
+                auto rb = (lb != std::string::npos) ? findMatchingBrace(noteObj, lb)
+                                                    : std::string::npos;
+                if (lb != std::string::npos && rb != std::string::npos) {
+                    std::string body = noteObj.substr(lb, rb - lb + 1);
+
+                    auto getF = [&](const std::string& k, float def) -> float {
+                        auto kp = body.find("\"" + k + "\"");
+                        if (kp == std::string::npos) return def;
+                        kp = body.find(':', kp) + 1;
+                        while (kp < body.size() && (body[kp]==' '||body[kp]=='\t')) kp++;
+                        size_t ee = kp;
+                        while (ee < body.size() && body[ee] != ',' && body[ee] != '}') ee++;
+                        try { return std::stof(body.substr(kp, ee - kp)); }
+                        catch (...) { return def; }
+                    };
+
+                    float sx = getF("x", 0.f);
+                    float sy = getF("y", 0.f);
+                    float sey = getF("endY", -1.f);
+
+                    // Parse path: [[x,y], [x,y], ...]
+                    std::vector<std::pair<float,float>> path;
+                    auto pk = body.find("\"path\"");
+                    if (pk != std::string::npos) {
+                        auto plb = body.find('[', pk);
+                        auto prb = (plb != std::string::npos)
+                                   ? findMatchingBracket(body, plb)
+                                   : std::string::npos;
+                        if (plb != std::string::npos && prb != std::string::npos) {
+                            std::string pbody = body.substr(plb + 1, prb - plb - 1);
+                            size_t q = 0;
+                            while (q < pbody.size()) {
+                                auto ilb = pbody.find('[', q);
+                                if (ilb == std::string::npos) break;
+                                auto irb = pbody.find(']', ilb);
+                                if (irb == std::string::npos) break;
+                                std::string pair = pbody.substr(ilb + 1, irb - ilb - 1);
+                                // Split on comma
+                                auto comma = pair.find(',');
+                                if (comma != std::string::npos) {
+                                    try {
+                                        float px = std::stof(pair.substr(0, comma));
+                                        float py = std::stof(pair.substr(comma + 1));
+                                        path.emplace_back(px, py);
+                                    } catch (...) {}
+                                }
+                                q = irb + 1;
+                            }
+                        }
+                    }
+
+                    if (auto* tap = std::get_if<TapData>(&ev.data)) {
+                        tap->scanX = sx;
+                        tap->scanY = sy;
+                        if (!path.empty()) tap->scanPath = std::move(path);
+                    } else if (auto* hold = std::get_if<HoldData>(&ev.data)) {
+                        hold->scanX    = sx;
+                        hold->scanY    = sy;
+                        hold->scanEndY = sey;
+                    } else if (auto* flick = std::get_if<FlickData>(&ev.data)) {
+                        flick->scanX = sx;
+                        flick->scanY = sy;
+                    }
+                }
             }
 
             chart.notes.push_back(ev);

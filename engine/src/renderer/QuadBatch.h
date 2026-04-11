@@ -26,6 +26,14 @@ public:
                   VkImageView texture, VkSampler sampler,
                   VulkanContext& ctx, DescriptorManager& descMgr);
 
+    // Submit a quad defined by 4 explicit screen-space corners (any winding;
+    // vertex order is p0,p1,p2,p3 → triangles {p0,p1,p2} and {p2,p3,p0}).
+    // Use this to draw perspective-warped quads (e.g. ground-plane notes).
+    void drawQuadCorners(glm::vec2 p0, glm::vec2 p1, glm::vec2 p2, glm::vec2 p3,
+                         glm::vec4 color, glm::vec4 uvTransform,
+                         VkImageView texture, VkSampler sampler,
+                         VulkanContext& ctx, DescriptorManager& descMgr);
+
     // Flush all pending quads — call once per frame
     void flush(VkCommandBuffer cmd, VulkanContext& ctx, DescriptorManager& descMgr);
 

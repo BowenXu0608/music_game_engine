@@ -10,13 +10,13 @@ void ImGuiLayer::init(GLFWwindow* window, VulkanContext& ctx, VkRenderPass rende
     m_device = ctx.device();
 
     VkDescriptorPoolSize pool_sizes[] = {
-        { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 32 }
+        { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 256 }
     };
 
     VkDescriptorPoolCreateInfo pool_info = {};
     pool_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
     pool_info.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
-    pool_info.maxSets = 32;
+    pool_info.maxSets = 256;
     pool_info.poolSizeCount = 1;
     pool_info.pPoolSizes = pool_sizes;
 

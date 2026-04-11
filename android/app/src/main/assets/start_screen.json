@@ -1,0 +1,51 @@
+{
+  "audio": {
+    "bgMusic": "",
+    "bgMusicLoop": true,
+    "bgMusicVolume": 1.0,
+    "tapSfx": "",
+    "tapSfxVolume": 1.0
+  },
+  "background": {
+    "file": "assets/textures/3302789baba9c5c1f1556f240f1fa72c.JPG",
+    "type": "image"
+  },
+  "logo": {
+    "bold": false,
+    "color": [
+      0.796923041343689,
+      0.7112740874290466,
+      0.1495763063430786,
+      1.0
+    ],
+    "fontSize": 72.5479965209961,
+    "glow": false,
+    "glowColor": [
+      1.0,
+      0.800000011920929,
+      0.20000000298023224,
+      0.800000011920929
+    ],
+    "glowRadius": 8.0,
+    "imageFile": "",
+    "italic": false,
+    "position": {
+      "x": 0.5,
+      "y": 0.30000001192092896
+    },
+    "scale": 1.0,
+    "text": "Test Game For Qiao",
+    "type": "text"
+  },
+  "tapText": "Tap to Start",
+  "tapTextPosition": {
+    "x": 0.5,
+    "y": 0.800000011920929
+  },
+  "tapTextSize": 24,
+  "transition": {
+    "customScript": "",
+    "duration": 0.5,
+    "effect": "fade"
+  }
+}

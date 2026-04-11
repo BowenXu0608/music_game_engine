@@ -1,0 +1,16 @@
+{
+  "defaultChart": "assets/charts/demo.json",
+  "engineVersion": "1.0.0",
+  "name": "try",
+  "paths": {
+    "audio": "assets/audio",
+    "charts": "assets/charts",
+    "shaders": "../../build/shaders"
+  },
+  "version": "1.0.0",
+  "window": {
+    "height": 720,
+    "title": "try",
+    "width": 1280
+  }
+}

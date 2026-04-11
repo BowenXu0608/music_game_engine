@@ -1,3 +1,18 @@
 build/
 *.ps1
 .claude/
+
+# Android build artifacts
+android/sdk/
+android/.gradle/
+android/.cxx/
+android/app/.cxx/
+android/app/build/
+android/build/
+android/local.properties
+
+# Logs and transient outputs
+*.log
+test_output.txt
+Projects/*/apk_build.log
+Projects/*/test.apk

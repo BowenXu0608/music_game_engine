@@ -24,6 +24,8 @@ public:
     Texture loadFromFile(VulkanContext& ctx, BufferManager& bufMgr,
                          const std::string& path);
     Texture createWhite1x1(VulkanContext& ctx, BufferManager& bufMgr);
+    Texture createFromPixels(VulkanContext& ctx, BufferManager& bufMgr,
+                             const uint8_t* rgba, uint32_t w, uint32_t h);
     void    destroyTexture(VulkanContext& ctx, Texture& tex);
 
     VmaAllocator allocator() const { return m_allocator; }

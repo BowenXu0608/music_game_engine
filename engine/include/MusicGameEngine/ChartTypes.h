@@ -5,13 +5,29 @@
 #include <variant>
 #include <cstdint>
 
-// ── Note types ───────────────────────────────────────────────────────────────
+// ── Note types ──────────────────────────────────────────────────────────────
 
 enum class NoteType { Tap, Hold, Flick, Drag, Arc, ArcTap, Ring, Slide };
 
-struct TapData  { float laneX; };
-struct HoldData { float laneX; float duration; };
-struct FlickData{ float laneX; int direction = 0; };  // direction: -1=left, 0=up, 1=right
+struct TapData   { float laneX; };
+struct FlickData { float laneX; int direction = 0; };  // direction: -1=left, 0=up, 1=right
+
+// A single sample point along a Hold note's path.
+struct HoldWaypoint { double time; float laneX; };
+
+// Hold = a long note played with one sustained finger press.
+// Two waypoints at the same lane = simple straight hold.
+// Multiple waypoints at different lanes = a slide hold (lane-changing path).
+struct HoldData {
+    std::vector<HoldWaypoint> waypoints;  // sorted by time; first=start, last=end
+
+    float startLane() const { return waypoints.empty() ? 0.f : waypoints.front().laneX; }
+    float endLane()   const { return waypoints.empty() ? 0.f : waypoints.back().laneX; }
+    float duration()  const {
+        return waypoints.size() < 2 ? 0.f
+             : static_cast<float>(waypoints.back().time - waypoints.front().time);
+    }
+};
 
 struct ArcData {
     glm::vec2 startPos, endPos;
@@ -30,6 +46,7 @@ struct PhigrosNoteData {
 struct LanotaRingData {
     float angle;
     int   ringIndex;
+    int   laneSpan = 1; // how many adjacent lanes the note covers (1, 2, or 3)
 };
 
 struct NoteEvent {

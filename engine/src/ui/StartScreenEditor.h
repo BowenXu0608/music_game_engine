@@ -1,6 +1,7 @@
 #pragma once
 #include "GifPlayer.h"
 #include "AssetBrowser.h"
+#include "ImageEditor.h"
 #include "renderer/vulkan/TextureManager.h"
 #include <vulkan/vulkan.h>
 #include <GLFW/glfw3.h>
@@ -111,6 +112,7 @@ private:
     // ── asset browser cache ──────────────────────────────────────────────────
     AssetList   m_assets;
     bool        m_assetsScanned = false;
+    // ImageEditor m_imageEditor;
 
     // ── thumbnail cache ──────────────────────────────────────────────────────
     struct ThumbEntry { Texture tex; VkDescriptorSet desc = VK_NULL_HANDLE; };

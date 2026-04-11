@@ -47,7 +47,10 @@ void SongEditor::setSong(SongInfo* song, const std::string& projectPath) {
     // Clear editor notes and load from chart files if they exist
     m_diffNotes.clear();
     m_diffMarkers.clear();
-    m_pressFirstClick = false;
+    m_bpmChanges.clear();
+    m_dominantBpm = 0.f;
+    m_holdDragging  = false;
+    m_holdLastTrack = -1;
 
     if (!song) return;
 
@@ -62,17 +65,58 @@ void SongEditor::setSong(SongInfo* song, const std::string& projectPath) {
                 en.time = (float)n.time;
 
                 int lane = 0;
-                if (auto* tap = std::get_if<TapData>(&n.data))        lane = (int)tap->laneX;
-                else if (auto* hold = std::get_if<HoldData>(&n.data)) lane = (int)hold->laneX;
-                else if (auto* flick = std::get_if<FlickData>(&n.data)) lane = (int)flick->laneX;
+                if (auto* tap = std::get_if<TapData>(&n.data)) {
+                    lane = (int)tap->laneX;
+                    en.scanX = tap->scanX;
+                    en.scanY = tap->scanY;
+                    if (!tap->scanPath.empty()) en.scanPath = tap->scanPath;
+                    if (tap->duration > 0.f)    en.endTime  = en.time + tap->duration;
+                    if (!tap->samplePoints.empty()) en.samplePoints = tap->samplePoints;
+                } else if (auto* hold = std::get_if<HoldData>(&n.data)) {
+                    lane = (int)hold->laneX;
+                    en.scanX    = hold->scanX;
+                    en.scanY    = hold->scanY;
+                    en.scanEndY = hold->scanEndY;
+                } else if (auto* flick = std::get_if<FlickData>(&n.data)) {
+                    lane = (int)flick->laneX;
+                    en.scanX = flick->scanX;
+                    en.scanY = flick->scanY;
+                }
                 en.track = lane;
 
                 if (n.type == NoteType::Hold) {
                     en.type = EditorNoteType::Hold;
-                    if (auto* hold = std::get_if<HoldData>(&n.data))
+                    if (auto* hold = std::get_if<HoldData>(&n.data)) {
                         en.endTime = en.time + hold->duration;
+                        en.laneSpan = hold->laneSpan;
+                        if (!hold->waypoints.empty()) {
+                            // Multi-waypoint chart
+                            en.waypoints.reserve(hold->waypoints.size());
+                            for (const auto& w : hold->waypoints) {
+                                EditorHoldWaypoint ew{};
+                                ew.tOffset       = w.tOffset;
+                                ew.lane          = w.lane;
+                                ew.transitionLen = w.transitionLen;
+                                ew.style         = (EditorHoldTransition)(int)w.style;
+                                en.waypoints.push_back(ew);
+                            }
+                            en.endTrack = -1; // legacy field unused
+                        } else if (hold->endLaneX >= 0.f && hold->endLaneX != hold->laneX) {
+                            en.endTrack = (int)hold->endLaneX;
+                            en.transition      = (EditorHoldTransition)(int)hold->transition;
+                            en.transitionLen   = hold->transitionLen;
+                            en.transitionStart = hold->transitionStart;
+                        } else {
+                            en.endTrack = -1;
+                        }
+                        en.samplePoints.reserve(hold->samplePoints.size());
+                        for (const auto& sp : hold->samplePoints)
+                            en.samplePoints.push_back(sp.tOffset);
+                    }
                 } else if (n.type == NoteType::Slide) {
                     en.type = EditorNoteType::Slide;
+                } else if (n.type == NoteType::Flick) {
+                    en.type = EditorNoteType::Flick;
                 } else {
                     en.type = EditorNoteType::Tap;
                 }
@@ -138,14 +182,12 @@ std::string SongEditor::browseFile(const wchar_t* filter, const std::string& des
     ofn.Flags        = OFN_PATHMUSTEXIST | OFN_FILEMUSTEXIST;
 
     if (GetOpenFileNameW(&ofn)) {
-        int len = WideCharToMultiByte(CP_UTF8, 0, szFile, -1, nullptr, 0, nullptr, nullptr);
-        std::string srcPath(len - 1, '\0');
-        WideCharToMultiByte(CP_UTF8, 0, szFile, -1, srcPath.data(), len, nullptr, nullptr);
+        fs::path srcPath(szFile);
 
         fs::path absProject = fs::absolute(fs::path(m_projectPath));
         fs::path destDir    = absProject / "assets" / destSubdir;
         fs::create_directories(destDir);
-        fs::path dest = destDir / fs::path(srcPath).filename();
+        fs::path dest = destDir / srcPath.filename();
         try {
             fs::copy_file(srcPath, dest, fs::copy_options::overwrite_existing);
         } catch (const std::exception& e) {
@@ -247,9 +289,12 @@ void SongEditor::render(Engine* engine) {
     ImGui::SameLine();
     ImGui::BeginChild("SECenter", ImVec2(mainW, bodyH), false);
     {
+        const bool scanLineMode = (m_song->gameMode.type == GameModeType::ScanLine);
         float editableH = std::max(80.f, bodyH - waveformH - splitterThick);
-        float sceneH    = std::max(40.f, editableH * m_sceneSplit);
-        float timelineH = std::max(40.f, editableH - sceneH);
+        float sceneH    = scanLineMode ? editableH
+                                       : std::max(40.f, editableH * m_sceneSplit);
+        float timelineH = scanLineMode ? 0.f
+                                       : std::max(40.f, editableH - sceneH);
 
         // ── Scene Preview ───────────────────────────────────────────────────
         ImGui::BeginChild("SEScene", ImVec2(0, sceneH), true,
@@ -258,6 +303,31 @@ void SongEditor::render(Engine* engine) {
             ImGui::TextDisabled("Preview");
             ImGui::SameLine();
             renderDifficultySelector();
+
+            // Scan-line mode: scene-embedded tool toolbar.
+            if (scanLineMode) {
+                ImGui::SameLine(0.f, 20.f);
+                auto toolBtn = [&](const char* label, NoteTool t) {
+                    bool on = (m_noteTool == t);
+                    if (on) {
+                        ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.25f, 0.55f, 0.35f, 1.f));
+                        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.3f,  0.65f, 0.4f,  1.f));
+                        ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(0.18f, 0.45f, 0.28f, 1.f));
+                    }
+                    if (ImGui::Button(label, ImVec2(54, 0))) {
+                        m_noteTool = on ? NoteTool::None : t;
+                        m_scanHoldAwaitEnd  = false;
+                        m_scanSlideDragging = false;
+                    }
+                    if (on) ImGui::PopStyleColor(3);
+                    ImGui::SameLine();
+                };
+                toolBtn("Tap",   NoteTool::Tap);
+                toolBtn("Flick", NoteTool::Flick);
+                toolBtn("Hold",  NoteTool::Hold);
+                toolBtn("Slide", NoteTool::Slide);
+                ImGui::NewLine();
+            }
 
             ImVec2 avail = ImGui::GetContentRegionAvail();
             if (avail.y > 20.f) {
@@ -270,31 +340,33 @@ void SongEditor::render(Engine* engine) {
         }
         ImGui::EndChild();
 
-        // ── Vertical splitter (scene | timeline) ────────────────────────────
-        ImGui::InvisibleButton("se_vsplit", ImVec2(-1, splitterThick));
-        if (ImGui::IsItemActive() && editableH > 1.f) {
-            m_sceneSplit += ImGui::GetIO().MouseDelta.y / editableH;
-            m_sceneSplit = std::clamp(m_sceneSplit, 0.15f, 0.65f);
-        }
-        if (ImGui::IsItemHovered() || ImGui::IsItemActive())
-            ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeNS);
-
-        // ── Chart Timeline ──────────────────────────────────────────────────
-        ImGui::BeginChild("SETimeline", ImVec2(0, timelineH), true,
-                          ImGuiWindowFlags_NoScrollWithMouse | ImGuiWindowFlags_NoScrollbar);
-        {
-            renderNoteToolbar();
-
-            ImVec2 avail = ImGui::GetContentRegionAvail();
-            if (avail.y > 20.f) {
-                ImVec2 tlOrigin = ImGui::GetCursorScreenPos();
-                ImVec2 tlSize(avail.x, avail.y);
-                ImDrawList* dl = ImGui::GetWindowDrawList();
-                renderChartTimeline(dl, tlOrigin, tlSize, engine);
-                ImGui::Dummy(tlSize);
+        if (!scanLineMode) {
+            // ── Vertical splitter (scene | timeline) ────────────────────────
+            ImGui::InvisibleButton("se_vsplit", ImVec2(-1, splitterThick));
+            if (ImGui::IsItemActive() && editableH > 1.f) {
+                m_sceneSplit += ImGui::GetIO().MouseDelta.y / editableH;
+                m_sceneSplit = std::clamp(m_sceneSplit, 0.15f, 0.65f);
             }
+            if (ImGui::IsItemHovered() || ImGui::IsItemActive())
+                ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeNS);
+
+            // ── Chart Timeline ──────────────────────────────────────────────
+            ImGui::BeginChild("SETimeline", ImVec2(0, timelineH), true,
+                              ImGuiWindowFlags_NoScrollWithMouse | ImGuiWindowFlags_NoScrollbar);
+            {
+                renderNoteToolbar();
+
+                ImVec2 avail = ImGui::GetContentRegionAvail();
+                if (avail.y > 20.f) {
+                    ImVec2 tlOrigin = ImGui::GetCursorScreenPos();
+                    ImVec2 tlSize(avail.x, avail.y);
+                    ImDrawList* dl = ImGui::GetWindowDrawList();
+                    renderChartTimeline(dl, tlOrigin, tlSize, engine);
+                    ImGui::Dummy(tlSize);
+                }
+            }
+            ImGui::EndChild();
         }
-        ImGui::EndChild();
 
         // ── Waveform Strip ──────────────────────────────────────────────────
         ImGui::BeginChild("SEWaveform", ImVec2(0, waveformH), true,
@@ -412,6 +484,192 @@ void SongEditor::render(Engine* engine) {
     }
 
     ImGui::End();
+
+    // ── Note Properties popup ────────────────────────────────────────────────
+    // Opens whenever a note is left-clicked in the timeline. Each section is
+    // gated by game mode or note type — laneSpan is Circle-only, and the Hold
+    // transition / sample points section only appears for Hold notes.
+    if (m_selectedNoteIdx >= 0 && m_selectedNoteIdx < (int)notes().size()) {
+        ImGui::SetNextWindowSize(ImVec2(280, 0), ImGuiCond_Appearing);
+        bool open = true;
+        if (ImGui::Begin("Note Properties", &open,
+                         ImGuiWindowFlags_NoCollapse)) {
+            EditorNote& sel = notes()[m_selectedNoteIdx];
+            const char* typeName =
+                (sel.type == EditorNoteType::Tap)   ? "Tap"   :
+                (sel.type == EditorNoteType::Hold)  ? "Hold"  :
+                (sel.type == EditorNoteType::Flick) ? "Flick" : "Slide";
+            ImGui::Text("Type: %s", typeName);
+            ImGui::Text("Time: %.3f s", sel.time);
+            const bool isScanLine = (m_song && m_song->gameMode.type == GameModeType::ScanLine);
+            if (sel.type == EditorNoteType::Hold) {
+                ImGui::Text("End:  %.3f s  (%.3f s long)",
+                            sel.endTime, sel.endTime - sel.time);
+                if (isScanLine)
+                    ImGui::Text("Pos:  (%.2f, %.2f) → %.2f",
+                                sel.scanX, sel.scanY, sel.scanEndY);
+                else
+                    ImGui::Text("Track: %d → %d", sel.track, sel.effectiveEndTrack());
+            } else if (sel.type == EditorNoteType::Slide && isScanLine) {
+                ImGui::Text("End:  %.3f s  (%.3f s long)",
+                            sel.endTime, sel.endTime - sel.time);
+                ImGui::Text("Path:  %d points", (int)sel.scanPath.size());
+            } else if (isScanLine) {
+                ImGui::Text("Pos:  (%.2f, %.2f)", sel.scanX, sel.scanY);
+            } else {
+                ImGui::Text("Track: %d", sel.track);
+            }
+            ImGui::Separator();
+
+            // Circle-mode lane width
+            if (m_song && m_song->gameMode.type == GameModeType::Circle) {
+                ImGui::Text("Lane Width");
+                float btnW = (ImGui::GetContentRegionAvail().x
+                              - ImGui::GetStyle().ItemSpacing.x * 2) / 3.f;
+                for (int w = 1; w <= 3; ++w) {
+                    char lbl[16];
+                    snprintf(lbl, sizeof(lbl), "%d lane%s", w, w == 1 ? "" : "s");
+                    bool on = (sel.laneSpan == w);
+                    if (on) {
+                        ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.2f, 0.55f, 0.25f, 1.f));
+                        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.25f, 0.65f, 0.3f, 1.f));
+                        ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(0.15f, 0.45f, 0.2f, 1.f));
+                    }
+                    if (ImGui::Button(lbl, ImVec2(btnW, 26)))
+                        sel.laneSpan = w;
+                    if (on) ImGui::PopStyleColor(3);
+                    if (w < 3) ImGui::SameLine();
+                }
+                ImGui::Spacing();
+                ImGui::Separator();
+            }
+
+            // Hold-only: per-segment lane change editor + sample points
+            if (sel.type == EditorNoteType::Hold) {
+                const float duration = std::max(0.f, sel.endTime - sel.time);
+
+                if (sel.waypoints.empty()) {
+                    ImGui::TextDisabled("Straight hold (no lane changes)");
+                } else {
+                    ImGui::Text("Lane changes (%d segments)", (int)sel.waypoints.size() - 1);
+                    ImGui::TextDisabled("Each segment: previous lane → target lane.");
+                    ImGui::TextDisabled("Drag the duration to control how long the");
+                    ImGui::TextDisabled("change takes (ends at the marked time).");
+                    ImGui::Spacing();
+
+                    const char* items[] = {"Straight", "90 Angle", "Curve", "Rhomboid"};
+                    for (size_t i = 1; i < sel.waypoints.size(); ++i) {
+                        ImGui::PushID((int)i);
+                        const auto& prev = sel.waypoints[i - 1];
+                        auto& cur = sel.waypoints[i];
+
+                        ImGui::Text("[%zu] lane %d → %d  @%.2fs", i,
+                                    prev.lane, cur.lane, cur.tOffset);
+
+                        int style = (int)cur.style;
+                        ImGui::SetNextItemWidth(-1);
+                        if (ImGui::Combo("##style", &style, items, 4))
+                            cur.style = (EditorHoldTransition)style;
+
+                        // Max length = how much room there is between the prev
+                        // waypoint and this one (the change has to fit inside).
+                        float maxLen = std::max(0.f, cur.tOffset - prev.tOffset);
+                        float tLen = std::clamp(cur.transitionLen, 0.f, maxLen);
+                        ImGui::SetNextItemWidth(-1);
+                        if (ImGui::SliderFloat("##tlen", &tLen, 0.f,
+                                               std::max(0.001f, maxLen), "%.3f s"))
+                            cur.transitionLen = std::clamp(tLen, 0.f, maxLen);
+
+                        ImGui::Spacing();
+                        ImGui::PopID();
+                    }
+                }
+
+                ImGui::Spacing();
+                ImGui::Separator();
+
+                // Sample points list
+                ImGui::Text("Sample Points (hold checkpoints)");
+                ImGui::TextDisabled("Players just keep holding — each tick awards combo.");
+
+                // Add-at-playhead button: the playhead time is m_sceneTime
+                float playT = m_sceneTime - sel.time;
+                bool canAdd = (playT > 0.01f && playT < duration - 0.01f);
+                if (!canAdd) ImGui::BeginDisabled();
+                if (ImGui::Button("Add at playhead", ImVec2(-1, 24))) {
+                    sel.samplePoints.push_back(playT);
+                    std::sort(sel.samplePoints.begin(), sel.samplePoints.end());
+                }
+                if (!canAdd) ImGui::EndDisabled();
+
+                int removeIdx = -1;
+                for (size_t i = 0; i < sel.samplePoints.size(); ++i) {
+                    ImGui::PushID((int)i);
+                    float t = sel.samplePoints[i];
+                    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 30);
+                    if (ImGui::SliderFloat("##sp", &t, 0.f, duration, "%.3f s"))
+                        sel.samplePoints[i] = std::clamp(t, 0.f, duration);
+                    ImGui::SameLine();
+                    if (ImGui::Button("x", ImVec2(22, 0))) removeIdx = (int)i;
+                    ImGui::PopID();
+                }
+                if (removeIdx >= 0)
+                    sel.samplePoints.erase(sel.samplePoints.begin() + removeIdx);
+
+                ImGui::Spacing();
+                ImGui::Separator();
+            }
+
+            // ── Scan-line slide sample points ─────────────────────────────
+            if (isScanLine && sel.type == EditorNoteType::Slide) {
+                const float duration = std::max(0.f, sel.endTime - sel.time);
+                ImGui::Text("Sample Points (slide ticks)");
+                ImGui::TextDisabled("Click on the slide path in the scene to add one,");
+                ImGui::TextDisabled("or press the button below at the current playhead.");
+
+                float playT = m_sceneTime - sel.time;
+                bool canAdd = (playT > 0.01f && playT < duration - 0.01f);
+                if (!canAdd) ImGui::BeginDisabled();
+                if (ImGui::Button("Add at playhead", ImVec2(-1, 24))) {
+                    sel.samplePoints.push_back(playT);
+                    std::sort(sel.samplePoints.begin(), sel.samplePoints.end());
+                }
+                if (!canAdd) ImGui::EndDisabled();
+
+                if (sel.samplePoints.empty()) {
+                    ImGui::TextDisabled("(no sample points yet)");
+                } else {
+                    int removeIdx = -1;
+                    for (size_t i = 0; i < sel.samplePoints.size(); ++i) {
+                        ImGui::PushID((int)i);
+                        float t = sel.samplePoints[i];
+                        ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 30);
+                        if (ImGui::SliderFloat("##slsp", &t, 0.f,
+                                               std::max(0.001f, duration), "%.3f s"))
+                            sel.samplePoints[i] = std::clamp(t, 0.f, duration);
+                        ImGui::SameLine();
+                        if (ImGui::Button("x", ImVec2(22, 0))) removeIdx = (int)i;
+                        ImGui::PopID();
+                    }
+                    if (removeIdx >= 0)
+                        sel.samplePoints.erase(sel.samplePoints.begin() + removeIdx);
+                }
+
+                if (ImGui::Button("Clear All Samples", ImVec2(-1, 22)))
+                    sel.samplePoints.clear();
+
+                ImGui::Spacing();
+                ImGui::Separator();
+            }
+
+            if (ImGui::Button("Delete Note", ImVec2(-1, 26))) {
+                notes().erase(notes().begin() + m_selectedNoteIdx);
+                m_selectedNoteIdx = -1;
+            }
+        }
+        ImGui::End();
+        if (!open) m_selectedNoteIdx = -1;
+    }
 }
 
 // ── renderProperties ─────────────────────────────────────────────────────────
@@ -455,6 +713,42 @@ void SongEditor::renderProperties() {
         ImGui::TextDisabled("Delay before notes start (sync audio with chart)");
     }
 
+    // ── BPM Map (from analysis) ─────────────────────────────────────────────
+    if (m_dominantBpm > 0.f && ImGui::CollapsingHeader("BPM Map", ImGuiTreeNodeFlags_DefaultOpen)) {
+        ImGui::Text("Dominant BPM: %.1f", m_dominantBpm);
+        if (m_bpmChanges.size() > 1) {
+            ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.f, 1.f),
+                "Dynamic tempo: %d sections", (int)m_bpmChanges.size());
+            ImGui::Spacing();
+
+            // Show tempo sections in a compact table
+            if (ImGui::BeginTable("##bpmtable", 2, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg)) {
+                ImGui::TableSetupColumn("Time", ImGuiTableColumnFlags_WidthFixed, 80.f);
+                ImGui::TableSetupColumn("BPM",  ImGuiTableColumnFlags_WidthStretch);
+                ImGui::TableHeadersRow();
+
+                for (size_t i = 0; i < m_bpmChanges.size(); i++) {
+                    ImGui::TableNextRow();
+                    ImGui::TableNextColumn();
+                    int mins = (int)(m_bpmChanges[i].time / 60.f);
+                    float secs = m_bpmChanges[i].time - mins * 60.f;
+                    ImGui::Text("%d:%05.2f", mins, secs);
+                    ImGui::TableNextColumn();
+                    ImGui::Text("%.1f", m_bpmChanges[i].bpm);
+                }
+                ImGui::EndTable();
+            }
+        } else {
+            ImGui::TextDisabled("Constant tempo throughout");
+        }
+
+        // Button to clear BPM data
+        if (ImGui::SmallButton("Clear BPM Map")) {
+            m_bpmChanges.clear();
+            m_dominantBpm = 0.f;
+        }
+    }
+
 }
 
 // ── renderGameModeConfig ─────────────────────────────────────────────────────
@@ -477,9 +771,9 @@ void SongEditor::renderGameModeConfig() {
         GameModeType type;
     };
     ModeOption options[] = {
-        {"Basic Drop Notes", "Notes fall toward a hit zone", GameModeType::DropNotes},
-        {"Circle",           "Circle notes + scan line",     GameModeType::Circle},
-        {"Scan Line",        "Judgment lines + attached notes", GameModeType::ScanLine},
+        {"Basic Drop Notes", "Notes fall toward a hit zone",          GameModeType::DropNotes},
+        {"Circle",           "Ring notes on a rotating disk",          GameModeType::Circle},
+        {"Scan Line",        "Sweep line crosses notes on a 2D field", GameModeType::ScanLine},
     };
 
     for (auto& opt : options) {
@@ -539,8 +833,62 @@ void SongEditor::renderGameModeConfig() {
     // ── Track Count ──────────────────────────────────────────────────────────
     ImGui::Text("Tracks");
     ImGui::SetNextItemWidth(-1);
-    ImGui::SliderInt("##tracks", &gm.trackCount, 3, 12, "%d tracks");
+    // Circle mode supports up to 36 lanes; other modes keep the original
+    // 3..12 range they were designed and tested against, so bumping the
+    // Circle cap doesn't accidentally change their playable layouts.
+    int trackMax = (gm.type == GameModeType::Circle) ? 36 : 12;
+    if (gm.trackCount > trackMax) gm.trackCount = trackMax;
+    int prevTrackCount = gm.trackCount;
+    if (ImGui::SliderInt("##tracks", &gm.trackCount, 3, trackMax, "%d tracks")
+        && gm.trackCount != prevTrackCount && gm.trackCount > 0) {
+        // Re-fit every authored note to the new lane count using modulo, so
+        // notes that fell off the right edge wrap back into the highway.
+        // Affects all difficulties — the editor only stores authored data
+        // here; exported chart files keep whatever was active when written.
+        const int newCount = gm.trackCount;
+        for (auto& [diff, list] : m_diffNotes) {
+            for (auto& en : list) {
+                if (en.track >= newCount || en.track < 0)
+                    en.track = ((en.track % newCount) + newCount) % newCount;
+                if (en.endTrack >= 0 && en.endTrack >= newCount)
+                    en.endTrack = ((en.endTrack % newCount) + newCount) % newCount;
+                // Collapse cross-lane → straight if the wrap landed on the
+                // same lane; otherwise the transition would be a no-op visual.
+                if (en.endTrack == en.track) en.endTrack = -1;
+            }
+        }
+    }
     ImGui::Spacing();
+
+    // ── Default Note Width (Circle mode) ─────────────────────────────────────
+    // Selects the laneSpan assigned to newly placed notes. The "Apply to All"
+    // button rewrites every existing note in the current difficulty to this
+    // width in one shot (the "adjust all the notes" box).
+    if (gm.type == GameModeType::Circle) {
+        ImGui::Text("Default Note Width");
+        float btnW = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x * 2) / 3.f;
+        for (int w = 1; w <= 3; ++w) {
+            char lbl[16];
+            snprintf(lbl, sizeof(lbl), "%d lane%s", w, w == 1 ? "" : "s");
+            bool sel = (m_defaultLaneSpan == w);
+            if (sel) {
+                ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.2f, 0.4f, 0.8f, 1.0f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.3f, 0.5f, 0.9f, 1.0f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(0.15f, 0.35f, 0.75f, 1.0f));
+            }
+            if (ImGui::Button(lbl, ImVec2(btnW, 24)))
+                m_defaultLaneSpan = w;
+            if (sel) ImGui::PopStyleColor(3);
+            if (w < 3) ImGui::SameLine();
+        }
+        if (ImGui::Button("Apply to All Notes", ImVec2(-1, 24))) {
+            for (auto& n : notes()) n.laneSpan = m_defaultLaneSpan;
+        }
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Rewrite every note in the current difficulty\n"
+                              "to use the Default Note Width above.");
+        ImGui::Spacing();
+    }
 
     // ── Judgment Windows ─────────────────────────────────────────────────────
     if (ImGui::CollapsingHeader("Judgment Windows", ImGuiTreeNodeFlags_DefaultOpen)) {
@@ -908,6 +1256,24 @@ void SongEditor::renderChartTimeline(ImDrawList* dl, ImVec2 origin, ImVec2 size,
 
     }
 
+    // Draw BPM change markers (orange band + label at top)
+    for (size_t bi = 0; bi < m_bpmChanges.size(); bi++) {
+        float bx = origin.x + (m_bpmChanges[bi].time - startTime) * m_timelineZoom;
+        if (bx < origin.x - 60.f || bx > pMax.x + 10.f) continue;
+        // Vertical dashed line (cyan)
+        for (float y = origin.y; y < pMax.y; y += 6.f) {
+            float y2 = std::min(y + 3.f, pMax.y);
+            dl->AddLine(ImVec2(bx, y), ImVec2(bx, y2),
+                        IM_COL32(0, 200, 220, 160), 1.5f);
+        }
+        // BPM label at top
+        char bpmLabel[32];
+        snprintf(bpmLabel, sizeof(bpmLabel), "%.0f", m_bpmChanges[bi].bpm);
+        dl->AddRectFilled(ImVec2(bx - 1, origin.y), ImVec2(bx + 30, origin.y + 14),
+                          IM_COL32(0, 160, 180, 200), 2.f);
+        dl->AddText(ImVec2(bx + 2, origin.y), IM_COL32(255, 255, 255, 240), bpmLabel);
+    }
+
     // Draw user-placed markers (dashed vertical lines)
     for (float mt : markers()) {
         float mx2 = origin.x + (mt - startTime) * m_timelineZoom;
@@ -965,29 +1331,40 @@ void SongEditor::renderChartTimeline(ImDrawList* dl, ImVec2 origin, ImVec2 size,
         }
     }
 
-    // ── Pending Press preview line ──────────────────────────────────────────
-    if (m_pressFirstClick && m_noteTool == NoteTool::Hold) {
-        float px1 = origin.x + (m_pressStartTime - startTime) * m_timelineZoom;
-        float mx  = ImGui::GetIO().MousePos.x;
-        if (px1 >= origin.x && px1 <= pMax.x) {
-            // Draw a dashed line from start to current mouse X
-            float y;
-            if (gm.type == GameModeType::DropNotes && gm.dimension == DropDimension::ThreeD) {
-                float gap2     = 4.f;
-                float skyH2    = (size.y - gap2) * 0.4f;
-                float gndTop2  = origin.y + skyH2 + gap2;
-                float trkH = m_pressStartSky ? (skyH2 / tc) : ((size.y - gap2) * 0.6f / tc);
-                float regTop = m_pressStartSky ? origin.y : gndTop2;
-                y = regTop + (m_pressStartTrack + 0.5f) * trkH;
-            } else {
-                float trkH = size.y / tc;
-                y = origin.y + (m_pressStartTrack + 0.5f) * trkH;
+    // ── Drag-recording preview ──────────────────────────────────────────────
+    // While the user is dragging the Hold tool, draw the in-progress
+    // waypoint polyline so they can see what they're authoring.
+    if (m_holdDragging && m_noteTool == NoteTool::Hold && !m_holdDraft.waypoints.empty()) {
+        float trkH;
+        float regTop;
+        if (gm.type == GameModeType::DropNotes && gm.dimension == DropDimension::ThreeD) {
+            float gap2    = 4.f;
+            float skyH2   = (size.y - gap2) * 0.4f;
+            float gndTop2 = origin.y + skyH2 + gap2;
+            trkH   = m_holdDraft.isSky ? (skyH2 / tc) : ((size.y - gap2) * 0.6f / tc);
+            regTop = m_holdDraft.isSky ? origin.y : gndTop2;
+        } else {
+            trkH   = size.y / tc;
+            regTop = origin.y;
+        }
+        const auto& wps = m_holdDraft.waypoints;
+        for (size_t i = 0; i < wps.size(); ++i) {
+            float t1 = m_holdDraft.time + wps[i].tOffset;
+            float x1 = origin.x + (t1 - startTime) * m_timelineZoom;
+            float y1 = regTop + (wps[i].lane + 0.5f) * trkH;
+            float t2 = (i + 1 < wps.size())
+                         ? m_holdDraft.time + wps[i + 1].tOffset
+                         : m_holdDraft.endTime;
+            float x2 = origin.x + (t2 - startTime) * m_timelineZoom;
+            float y2 = regTop + (wps[i].lane + 0.5f) * trkH;
+            dl->AddRectFilled(ImVec2(x1, y1 - 4), ImVec2(x2, y1 + 4),
+                              IM_COL32(80, 220, 100, 130), 2.f);
+            if (i + 1 < wps.size()) {
+                float yNext = regTop + (wps[i + 1].lane + 0.5f) * trkH;
+                dl->AddLine(ImVec2(x2, y1), ImVec2(x2, yNext),
+                            IM_COL32(120, 240, 140, 220), 2.f);
+                (void)y2;
             }
-            // Draw a highlight bar from start to mouse
-            dl->AddRectFilled(ImVec2(px1, y - 4), ImVec2(mx, y + 4),
-                              IM_COL32(80, 200, 80, 100), 2.f);
-            dl->AddRect(ImVec2(px1, y - 4), ImVec2(mx, y + 4),
-                        IM_COL32(80, 200, 80, 200), 2.f, 0, 1.f);
         }
     }
 
@@ -1082,7 +1459,9 @@ void SongEditor::renderChartTimeline(ImDrawList* dl, ImVec2 origin, ImVec2 size,
                 }
                 if (bestIdx >= 0) {
                     notes().erase(notes().begin() + bestIdx);
-                    m_pressFirstClick = false;
+                    m_holdDragging  = false;
+                    m_holdLastTrack = -1;
+                    m_holdDraft     = EditorNote{};
                     deletedNote = true;
                 }
             }
@@ -1345,6 +1724,7 @@ void SongEditor::renderSceneView(ImDrawList* dl, ImVec2 origin, ImVec2 size,
             case EditorNoteType::Tap: return IM_COL32(100, 180, 255, 230);
             case EditorNoteType::Hold: return IM_COL32(80, 220, 100, 230);
             case EditorNoteType::Slide: return IM_COL32(220, 130, 255, 230);
+            case EditorNoteType::Flick: return IM_COL32(255, 180, 80, 230);
         }
         return IM_COL32(100, 180, 255, 230);
     };
@@ -1353,6 +1733,7 @@ void SongEditor::renderSceneView(ImDrawList* dl, ImVec2 origin, ImVec2 size,
             case EditorNoteType::Tap: return IM_COL32(60, 110, 160, 160);
             case EditorNoteType::Hold: return IM_COL32(50, 140, 60, 160);
             case EditorNoteType::Slide: return IM_COL32(140, 80, 160, 160);
+            case EditorNoteType::Flick: return IM_COL32(180, 120, 50, 160);
         }
         return IM_COL32(60, 110, 160, 160);
     };
@@ -1440,41 +1821,96 @@ void SongEditor::renderSceneView(ImDrawList* dl, ImVec2 origin, ImVec2 size,
         }
 
         // Draw actual notes on the highway
+        float proj11 = std::abs(proj[1][1]);
         for (const auto& note : curNotes) {
+            // Visibility window: a note is kept alive while any part of it
+            // (head → tail for holds) is within the approach/hit range.
+            // This way a hold whose head just passed stays fully on screen
+            // until its tail crosses too, matching real music games.
             float dt = note.time - curTime;
-            if (dt < -0.2f || dt > lookAhead) continue;
+            float tailDt = (note.type == EditorNoteType::Hold)
+                             ? (note.endTime - curTime) : dt;
+            if (tailDt < -0.3f || dt > lookAhead) continue;
 
             bool isSky = is3D && note.isSky;
+
+            auto laneToWorldX = [&](float lane) {
+                return (lane - (tc - 1) * 0.5f) * laneSpacing;
+            };
+
+            // ── Hold body (walks waypoints when present) ───────────────────
+            if (note.type == EditorNoteType::Hold && note.endTime > note.time) {
+                const float duration = note.endTime - note.time;
+                const int N = note.waypoints.empty() ? 6 : 20;
+                ImVec2 prevL{}, prevR{};
+                bool havePrev = false;
+                float worldY = isSky ? SKY_Y : 0.f;
+
+                auto laneAt = [&](float tOff) -> float {
+                    if (note.waypoints.empty())
+                        return (float)note.track;
+                    // Mirror evalHoldLaneAt waypoint logic inline (no HoldData
+                    // conversion needed here — the math is small).
+                    const auto& wps = note.waypoints;
+                    if (tOff <= wps.front().tOffset) return (float)wps.front().lane;
+                    if (tOff >= wps.back().tOffset)  return (float)wps.back().lane;
+                    for (size_t wi = 1; wi < wps.size(); ++wi) {
+                        const auto& a = wps[wi - 1];
+                        const auto& b = wps[wi];
+                        if (tOff > b.tOffset) continue;
+                        float tLen = std::clamp(b.transitionLen, 0.f, b.tOffset - a.tOffset);
+                        float tBeg = b.tOffset - tLen;
+                        if (tOff <= tBeg || tLen <= 0.f)
+                            return tOff >= b.tOffset ? (float)b.lane : (float)a.lane;
+                        float u  = (tOff - tBeg) / tLen;
+                        float la = (float)a.lane, lb = (float)b.lane;
+                        switch (b.style) {
+                            case EditorHoldTransition::Angle90: return lb;
+                            case EditorHoldTransition::Curve: {
+                                float s = u * u * (3.f - 2.f * u);
+                                return la + (lb - la) * s;
+                            }
+                            case EditorHoldTransition::Rhomboid:
+                                return la + (lb - la) * u;
+                            default: return lb;
+                        }
+                    }
+                    return (float)wps.back().lane;
+                };
+
+                for (int i = 0; i <= N; ++i) {
+                    float tOff = (float)i / (float)N * duration;
+                    float absDt = (note.time + tOff) - curTime;
+                    float wz = -absDt * SCROLL_SPEED;
+                    if (wz > 12.f || wz < -60.f) { havePrev = false; continue; }
+                    float wx = laneToWorldX(laneAt(tOff));
+                    glm::vec3 wp{wx, worldY, wz};
+                    glm::vec4 wc = vp * glm::vec4(wp, 1.f);
+                    if (wc.w <= 0.f) { havePrev = false; continue; }
+                    float nwHere = laneSpacing * proj11 * size.y * 0.5f / wc.w;
+                    float half = nwHere * 0.4f;
+                    ImVec2 c = w2s(wp);
+                    ImVec2 L(c.x - half, c.y);
+                    ImVec2 R(c.x + half, c.y);
+                    if (havePrev) {
+                        dl->AddQuadFilled(prevL, prevR, R, L, noteColorDim(note.type));
+                    }
+                    prevL = L; prevR = R; havePrev = true;
+                }
+            }
+
+            // ── Head quad ──────────────────────────────────────────────────
             float noteZ = -dt * SCROLL_SPEED;
-            float worldX = (note.track - (tc - 1) * 0.5f) * laneSpacing;
+            float worldX = laneToWorldX((float)note.track);
             float worldY = isSky ? SKY_Y : 0.f;
             glm::vec3 worldPos{worldX, worldY, noteZ};
-
             glm::vec4 clip = vp * glm::vec4(worldPos, 1.f);
             if (clip.w <= 0.f) continue;
             ImVec2 screen = w2s(worldPos);
 
-            // Perspective-correct note size — full lane width
-            float proj11 = std::abs(proj[1][1]);
             float nw = laneSpacing * proj11 * size.y * 0.5f / clip.w;
             if (nw < 2.f) continue;
             float nh = nw * 0.3f;
-
-            if (note.type == EditorNoteType::Hold && note.endTime > note.time) {
-                float dt2 = note.endTime - curTime;
-                float noteZ2 = -dt2 * SCROLL_SPEED;
-                glm::vec3 endPos{worldX, worldY, noteZ2};
-                glm::vec4 clip2 = vp * glm::vec4(endPos, 1.f);
-                if (clip2.w > 0.f) {
-                    ImVec2 screen2 = w2s(endPos);
-                    float nw2 = laneSpacing * proj11 * size.y * 0.5f / clip2.w;
-                    float hw1 = nw * 0.4f, hw2 = nw2 * 0.4f;
-                    dl->AddQuadFilled(
-                        ImVec2(screen.x - hw1, screen.y), ImVec2(screen.x + hw1, screen.y),
-                        ImVec2(screen2.x + hw2, screen2.y), ImVec2(screen2.x - hw2, screen2.y),
-                        noteColorDim(note.type));
-                }
-            }
 
             dl->AddRectFilled(ImVec2(screen.x - nw / 2, screen.y - nh / 2),
                               ImVec2(screen.x + nw / 2, screen.y + nh / 2),
@@ -1520,9 +1956,13 @@ void SongEditor::renderSceneView(ImDrawList* dl, ImVec2 origin, ImVec2 size,
             float rInner2 = outerR - frac * (outerR - innerR);
             float rOuter2 = rInner2 + noteThick * (outerR - innerR);
 
+            // Wider notes extend clockwise from the authored lane: a span-S
+            // note at lane N covers lanes N..N+S-1. aL is the CCW edge of
+            // lane N; aR is the CW edge of lane N+S-1.
             int track = note.track % tc;
+            int span  = std::clamp(note.laneSpan, 1, 3);
             float aL = track * angleStep - 1.5707963f;
-            float aR = (track + 1) * angleStep - 1.5707963f;
+            float aR = (track + span) * angleStep - 1.5707963f;
 
             ImVec2 quad[4] = {
                 ImVec2(centerX + rInner2 * cosf(aL), centerY + rInner2 * sinf(aL)),
@@ -1540,46 +1980,286 @@ void SongEditor::renderSceneView(ImDrawList* dl, ImVec2 origin, ImVec2 size,
 
     } else {
         // ── Scan Line mode ──────────────────────────────────────────────────
-        // Scan line bounces top<->bottom; position based on curTime
-        float period = 4.f;
-        float phase = fmodf(curTime, period) / period;
-        float scanFrac = (phase < 0.5f) ? (phase * 2.f) : (2.f - phase * 2.f);
-        float scanY = origin.y + scanFrac * size.y;
+        // BPM-driven scan line (1 bar per sweep, dominant BPM, 120 fallback).
+        // Coordinate helpers — every conversion between the normalized
+        // scan-space stored on EditorNote and the ImGui local rect must go
+        // through these so resizing the scene stays proportional.
+        auto scanToLocal = [&](float nx, float ny) -> ImVec2 {
+            return ImVec2(origin.x + nx * size.x, origin.y + ny * size.y);
+        };
+        float frac    = scanLineFrac(curTime);
+        bool  goingUp = scanLineGoingUp(curTime);
+        float scanY   = scanToLocal(0.f, frac).y;
 
-        dl->AddLine(ImVec2(origin.x + 10, scanY), ImVec2(pMax.x - 10, scanY),
-                    IM_COL32(255, 255, 255, 200), 2.f);
+        // Scan line (glow + core)
         dl->AddLine(ImVec2(origin.x + 10, scanY), ImVec2(pMax.x - 10, scanY),
                     IM_COL32(0, 200, 255, 60), 6.f);
+        dl->AddLine(ImVec2(origin.x + 10, scanY), ImVec2(pMax.x - 10, scanY),
+                    IM_COL32(255, 255, 255, 220), 2.f);
 
-        float colW = size.x / tc;
-        float noteR = std::clamp(colW * 0.18f, 5.f, 16.f);
+        // Direction arrow at right edge
+        {
+            float ax = pMax.x - 18.f;
+            float ay = scanY;
+            if (goingUp) {
+                dl->AddTriangleFilled(ImVec2(ax, ay - 10), ImVec2(ax - 7, ay + 2),
+                                      ImVec2(ax + 7, ay + 2),
+                                      IM_COL32(255, 255, 255, 200));
+            } else {
+                dl->AddTriangleFilled(ImVec2(ax, ay + 10), ImVec2(ax - 7, ay - 2),
+                                      ImVec2(ax + 7, ay - 2),
+                                      IM_COL32(255, 255, 255, 200));
+            }
+        }
 
-        // Draw actual notes at their screen positions
+        // ── Cytus-style page visibility ───────────────────────────────────
+        // Each sweep (period T_sweep) is a "page". A note belongs to the
+        // page containing its head time, and is visible ONLY while the
+        // playhead is within that same page — no cross-turn overlap. Within
+        // a page the note scales/fades in as the scan line approaches it
+        // and stays visible until the end of the page (or the tail + small
+        // fade-out for notes that end near a turn).
+        constexpr float scanTailPad = 0.25f; // seconds after tail to fade out
+        const float T_sweep = scanLinePeriod();
+
+        auto pageIdx = [&](float t) -> int {
+            return T_sweep > 1e-4f ? (int)std::floor(t / T_sweep) : 0;
+        };
+        const int curPage = pageIdx(curTime);
+
+        auto computePageVis = [&](const EditorNote& n,
+                                  float& outAlpha, float& outScale) -> bool {
+            // Drop legacy/lane-authored notes with no scan position — they
+            // would otherwise all stack at exactly (0,0) (the top-left).
+            if (n.scanX < 0.001f && n.scanY < 0.001f &&
+                n.scanEndY < 0.f && n.scanPath.empty())
+                return false;
+
+            const int notePage = pageIdx(n.time);
+            if (notePage != curPage) return false;  // different sweep
+
+            const float pageStart = (float)notePage * T_sweep;
+            const float pageEnd   = pageStart + T_sweep;
+            const float tailTime  = (n.type == EditorNoteType::Hold ||
+                                     n.type == EditorNoteType::Slide)
+                                    ? std::max(n.endTime, n.time) : n.time;
+
+            // Approach phase: from pageStart up to note.time the note
+            // grows from a small seed to full size. Matches Cytus's
+            // "scan line approaches, note appears and scales up".
+            if (curTime <= n.time) {
+                float denom = std::max(0.0001f, n.time - pageStart);
+                float u = std::clamp((curTime - pageStart) / denom, 0.f, 1.f);
+                outScale = 0.30f + 0.70f * u;
+                outAlpha = 0.25f + 0.75f * u;
+                return true;
+            }
+
+            // Post-hit phase: for Tap/Flick fade out quickly; for
+            // Hold/Slide stay full-visible until tailTime, then fade.
+            if (curTime <= tailTime) {
+                outScale = 1.f;
+                outAlpha = 1.f;
+                return true;
+            }
+            float tailDt = curTime - tailTime;
+            if (tailDt > scanTailPad || curTime > pageEnd) return false;
+            outScale = 1.f;
+            outAlpha = std::clamp(1.f - tailDt / scanTailPad, 0.f, 1.f);
+            return true;
+        };
+
+        // ── Catmull-Rom tessellated slide path ─────────────────────────────
+        // Each (p[i], p[i+1]) segment is interpolated with (p[i-1], p[i+2])
+        // as tangent anchors; endpoints are duplicated. Produces a smooth
+        // curve that still passes through every authored control point.
+        auto drawSmoothPath = [&](const std::vector<std::pair<float,float>>& pts,
+                                  ImU32 col, float thickness) {
+            if (pts.size() < 2) return;
+            constexpr int SUBDIV = 12;
+            auto lerp = [](float a, float b, float t) { return a + (b - a) * t; };
+            auto cr = [&](float p0, float p1, float p2, float p3, float t) {
+                float t2 = t * t, t3 = t2 * t;
+                return 0.5f * ((2.f * p1) +
+                               (-p0 + p2) * t +
+                               (2.f*p0 - 5.f*p1 + 4.f*p2 - p3) * t2 +
+                               (-p0 + 3.f*p1 - 3.f*p2 + p3) * t3);
+            };
+            ImVec2 prev = scanToLocal(pts.front().first, pts.front().second);
+            for (size_t i = 0; i + 1 < pts.size(); ++i) {
+                const auto& p1 = pts[i];
+                const auto& p2 = pts[i + 1];
+                const auto& p0 = (i == 0) ? p1 : pts[i - 1];
+                const auto& p3 = (i + 2 < pts.size()) ? pts[i + 2] : p2;
+                for (int s = 1; s <= SUBDIV; ++s) {
+                    float t = (float)s / (float)SUBDIV;
+                    float nx = cr(p0.first,  p1.first,  p2.first,  p3.first,  t);
+                    float ny = cr(p0.second, p1.second, p2.second, p3.second, t);
+                    ImVec2 cur = scanToLocal(nx, ny);
+                    dl->AddLine(prev, cur, col, thickness);
+                    prev = cur;
+                }
+                (void)lerp;
+            }
+        };
+
+        auto withAlpha = [](ImU32 col, float a) -> ImU32 {
+            int aa = std::clamp((int)(((col >> IM_COL32_A_SHIFT) & 0xFF) * a), 0, 255);
+            return (col & ~IM_COL32_A_MASK) | ((ImU32)aa << IM_COL32_A_SHIFT);
+        };
+
         for (const auto& note : curNotes) {
-            float dt = fabsf(note.time - curTime);
-            if (dt > lookAhead) continue;
+            float alpha = 1.f, scale = 1.f;
+            if (!computePageVis(note, alpha, scale)) continue;
 
-            int track = note.track % tc;
-            float cx = origin.x + (track + 0.5f) * colW;
+            ImVec2 head = scanToLocal(note.scanX, note.scanY);
+            float nx = head.x, ny = head.y;
+            ImU32 col     = withAlpha(noteColor(note.type), alpha);
+            ImU32 colDim  = withAlpha(noteColorDim(note.type), alpha);
+            ImU32 colOut  = withAlpha(IM_COL32(255,255,255,160), alpha);
 
-            // Y position: notes have a fixed Y based on their time within the scan cycle
-            float nPhase = fmodf(note.time, period) / period;
-            float nFrac  = (nPhase < 0.5f) ? (nPhase * 2.f) : (2.f - nPhase * 2.f);
-            float cy = origin.y + nFrac * size.y;
+            switch (note.type) {
+                case EditorNoteType::Tap:
+                    dl->AddCircleFilled(ImVec2(nx, ny), 10.f * scale, col);
+                    dl->AddCircle(ImVec2(nx, ny), 11.f * scale, colOut, 0, 1.5f);
+                    break;
+                case EditorNoteType::Flick: {
+                    bool up = scanLineGoingUp(note.time);
+                    float s = 12.f * scale;
+                    if (up) {
+                        dl->AddTriangleFilled(ImVec2(nx, ny - s),
+                                              ImVec2(nx - s * 0.85f, ny + s * 0.6f),
+                                              ImVec2(nx + s * 0.85f, ny + s * 0.6f), col);
+                    } else {
+                        dl->AddTriangleFilled(ImVec2(nx, ny + s),
+                                              ImVec2(nx - s * 0.85f, ny - s * 0.6f),
+                                              ImVec2(nx + s * 0.85f, ny - s * 0.6f), col);
+                    }
+                    break;
+                }
+                case EditorNoteType::Hold: {
+                    float ey = scanToLocal(note.scanX, note.scanEndY).y;
+                    dl->AddRectFilled(ImVec2(nx - 6.f * scale, std::min(ny, ey)),
+                                      ImVec2(nx + 6.f * scale, std::max(ny, ey)),
+                                      colDim, 2.f);
+                    dl->AddCircleFilled(ImVec2(nx, ny), 10.f * scale, col);
+                    dl->AddCircle(ImVec2(nx, ny), 11.f * scale, colOut, 0, 1.5f);
+                    dl->AddCircleFilled(ImVec2(nx, ey), 6.f * scale, col);
+                    break;
+                }
+                case EditorNoteType::Slide: {
+                    drawSmoothPath(note.scanPath, colDim, 4.f);
+                    dl->AddCircleFilled(ImVec2(nx, ny), 8.f * scale, col);
+                    // Sample-point markers along the path (raw control-point idx;
+                    // close enough given the path is densely sampled already).
+                    if (!note.scanPath.empty() && note.endTime > note.time) {
+                        float total = note.endTime - note.time;
+                        ImU32 markerCol = withAlpha(IM_COL32(255,255,255,230), alpha);
+                        for (float sp : note.samplePoints) {
+                            float u = std::clamp(sp / std::max(0.0001f, total), 0.f, 1.f);
+                            size_t idx = (size_t)(u * (note.scanPath.size() - 1));
+                            if (idx >= note.scanPath.size()) idx = note.scanPath.size() - 1;
+                            ImVec2 p = scanToLocal(note.scanPath[idx].first,
+                                                   note.scanPath[idx].second);
+                            dl->AddCircleFilled(p, 4.f, markerCol);
+                        }
+                    }
+                    break;
+                }
+            }
+        }
 
-            float dist = fabsf(cy - scanY);
-            bool active = dist < size.y * 0.08f;
-            ImU32 col = active ? noteColor(note.type) : noteColorDim(note.type);
+        // ── In-progress hold preview ───────────────────────────────────────
+        if (m_scanHoldAwaitEnd) {
+            ImVec2 start = scanToLocal(m_scanHoldStartX, m_scanHoldStartY);
+            float sx = start.x, sy = start.y;
+            ImVec2 mp = ImGui::GetMousePos();
+            float ey = std::clamp(mp.y, origin.y, pMax.y);
+            // Clamp end to the turn-cap Y (where scan line will be at turn time)
+            float capFrac = m_scanHoldGoingUp ? 0.f : 1.f;
+            float capY    = scanToLocal(0.f, capFrac).y;
+            if (m_scanHoldGoingUp) ey = std::max(ey, capY);
+            else                    ey = std::min(ey, capY);
+            // Direction valid?
+            bool dirOk = m_scanHoldGoingUp ? (ey <= sy) : (ey >= sy);
+            ImU32 col  = dirOk ? IM_COL32(80, 220, 100, 200)
+                               : IM_COL32(220, 80, 80, 200);
 
-            dl->AddCircleFilled(ImVec2(cx, cy), noteR, col);
-            if (active) {
-                dl->AddCircle(ImVec2(cx, cy), noteR + 5.f,
-                              IM_COL32(255, 255, 255, 120), 0, 2.f);
+            // Ghost scan line at cursor Y — a horizontal semi-transparent
+            // sweep line showing where the scan line WILL be when this hold
+            // ends. Gives the author a predictive visual anchor for aligning
+            // the tail against audio cues.
+            ImU32 ghostCol = dirOk ? IM_COL32(80, 220, 140, 90)
+                                   : IM_COL32(220, 80, 80, 90);
+            dl->AddLine(ImVec2(origin.x + 10.f, ey),
+                        ImVec2(pMax.x - 10.f, ey), ghostCol, 2.f);
+            dl->AddLine(ImVec2(origin.x + 10.f, ey),
+                        ImVec2(pMax.x - 10.f, ey),
+                        IM_COL32(255, 255, 255, 30), 8.f);
+
+            // Hold body preview + head marker.
+            dl->AddRectFilled(ImVec2(sx - 6.f, std::min(sy, ey)),
+                              ImVec2(sx + 6.f, std::max(sy, ey)),
+                              col, 2.f);
+            dl->AddCircleFilled(ImVec2(sx, sy), 10.f, col);
+
+            // Projected end-time text near the cursor. Uses the same
+            // normalization-safe inverse that the commit path will use so
+            // "ETA" and the committed end time always agree.
+            float endFrac = std::clamp((ey - origin.y) / std::max(1.f, size.y),
+                                       0.f, 1.f);
+            float endTime = scanLineTimeForFrac(m_scanHoldStartT, endFrac);
+            endTime       = std::min(endTime, m_scanHoldTurnCap);
+            char etaBuf[48];
+            int mins = (int)(endTime / 60.f);
+            float secs = endTime - (float)mins * 60.f;
+            snprintf(etaBuf, sizeof(etaBuf), "ETA: %d:%06.3f", mins, secs);
+            ImVec2 tsz = ImGui::CalcTextSize(etaBuf);
+            ImVec2 txtPos(std::clamp(mp.x + 14.f,
+                                     origin.x + 4.f,
+                                     pMax.x - tsz.x - 4.f),
+                          std::clamp(ey - tsz.y - 4.f,
+                                     origin.y + 4.f,
+                                     pMax.y - tsz.y - 4.f));
+            // Text shadow for legibility over any background
+            dl->AddText(ImVec2(txtPos.x + 1, txtPos.y + 1),
+                        IM_COL32(0, 0, 0, 200), etaBuf);
+            dl->AddText(txtPos, dirOk ? IM_COL32(180, 255, 200, 255)
+                                      : IM_COL32(255, 180, 180, 255), etaBuf);
+        }
+
+        // ── In-progress slide preview ──────────────────────────────────────
+        if (m_scanSlideDragging && m_scanSlideDraft.scanPath.size() >= 2) {
+            for (size_t i = 1; i < m_scanSlideDraft.scanPath.size(); ++i) {
+                ImVec2 a = scanToLocal(m_scanSlideDraft.scanPath[i - 1].first,
+                                       m_scanSlideDraft.scanPath[i - 1].second);
+                ImVec2 b = scanToLocal(m_scanSlideDraft.scanPath[i].first,
+                                       m_scanSlideDraft.scanPath[i].second);
+                dl->AddLine(a, b, IM_COL32(220, 130, 255, 230), 4.f);
             }
         }
 
         dl->AddText(ImVec2(origin.x + 8, origin.y + 6),
                     IM_COL32(200, 200, 200, 180), "Scan Line Mode");
+
+        // In-scene tool toolbar + mini instructions
+        const char* toolLabel = "None";
+        switch (m_noteTool) {
+            case NoteTool::Tap:   toolLabel = "Tap";   break;
+            case NoteTool::Flick: toolLabel = "Flick"; break;
+            case NoteTool::Hold:  toolLabel = "Hold";  break;
+            case NoteTool::Slide: toolLabel = "Slide"; break;
+            default:              toolLabel = "None";  break;
+        }
+        char hud[96];
+        snprintf(hud, sizeof(hud), "Tool: %s   BPM: %.1f", toolLabel,
+                 m_dominantBpm > 0.f ? m_dominantBpm : 120.f);
+        dl->AddText(ImVec2(origin.x + 8, origin.y + 22),
+                    IM_COL32(200, 200, 200, 180), hud);
+
+        // Dispatch input (uses ImGui::IsWindowHovered from the SEScene child)
+        bool hovered = ImGui::IsWindowHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem);
+        handleScanLineInput(origin, size, curTime, hovered, engine);
     }
 
     // ── Simulate score & combo at curTime ──────────────────────────────────
@@ -1662,6 +2342,333 @@ void SongEditor::renderSceneView(ImDrawList* dl, ImVec2 origin, ImVec2 size,
     }
 
     dl->PopClipRect();
+}
+
+// ── Scan Line helpers ───────────────────────────────────────────────────────
+// Schedule: 1 bar per sweep at the dominant BPM (fallback 120). In a 4/4
+// meter a bar is 4 beats, so T_sweep = 240/BPM seconds per sweep. Phase is
+// derived from absolute song time via std::fmod on a double accumulator —
+// this avoids the precision drift that would come from frame-by-frame time
+// accumulation during prolonged playback. scanLineNextTurn returns exact
+// integer multiples of T_sweep so sweep boundaries are bit-stable and free
+// of logic gaps.
+
+float SongEditor::scanLinePeriod() const {
+    float bpm = m_dominantBpm > 0.f ? m_dominantBpm : 120.f;
+    return 240.0f / bpm; // seconds per sweep = (60/bpm) * 4 beats
+}
+
+float SongEditor::scanLineFrac(float t) const {
+    const double T = (double)scanLinePeriod();
+    if (T <= 1e-6) return 1.f;
+    const double tt    = (t < 0.f) ? 0.0 : (double)t;
+    const double phase = std::fmod(tt, 2.0 * T);         // full up+down cycle
+    if (phase < T) return (float)(1.0 - phase / T);      // sweep up: 1 → 0
+    return (float)((phase - T) / T);                     // sweep down: 0 → 1
+}
+
+bool SongEditor::scanLineGoingUp(float t) const {
+    const double T = (double)scanLinePeriod();
+    if (T <= 1e-6) return true;
+    const double tt    = (t < 0.f) ? 0.0 : (double)t;
+    const double phase = std::fmod(tt, 2.0 * T);
+    return phase < T;
+}
+
+float SongEditor::scanLineNextTurn(float t) const {
+    const double T = (double)scanLinePeriod();
+    if (T <= 1e-6) return t;
+    const double tt = (t < 0.f) ? 0.0 : (double)t;
+    // Exact integer sweep index ahead of tt. Using floor on tt/T, then the
+    // next boundary is (idx+1)*T — always an integer multiple of T.
+    const double idx = std::floor(tt / T);
+    return (float)((idx + 1.0) * T);
+}
+
+float SongEditor::scanLineTimeForFrac(float t, float frac) const {
+    // Earliest time >= t at which the scan line reaches `frac`, bounded by
+    // the current sweep (next turn). If the frac isn't reachable in the
+    // current sweep direction, returns the turn time.
+    const double T = (double)scanLinePeriod();
+    if (T <= 1e-6) return t;
+    const float turn    = scanLineNextTurn(t);
+    const bool  up      = scanLineGoingUp(t);
+    const float curFrac = scanLineFrac(t);
+    frac = std::clamp(frac, 0.f, 1.f);
+
+    if (up && frac > curFrac)  return turn;
+    if (!up && frac < curFrac) return turn;
+
+    const double dFrac = std::abs((double)frac - (double)curFrac);
+    const double dt    = dFrac * T;
+    return (float)std::min((double)t + dt, (double)turn);
+}
+
+// ── handleScanLineInput ─────────────────────────────────────────────────────
+// Called from the ScanLine branch of renderSceneView. Runs the state machine
+// for the current tool. All click placement requires the cursor to be within
+// a small vertical tolerance of the current scan line.
+
+void SongEditor::handleScanLineInput(ImVec2 origin, ImVec2 size, float curTime,
+                                     bool hovered, Engine* /*engine*/) {
+    if (!m_song) return;
+
+    // ── Coordinate-space helpers ──────────────────────────────────────────
+    // Note data is stored in normalized scan space [0..1]²; the scene rect
+    // can be resized arbitrarily. Every conversion between ImGui local
+    // coordinates and stored note data must go through these.
+    const float invW = 1.f / std::max(1.f, size.x);
+    const float invH = 1.f / std::max(1.f, size.y);
+    auto localToScan = [&](ImVec2 p) -> ImVec2 {
+        return ImVec2((p.x - origin.x) * invW, (p.y - origin.y) * invH);
+    };
+    auto scanToLocal = [&](float nx, float ny) -> ImVec2 {
+        return ImVec2(origin.x + nx * size.x, origin.y + ny * size.y);
+    };
+
+    ImVec2 mp       = ImGui::GetMousePos();
+    ImVec2 pMax(origin.x + size.x, origin.y + size.y);
+    bool   inRect   = (mp.x >= origin.x && mp.x <= pMax.x &&
+                       mp.y >= origin.y && mp.y <= pMax.y);
+    float  frac     = scanLineFrac(curTime);
+    float  scanY    = origin.y + frac * size.y;
+    bool   onLine   = hovered && inRect && std::abs(mp.y - scanY) < 10.f;
+    bool   lmbClick = ImGui::IsMouseClicked(ImGuiMouseButton_Left);
+    bool   lmbDown  = ImGui::IsMouseDown(ImGuiMouseButton_Left);
+    bool   rmbClick = ImGui::IsMouseClicked(ImGuiMouseButton_Right);
+
+    // Nothing to do if mouse isn't in the scene child.
+    if (!hovered || !inRect) return;
+
+    // ── Hold await-end state ────────────────────────────────────────────────
+    if (m_scanHoldAwaitEnd) {
+        // Cancel on RMB or ESC.
+        if (rmbClick || ImGui::IsKeyPressed(ImGuiKey_Escape)) {
+            m_scanHoldAwaitEnd = false;
+            return;
+        }
+        // Direction check from start to cursor.
+        float sy  = origin.y + m_scanHoldStartY * size.y;
+        bool dirOk = m_scanHoldGoingUp ? (mp.y <= sy) : (mp.y >= sy);
+        if (!dirOk) {
+            ImGui::SetMouseCursor(ImGuiMouseCursor_NotAllowed);
+            return;
+        }
+        ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+        if (lmbClick) {
+            // Commit hold. Clamp end Y to [0,1] and cap at turn-Y.
+            ImVec2 mpClamped(std::clamp(mp.x, origin.x, pMax.x),
+                             std::clamp(mp.y, origin.y, pMax.y));
+            float endFrac = localToScan(mpClamped).y;
+            // Cap at the frac the scan line will reach at the turn (which is
+            // 0 if going up, 1 if going down).
+            if (m_scanHoldGoingUp) endFrac = std::max(endFrac, 0.f);
+            else                    endFrac = std::min(endFrac, 1.f);
+
+            float endTime = scanLineTimeForFrac(m_scanHoldStartT, endFrac);
+            endTime       = std::min(endTime, m_scanHoldTurnCap);
+
+            EditorNote n{};
+            n.type     = EditorNoteType::Hold;
+            n.time     = m_scanHoldStartT;
+            n.endTime  = endTime;
+            n.scanX    = m_scanHoldStartX;
+            n.scanY    = m_scanHoldStartY;
+            n.scanEndY = endFrac;
+            notes().push_back(n);
+            m_scanHoldAwaitEnd = false;
+        }
+        return;
+    }
+
+    // ── Slide drag state ────────────────────────────────────────────────────
+    if (m_scanSlideDragging) {
+        if (!lmbDown) {
+            // Commit on release if we have enough points.
+            if (m_scanSlideDraft.scanPath.size() >= 2) {
+                // Derive endTime from last path point's Y.
+                float endFrac = m_scanSlideDraft.scanPath.back().second;
+                float endTime = scanLineTimeForFrac(m_scanSlideDraft.time, endFrac);
+                endTime       = std::min(endTime, m_scanSlideTurnCap);
+                m_scanSlideDraft.endTime = endTime;
+                notes().push_back(m_scanSlideDraft);
+            }
+            m_scanSlideDragging = false;
+            m_scanSlideDraft    = {};
+            return;
+        }
+
+        // Record current mouse position if it moved.
+        float mx = std::clamp(mp.x, origin.x, pMax.x);
+        float my = std::clamp(mp.y, origin.y, pMax.y);
+
+        // Direction gate with a pixel-space deadzone to tolerate hand
+        // jitter and high-polling-rate mice. Only a reversal that exceeds
+        // SLIDE_REVERSE_EPSILON AND goes the wrong way invalidates the
+        // draft — tiny wobbles stay in the path.
+        constexpr float SLIDE_REVERSE_EPSILON = 3.0f; // pixels
+        const float dy      = my - m_scanSlideLastY;
+        const bool  wrongUp = m_scanSlideGoingUp ? (dy > 0.f) : (dy < 0.f);
+        if (std::abs(dy) > SLIDE_REVERSE_EPSILON && wrongUp) {
+            // Reversal exceeds deadzone → cancel the entire draft per spec.
+            m_scanSlideDragging = false;
+            m_scanSlideDraft    = {};
+            ImGui::SetMouseCursor(ImGuiMouseCursor_NotAllowed);
+            return;
+        }
+
+        // Clamp so the path doesn't pass the turn-around row.
+        if (m_scanSlideGoingUp) my = std::max(my, origin.y);
+        else                     my = std::min(my, pMax.y);
+
+        ImVec2 n = localToScan(ImVec2(mx, my));
+        float nx = n.x, ny = n.y;
+        auto& path = m_scanSlideDraft.scanPath;
+        // Only push a new point if it differs enough from the last one.
+        if (path.empty() ||
+            std::abs(path.back().first - nx)  > 0.003f ||
+            std::abs(path.back().second - ny) > 0.003f) {
+            path.emplace_back(nx, ny);
+            m_scanSlideLastY = my;
+        }
+        ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+        return;
+    }
+
+    // ── Slide tool: off-line click on an existing slide path adds a
+    // sample point to that slide (per spec: "they can click to add sample
+    // point after the slide existing").
+    if (m_noteTool == NoteTool::Slide && !onLine && lmbClick) {
+        for (auto& n : notes()) {
+            if (n.type != EditorNoteType::Slide) continue;
+            if (n.scanPath.size() < 2) continue;
+            for (size_t i = 1; i < n.scanPath.size(); ++i) {
+                ImVec2 a = scanToLocal(n.scanPath[i - 1].first,
+                                       n.scanPath[i - 1].second);
+                ImVec2 b = scanToLocal(n.scanPath[i].first,
+                                       n.scanPath[i].second);
+                float ABx = b.x - a.x, ABy = b.y - a.y;
+                float APx = mp.x - a.x, APy = mp.y - a.y;
+                float len2 = ABx * ABx + ABy * ABy;
+                float u    = len2 > 1e-4f ? (APx * ABx + APy * ABy) / len2 : 0.f;
+                u = std::clamp(u, 0.f, 1.f);
+                float cx = a.x + u * ABx, cy = a.y + u * ABy;
+                float dx = mp.x - cx,     dy = mp.y - cy;
+                if (dx * dx + dy * dy < 64.f) {
+                    float segU  = ((float)(i - 1) + u) /
+                                  (float)(n.scanPath.size() - 1);
+                    float total = std::max(0.0001f, n.endTime - n.time);
+                    n.samplePoints.push_back(std::clamp(segU * total, 0.f, total));
+                    std::sort(n.samplePoints.begin(), n.samplePoints.end());
+                    return;
+                }
+            }
+        }
+    }
+
+    // ── Idle: show cursor state + handle fresh clicks ──────────────────────
+    if (!onLine) {
+        // If we're off the scan line and a tool is active, hint NotAllowed.
+        if (m_noteTool != NoteTool::None && inRect)
+            ImGui::SetMouseCursor(ImGuiMouseCursor_NotAllowed);
+        return;
+    }
+    ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+    if (!lmbClick) return;
+
+    ImVec2 mpN = localToScan(mp);
+    float mxN = std::clamp(mpN.x, 0.f, 1.f);
+    float myN = frac;  // lock Y to scan line
+
+    switch (m_noteTool) {
+        case NoteTool::Tap: {
+            EditorNote n{};
+            n.type  = EditorNoteType::Tap;
+            n.time  = curTime;
+            n.scanX = mxN;
+            n.scanY = myN;
+            notes().push_back(n);
+            break;
+        }
+        case NoteTool::Flick: {
+            EditorNote n{};
+            n.type  = EditorNoteType::Flick;
+            n.time  = curTime;
+            n.scanX = mxN;
+            n.scanY = myN;
+            notes().push_back(n);
+            break;
+        }
+        case NoteTool::Hold: {
+            m_scanHoldAwaitEnd = true;
+            m_scanHoldStartX   = mxN;
+            m_scanHoldStartY   = myN;
+            m_scanHoldStartT   = curTime;
+            m_scanHoldTurnCap  = scanLineNextTurn(curTime);
+            m_scanHoldGoingUp  = scanLineGoingUp(curTime);
+            break;
+        }
+        case NoteTool::Slide: {
+            m_scanSlideDragging         = true;
+            m_scanSlideGoingUp          = scanLineGoingUp(curTime);
+            m_scanSlideTurnCap          = scanLineNextTurn(curTime);
+            m_scanSlideLastY            = mp.y;
+            m_scanSlideDraft            = {};
+            m_scanSlideDraft.type       = EditorNoteType::Slide;
+            m_scanSlideDraft.time       = curTime;
+            m_scanSlideDraft.scanX      = mxN;
+            m_scanSlideDraft.scanY      = myN;
+            // Pre-allocate a contiguous buffer so the fast drag-to-record
+            // loop never triggers a std::vector reallocation mid-stroke.
+            m_scanSlideDraft.scanPath.reserve(512);
+            m_scanSlideDraft.scanPath.emplace_back(mxN, myN);
+            break;
+        }
+        case NoteTool::None:
+        default:
+            // With no tool selected, click on a scan-line note to select it
+            // (opens the Note Properties popup). Hit-tests tap/flick heads,
+            // hold heads + bodies, and slide paths.
+            for (size_t ni = 0; ni < notes().size(); ++ni) {
+                const auto& n = notes()[ni];
+                ImVec2 head = scanToLocal(n.scanX, n.scanY);
+                float  nx = head.x, ny = head.y;
+                bool hit = false;
+
+                if (n.type == EditorNoteType::Tap ||
+                    n.type == EditorNoteType::Flick) {
+                    float dx = mp.x - nx, dy = mp.y - ny;
+                    hit = (dx * dx + dy * dy < 14.f * 14.f);
+                } else if (n.type == EditorNoteType::Hold) {
+                    float ey  = scanToLocal(n.scanX, n.scanEndY).y;
+                    float yLo = std::min(ny, ey);
+                    float yHi = std::max(ny, ey);
+                    hit = (std::abs(mp.x - nx) < 10.f &&
+                           mp.y >= yLo - 4.f && mp.y <= yHi + 4.f);
+                } else if (n.type == EditorNoteType::Slide) {
+                    for (size_t i = 1; i < n.scanPath.size(); ++i) {
+                        ImVec2 a = scanToLocal(n.scanPath[i - 1].first,
+                                               n.scanPath[i - 1].second);
+                        ImVec2 b = scanToLocal(n.scanPath[i].first,
+                                               n.scanPath[i].second);
+                        float ABx = b.x - a.x, ABy = b.y - a.y;
+                        float APx = mp.x - a.x, APy = mp.y - a.y;
+                        float len2 = ABx * ABx + ABy * ABy;
+                        float u    = len2 > 1e-4f ? (APx * ABx + APy * ABy) / len2 : 0.f;
+                        u = std::clamp(u, 0.f, 1.f);
+                        float cx = a.x + u * ABx, cy = a.y + u * ABy;
+                        float dx = mp.x - cx,     dy = mp.y - cy;
+                        if (dx * dx + dy * dy < 64.f) { hit = true; break; }
+                    }
+                }
+
+                if (hit) {
+                    m_selectedNoteIdx = (int)ni;
+                    break;
+                }
+            }
+            break;
+    }
 }
 
 // ── renderGameModePreview ───────────────────────────────────────────────────
@@ -1900,6 +2907,8 @@ void SongEditor::renderGameModePreview(ImDrawList* dl, ImVec2 origin, ImVec2 siz
 // ── renderAssets ─────────────────────────────────────────────────────────────
 
 void SongEditor::renderAssets() {
+    static ImageEditor s_imageEditor;
+
     if (ImGui::Button("Open File...")) {
 #ifdef _WIN32
         OPENFILENAMEW ofn = {};
@@ -2086,6 +3095,19 @@ ChartData SongEditor::buildChartFromNotes() const {
         chart.artist = m_song->artist;
     }
 
+    // Populate timing points from BPM map
+    if (!m_bpmChanges.empty()) {
+        for (const auto& bc : m_bpmChanges) {
+            TimingPoint tp;
+            tp.time  = (double)bc.time;
+            tp.bpm   = bc.bpm;
+            tp.meter = 4;
+            chart.timingPoints.push_back(tp);
+        }
+    } else if (m_dominantBpm > 0.f) {
+        chart.timingPoints.push_back({0.0, m_dominantBpm, 4});
+    }
+
     const auto& edNotes = notes();
     uint32_t id = 0;
     for (const auto& en : edNotes) {
@@ -2093,19 +3115,79 @@ ChartData SongEditor::buildChartFromNotes() const {
         ev.time = (double)en.time;
         ev.id   = id++;
 
+        int span = std::clamp(en.laneSpan, 1, 3);
         switch (en.type) {
-            case EditorNoteType::Tap:
+            case EditorNoteType::Tap: {
                 ev.type = NoteType::Tap;
-                ev.data = TapData{(float)en.track};
+                TapData td{};
+                td.laneX    = (float)en.track;
+                td.laneSpan = span;
+                td.scanX    = en.scanX;
+                td.scanY    = en.scanY;
+                ev.data = std::move(td);
                 break;
-            case EditorNoteType::Hold:
+            }
+            case EditorNoteType::Hold: {
                 ev.type = NoteType::Hold;
-                ev.data = HoldData{(float)en.track, en.endTime - en.time};
+                HoldData hd{};
+                hd.laneX    = (float)en.track;
+                hd.duration = en.endTime - en.time;
+                hd.laneSpan = span;
+                hd.scanX    = en.scanX;
+                hd.scanY    = en.scanY;
+                hd.scanEndY = en.scanEndY;
+
+                if (!en.waypoints.empty()) {
+                    // New multi-waypoint path
+                    hd.waypoints.reserve(en.waypoints.size());
+                    for (const auto& w : en.waypoints) {
+                        HoldWaypoint hw{};
+                        hw.tOffset       = w.tOffset;
+                        hw.lane          = w.lane;
+                        hw.transitionLen = w.transitionLen;
+                        hw.style         = (HoldTransition)(int)w.style;
+                        hd.waypoints.push_back(hw);
+                    }
+                    hd.endLaneX = static_cast<float>(en.waypoints.back().lane);
+                } else {
+                    // Legacy single-transition (or straight) hold
+                    hd.endLaneX = (en.endTrack < 0 || en.endTrack == en.track)
+                                  ? -1.f
+                                  : (float)en.endTrack;
+                    hd.transition      = (HoldTransition)(int)en.transition;
+                    hd.transitionLen   = en.transitionLen;
+                    hd.transitionStart = en.transitionStart;
+                }
+
+                hd.samplePoints.reserve(en.samplePoints.size());
+                for (float t : en.samplePoints)
+                    hd.samplePoints.push_back({t});
+                ev.data = hd;
                 break;
-            case EditorNoteType::Slide:
+            }
+            case EditorNoteType::Slide: {
                 ev.type = NoteType::Slide;
-                ev.data = TapData{(float)en.track};
+                TapData td{};
+                td.laneX        = (float)en.track;
+                td.laneSpan     = span;
+                td.scanX        = en.scanX;
+                td.scanY        = en.scanY;
+                td.scanPath     = en.scanPath;
+                td.duration     = std::max(0.f, en.endTime - en.time);
+                td.samplePoints = en.samplePoints;
+                ev.data = std::move(td);
                 break;
+            }
+            case EditorNoteType::Flick: {
+                ev.type = NoteType::Flick;
+                FlickData fd{};
+                fd.laneX     = (float)en.track;
+                fd.direction = 0;
+                fd.scanX     = en.scanX;
+                fd.scanY     = en.scanY;
+                ev.data = std::move(fd);
+                break;
+            }
         }
         chart.notes.push_back(ev);
     }
@@ -2149,6 +3231,26 @@ void SongEditor::exportAllCharts() {
         f << " \"title\": \"" << chart.title << "\",\n";
         f << " \"artist\": \"" << chart.artist << "\",\n";
         f << " \"offset\": " << chart.offset << ",\n";
+
+        // Write timing points (dynamic BPM)
+        if (!chart.timingPoints.empty()) {
+            f << " \"timing\": {\n";
+            f << "   \"bpm\": " << chart.timingPoints[0].bpm << ",\n";
+            if (chart.timingPoints.size() > 1) {
+                f << "   \"bpm_changes\": [\n";
+                for (size_t i = 0; i < chart.timingPoints.size(); i++) {
+                    auto& tp = chart.timingPoints[i];
+                    f << "     {\"time\": " << tp.time << ", \"bpm\": " << tp.bpm << "}";
+                    if (i + 1 < chart.timingPoints.size()) f << ",";
+                    f << "\n";
+                }
+                f << "   ]\n";
+            } else {
+                f << "   \"timeSignature\": \"4/4\"\n";
+            }
+            f << " },\n";
+        }
+
         f << " \"notes\": [\n";
         for (size_t i = 0; i < chart.notes.size(); i++) {
             auto& n = chart.notes[i];
@@ -2157,16 +3259,119 @@ void SongEditor::exportAllCharts() {
                 case NoteType::Tap:   f << "\"tap\"";   break;
                 case NoteType::Hold:  f << "\"hold\"";  break;
                 case NoteType::Slide: f << "\"slide\""; break;
+                case NoteType::Flick: f << "\"flick\""; break;
                 default:              f << "\"tap\"";    break;
             }
             f << ", \"lane\": ";
-            if (auto* tap = std::get_if<TapData>(&n.data))        f << tap->laneX;
-            else if (auto* hold = std::get_if<HoldData>(&n.data)) f << hold->laneX;
-            else f << 0;
-            if (n.type == NoteType::Hold) {
-                if (auto* hold = std::get_if<HoldData>(&n.data))
-                    f << ", \"duration\": " << hold->duration;
+            int span = 1;
+            if (auto* tap = std::get_if<TapData>(&n.data)) {
+                f << tap->laneX;
+                span = tap->laneSpan;
+            } else if (auto* hold = std::get_if<HoldData>(&n.data)) {
+                f << hold->laneX;
+                span = hold->laneSpan;
+            } else if (auto* flick = std::get_if<FlickData>(&n.data)) {
+                f << flick->laneX;
+            } else {
+                f << 0;
             }
+            if (n.type == NoteType::Hold) {
+                if (auto* hold = std::get_if<HoldData>(&n.data)) {
+                    f << ", \"duration\": " << hold->duration;
+
+                    // Multi-waypoint path takes precedence over legacy fields.
+                    if (!hold->waypoints.empty()) {
+                        f << ", \"waypoints\": [";
+                        for (size_t wi = 0; wi < hold->waypoints.size(); ++wi) {
+                            const auto& w = hold->waypoints[wi];
+                            const char* tname = "curve";
+                            switch (w.style) {
+                                case HoldTransition::Straight: tname = "straight"; break;
+                                case HoldTransition::Angle90:  tname = "angle90";  break;
+                                case HoldTransition::Curve:    tname = "curve";    break;
+                                case HoldTransition::Rhomboid: tname = "rhomboid"; break;
+                            }
+                            if (wi) f << ", ";
+                            f << "{\"t\": " << w.tOffset
+                              << ", \"lane\": " << w.lane
+                              << ", \"len\": " << w.transitionLen
+                              << ", \"style\": \"" << tname << "\"}";
+                        }
+                        f << "]";
+                    } else if (hold->endLaneX >= 0.f && hold->endLaneX != hold->laneX) {
+                        f << ", \"endLane\": " << hold->endLaneX;
+                        const char* tname = "straight";
+                        switch (hold->transition) {
+                            case HoldTransition::Angle90:  tname = "angle90";  break;
+                            case HoldTransition::Curve:    tname = "curve";    break;
+                            case HoldTransition::Rhomboid: tname = "rhomboid"; break;
+                            default: break;
+                        }
+                        f << ", \"transition\": \"" << tname << "\"";
+                        f << ", \"transitionLen\": " << hold->transitionLen;
+                        if (hold->transitionStart >= 0.f)
+                            f << ", \"transitionStart\": " << hold->transitionStart;
+                    }
+                    if (!hold->samplePoints.empty()) {
+                        f << ", \"samples\": [";
+                        for (size_t si = 0; si < hold->samplePoints.size(); ++si) {
+                            if (si) f << ", ";
+                            f << hold->samplePoints[si].tOffset;
+                        }
+                        f << "]";
+                    }
+                }
+            }
+            if (span != 1) f << ", \"laneSpan\": " << span;
+
+            // ── Slide-specific duration + sample points ───────────────
+            if (n.type == NoteType::Slide) {
+                if (auto* tap = std::get_if<TapData>(&n.data)) {
+                    if (tap->duration > 0.f)
+                        f << ", \"duration\": " << tap->duration;
+                    if (!tap->samplePoints.empty()) {
+                        f << ", \"samples\": [";
+                        for (size_t si = 0; si < tap->samplePoints.size(); ++si) {
+                            if (si) f << ", ";
+                            f << tap->samplePoints[si];
+                        }
+                        f << "]";
+                    }
+                }
+            }
+
+            // ── Scan-line coordinates (emitted when non-default) ──────
+            // Uses a flat "scan" sub-object so old loaders that don't
+            // know about it can simply ignore the extra key.
+            {
+                float sx = 0.f, sy = 0.f, sey = -1.f;
+                const std::vector<std::pair<float,float>>* spath = nullptr;
+                if (auto* tap = std::get_if<TapData>(&n.data)) {
+                    sx = tap->scanX; sy = tap->scanY;
+                    if (!tap->scanPath.empty()) spath = &tap->scanPath;
+                } else if (auto* hold = std::get_if<HoldData>(&n.data)) {
+                    sx = hold->scanX; sy = hold->scanY; sey = hold->scanEndY;
+                } else if (auto* flick = std::get_if<FlickData>(&n.data)) {
+                    sx = flick->scanX; sy = flick->scanY;
+                }
+                bool hasScan = (sx != 0.f || sy != 0.f || sey >= 0.f ||
+                                (spath && !spath->empty()));
+                if (hasScan) {
+                    f << ", \"scan\": {\"x\": " << sx << ", \"y\": " << sy;
+                    if (sey >= 0.f) f << ", \"endY\": " << sey;
+                    if (spath && !spath->empty()) {
+                        f << ", \"path\": [";
+                        for (size_t pi = 0; pi < spath->size(); ++pi) {
+                            if (pi) f << ", ";
+                            f << "[" << (*spath)[pi].first << ", "
+                                     << (*spath)[pi].second << "]";
+                        }
+                        f << "]";
+                    }
+                    f << "}";
+                }
+            }
+
             f << "}";
             if (i + 1 < chart.notes.size()) f << ",";
             f << "\n";
@@ -2257,7 +3462,9 @@ void SongEditor::renderDifficultySelector() {
         }
         if (ImGui::Button(d.label, ImVec2(70, 24))) {
             m_currentDifficulty = d.diff;
-            m_pressFirstClick = false; // cancel any pending press note
+            m_holdDragging  = false;
+            m_holdLastTrack = -1;
+            m_holdDraft     = EditorNote{};
         }
         if (active) ImGui::PopStyleColor(3);
         ImGui::SameLine();
@@ -2289,7 +3496,9 @@ void SongEditor::renderNoteToolbar() {
                 m_noteTool = NoteTool::None; // toggle off
             else {
                 m_noteTool = tool;
-                m_pressFirstClick = false; // reset pending press
+                m_holdDragging  = false;
+                m_holdLastTrack = -1;
+                m_holdDraft     = EditorNote{};
             }
         }
         if (active) ImGui::PopStyleColor(3);
@@ -2298,7 +3507,7 @@ void SongEditor::renderNoteToolbar() {
 
     toolBtn("Marker", NoteTool::None, ImVec4(0.5f, 0.4f, 0.2f, 1.f));
     toolBtn("Click",  NoteTool::Tap, ImVec4(0.2f, 0.5f, 0.8f, 1.f));
-    toolBtn("Press",  NoteTool::Hold, ImVec4(0.2f, 0.7f, 0.3f, 1.f));
+    toolBtn("Hold",   NoteTool::Hold, ImVec4(0.2f, 0.7f, 0.3f, 1.f));
 
     // Slide: not available for ScanLine; always available for 2D, Circle, and 3D ground
     // (3D sky restriction is handled at placement time)
@@ -2306,10 +3515,11 @@ void SongEditor::renderNoteToolbar() {
         toolBtn("Slide", NoteTool::Slide, ImVec4(0.7f, 0.3f, 0.7f, 1.f));
     }
 
-    // Show pending press indicator
-    if (m_pressFirstClick && m_noteTool == NoteTool::Hold) {
+    // Show drag-recording indicator
+    if (m_holdDragging && m_noteTool == NoteTool::Hold) {
         ImGui::SameLine();
-        ImGui::TextColored(ImVec4(0.4f, 1.f, 0.4f, 1.f), "Click end point...");
+        ImGui::TextColored(ImVec4(0.4f, 1.f, 0.4f, 1.f),
+                           "Recording... (drag, release to commit)");
     }
 
     // Show hint for 3D sky restriction
@@ -2332,13 +3542,22 @@ void SongEditor::renderNoteToolbar() {
         if (ImGui::Button("Analyze Beats", ImVec2(100, 26))) {
             if (m_song && !m_song->audioFile.empty()) {
                 std::string fullAudioPath = m_projectPath + "/" + m_song->audioFile;
+                // Ensure absolute path so subprocess can find the file
+                try { fullAudioPath = fs::canonical(fullAudioPath).string(); } catch (...) {}
                 m_analyzer.setCallback([this](AudioAnalysisResult result) {
                     if (result.success) {
                         m_diffMarkers[(int)Difficulty::Easy]   = std::move(result.easyMarkers);
                         m_diffMarkers[(int)Difficulty::Medium] = std::move(result.mediumMarkers);
                         m_diffMarkers[(int)Difficulty::Hard]   = std::move(result.hardMarkers);
-                        m_statusMsg   = "Beats analyzed! BPM: " + std::to_string((int)result.bpm);
-                        m_statusTimer = 4.f;
+                        m_bpmChanges   = std::move(result.bpmChanges);
+                        m_dominantBpm  = result.bpm;
+
+                        // Build status message showing BPM info
+                        std::string bpmInfo = "BPM: " + std::to_string((int)result.bpm);
+                        if (m_bpmChanges.size() > 1)
+                            bpmInfo += " (dynamic: " + std::to_string(m_bpmChanges.size()) + " sections)";
+                        m_statusMsg   = "Beats analyzed! " + bpmInfo;
+                        m_statusTimer = 5.f;
                     } else {
                         m_analysisErrorMsg  = result.errorMessage;
                         m_showAnalysisError = true;
@@ -2441,7 +3660,7 @@ void SongEditor::handleNotePlacement(ImVec2 origin, ImVec2 size, float startTime
                                      float trackH, float regionTop,
                                      Engine* engine) {
     ImGuiIO& io = ImGui::GetIO();
-    if (!io.MouseClicked[0] || io.KeyCtrl || io.KeyShift || io.KeyAlt) return;
+    if (io.KeyCtrl || io.KeyShift || io.KeyAlt) return;
 
     float mouseX = io.MousePos.x;
     float mouseY = io.MousePos.y;
@@ -2449,39 +3668,153 @@ void SongEditor::handleNotePlacement(ImVec2 origin, ImVec2 size, float startTime
     float snappedTime = snapToMarker(rawTime);
     int   track = trackFromY(mouseY, regionTop, trackH, trackCount);
 
-    // 3D sky: only Click and Press
+    // 3D sky: only Click and Hold
     NoteTool effectiveTool = m_noteTool;
     if (is3DSky && effectiveTool == NoteTool::Slide)
         return; // disallow
 
     if (effectiveTool == NoteTool::Hold) {
-        if (!m_pressFirstClick) {
-            // First click: record start
-            m_pressFirstClick = true;
-            m_pressStartTime  = snappedTime;
-            m_pressStartTrack = track;
-            m_pressStartSky   = is3DSky;
-        } else {
-            // Second click: create the press note
-            EditorNote note;
-            note.type    = EditorNoteType::Hold;
-            note.time    = m_pressStartTime;
-            note.endTime = snappedTime;
-            note.track   = m_pressStartTrack;
-            note.isSky   = m_pressStartSky;
-            // Ensure start < end
-            if (note.endTime < note.time) std::swap(note.time, note.endTime);
-            notes().push_back(note);
-            m_pressFirstClick = false;
-            if (engine) engine->audio().playClickSfx();
+        // ── Drag-to-record ──────────────────────────────────────────────────
+        // Press LMB at the start lane, drag through the timeline (each lane
+        // crossing pushes a waypoint), release LMB to commit the hold.
+        if (io.MouseClicked[0]) {
+            // Start a new draft.
+            m_holdDragging = true;
+            m_holdDraft = EditorNote{};
+            m_holdDraft.type     = EditorNoteType::Hold;
+            m_holdDraft.time     = snappedTime;
+            m_holdDraft.endTime  = snappedTime;
+            m_holdDraft.track    = track;
+            m_holdDraft.isSky    = is3DSky;
+            m_holdDraft.laneSpan = m_defaultLaneSpan;
+            m_holdDraft.waypoints.clear();
+            m_holdDraft.waypoints.push_back({0.f, track, 0.f, EditorHoldTransition::Curve});
+            m_holdLastTrack = track;
         }
-    } else {
+        else if (m_holdDragging && ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+            // Sample current cursor; advance endTime; push a waypoint when
+            // the lane changes.
+            float curTime = std::max(m_holdDraft.time, snappedTime);
+            m_holdDraft.endTime = curTime;
+            if (track != m_holdLastTrack) {
+                float tOff = curTime - m_holdDraft.time;
+                if (tOff <= 0.f) tOff = 0.0001f;
+                // Default each lane-change to an instant snap; the author
+                // can stretch transitionLen later in Note Properties.
+                m_holdDraft.waypoints.push_back({tOff, track, 0.f, EditorHoldTransition::Curve});
+                m_holdLastTrack = track;
+            }
+        }
+        if (m_holdDragging && ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
+            // Commit the draft. A click without drag (no time elapsed and no
+            // lane change) is treated as cancel — a hold needs duration.
+            m_holdDraft.endTime = std::max(m_holdDraft.endTime, snappedTime);
+            float dur = m_holdDraft.endTime - m_holdDraft.time;
+            if (dur > 0.001f) {
+                // Ensure the last waypoint ends at the hold's tail so the
+                // body covers the full duration. If the user finished on the
+                // same lane as the previous waypoint, just extend it.
+                if (!m_holdDraft.waypoints.empty()) {
+                    auto& last = m_holdDraft.waypoints.back();
+                    if (last.lane == m_holdLastTrack && last.tOffset < dur) {
+                        last.tOffset = dur;
+                    } else if (last.tOffset < dur) {
+                        m_holdDraft.waypoints.push_back({dur, m_holdLastTrack, 0.f,
+                                                          EditorHoldTransition::Curve});
+                    }
+                }
+                // Drop the waypoints vector if it's a degenerate straight hold
+                // (single starting waypoint or two same-lane waypoints).
+                bool flat = true;
+                if (m_holdDraft.waypoints.size() >= 2) {
+                    int firstLane = m_holdDraft.waypoints.front().lane;
+                    for (auto& w : m_holdDraft.waypoints)
+                        if (w.lane != firstLane) { flat = false; break; }
+                }
+                if (flat) m_holdDraft.waypoints.clear();
+                notes().push_back(m_holdDraft);
+                if (engine) engine->audio().playClickSfx();
+            }
+            m_holdDragging  = false;
+            m_holdLastTrack = -1;
+            m_holdDraft     = EditorNote{};
+        }
+    } else if (io.MouseClicked[0]) {
+        // Tap placement: if the click lands inside an existing Hold's zone
+        // (same lane at that moment in time), convert it into a sample point
+        // on that hold — Bandori-style inline tick — instead of placing a
+        // standalone tap note.
+        if (effectiveTool == NoteTool::Tap) {
+            auto editorHoldLaneAt = [](const EditorNote& h, float tOff) -> float {
+                if (h.waypoints.empty()) {
+                    const int endTrk = h.endTrack < 0 ? h.track : h.endTrack;
+                    const float duration = std::max(0.f, h.endTime - h.time);
+                    if (endTrk == h.track || h.transition == EditorHoldTransition::Straight)
+                        return (float)h.track;
+                    const float tLen = std::clamp(h.transitionLen, 0.f, duration);
+                    const float tBegin = (h.transitionStart < 0.f)
+                        ? std::max(0.f, duration - tLen)
+                        : std::clamp(h.transitionStart, 0.f, std::max(0.f, duration - tLen));
+                    const float tEnd = tBegin + tLen;
+                    const float la = (float)h.track, lb = (float)endTrk;
+                    if (tLen <= 0.f || tOff <= tBegin) return la;
+                    if (tOff >= tEnd)                  return lb;
+                    float u = (tOff - tBegin) / tLen;
+                    if (h.transition == EditorHoldTransition::Angle90) return lb;
+                    if (h.transition == EditorHoldTransition::Curve) {
+                        float s = u * u * (3.f - 2.f * u);
+                        return la + (lb - la) * s;
+                    }
+                    return la + (lb - la) * u;
+                }
+                const auto& wps = h.waypoints;
+                if (tOff <= wps.front().tOffset) return (float)wps.front().lane;
+                if (tOff >= wps.back().tOffset)  return (float)wps.back().lane;
+                for (size_t wi = 1; wi < wps.size(); ++wi) {
+                    const auto& a = wps[wi - 1];
+                    const auto& b = wps[wi];
+                    if (tOff > b.tOffset) continue;
+                    float tLen = std::clamp(b.transitionLen, 0.f, b.tOffset - a.tOffset);
+                    float tBeg = b.tOffset - tLen;
+                    if (tOff <= tBeg || tLen <= 0.f)
+                        return tOff >= b.tOffset ? (float)b.lane : (float)a.lane;
+                    float u  = (tOff - tBeg) / tLen;
+                    float la = (float)a.lane, lb = (float)b.lane;
+                    switch (b.style) {
+                        case EditorHoldTransition::Angle90: return lb;
+                        case EditorHoldTransition::Curve: {
+                            float s = u * u * (3.f - 2.f * u);
+                            return la + (lb - la) * s;
+                        }
+                        case EditorHoldTransition::Rhomboid:
+                            return la + (lb - la) * u;
+                        default: return lb;
+                    }
+                }
+                return (float)wps.back().lane;
+            };
+
+            for (auto& h : notes()) {
+                if (h.type != EditorNoteType::Hold) continue;
+                if (h.isSky != is3DSky) continue;
+                if (snappedTime <= h.time || snappedTime >= h.endTime) continue;
+                float tOff = snappedTime - h.time;
+                float lane = editorHoldLaneAt(h, tOff);
+                if ((int)(lane + 0.5f) != track) continue;
+                h.samplePoints.push_back(tOff);
+                std::sort(h.samplePoints.begin(), h.samplePoints.end());
+                if (engine) engine->audio().playClickSfx();
+                return;
+            }
+        }
+
         // Click or Slide: single click to place
         EditorNote note;
         note.type  = (effectiveTool == NoteTool::Tap) ? EditorNoteType::Tap : EditorNoteType::Slide;
         note.time  = snappedTime;
         note.track = track;
         note.isSky = is3DSky;
+        note.laneSpan = m_defaultLaneSpan;
         notes().push_back(note);
         if (engine) engine->audio().playClickSfx();
     }
@@ -2510,6 +3843,7 @@ void SongEditor::renderNotes(ImDrawList* dl, ImVec2 origin, ImVec2 size,
             case EditorNoteType::Tap: return IM_COL32(40, 160, 220, 80);
             case EditorNoteType::Hold: return IM_COL32(40, 200, 80, 80);
             case EditorNoteType::Slide: return IM_COL32(180, 60, 200, 80);
+            case EditorNoteType::Flick: return IM_COL32(220, 150, 40, 80);
         }
         return IM_COL32(40, 200, 80, 80);
     };
@@ -2534,7 +3868,14 @@ void SongEditor::renderNotes(ImDrawList* dl, ImVec2 origin, ImVec2 size,
                           perfectColor(type), 2.f);
     };
 
-    for (const auto& note : notes()) {
+    ImGuiIO& io = ImGui::GetIO();
+    // Note click-selection opens the Note Properties popup. Allowed in all
+    // modes so authors can edit Hold transition/sample points in Bandori too.
+    bool clickable = (m_noteTool == NoteTool::None)
+                  && !io.KeyCtrl && !io.KeyShift && !io.KeyAlt;
+
+    for (size_t ni = 0; ni < notes().size(); ++ni) {
+        const auto& note = notes()[ni];
         if (note.isSky != skyOnly) continue;
 
         float noteX = origin.x + (note.time - startTime) * pxPerSec;
@@ -2543,31 +3884,255 @@ void SongEditor::renderNotes(ImDrawList* dl, ImVec2 origin, ImVec2 size,
         float centerY = regionTop + (note.track + 0.5f) * trackH;
         float halfH   = trackH * 0.35f;
 
+        // Hit-test for selection. For a multi-waypoint Hold the bar crosses
+        // multiple track rows, so the Y range spans every waypoint's lane.
+        if (clickable && io.MouseClicked[0]) {
+            float mx = io.MousePos.x, my = io.MousePos.y;
+            float hitX = (note.type == EditorNoteType::Hold)
+                ? origin.x + (note.endTime - startTime) * pxPerSec
+                : noteX;
+            float yLo = centerY - halfH;
+            float yHi = centerY + halfH;
+            if (note.type == EditorNoteType::Hold) {
+                if (!note.waypoints.empty()) {
+                    for (const auto& w : note.waypoints) {
+                        float cy = regionTop + (w.lane + 0.5f) * trackH;
+                        yLo = std::min(yLo, cy - halfH);
+                        yHi = std::max(yHi, cy + halfH);
+                    }
+                } else if (note.endTrack >= 0 && note.endTrack != note.track) {
+                    float endCY = regionTop + (note.endTrack + 0.5f) * trackH;
+                    yLo = std::min(yLo, endCY - halfH);
+                    yHi = std::max(yHi, endCY + halfH);
+                }
+            }
+            if (mx >= noteX - halfH && mx <= hitX + halfH &&
+                my >= yLo && my <= yHi) {
+                m_selectedNoteIdx = (int)ni;
+            }
+        }
+
         // Judgment bands at the note start
         drawJudgmentBands(noteX, centerY, halfH, note.type);
 
         if (note.type == EditorNoteType::Hold) {
             float endX = origin.x + (note.endTime - startTime) * pxPerSec;
+            const int endTrk = note.effectiveEndTrack();
+            float endCenterY = regionTop + (endTrk + 0.5f) * trackH;
 
-            // Judgment bands at the note end
-            drawJudgmentBands(endX, centerY, halfH, note.type);
+            // Judgment bands at the note end (on the end track)
+            drawJudgmentBands(endX, endCenterY, halfH, note.type);
 
-            // Hold bar body
-            dl->AddRectFilled(ImVec2(noteX, centerY - halfH * 0.6f),
-                              ImVec2(endX, centerY + halfH * 0.6f),
-                              IM_COL32(50, 180, 80, 120), 3.f);
-            dl->AddRect(ImVec2(noteX, centerY - halfH * 0.6f),
-                        ImVec2(endX, centerY + halfH * 0.6f),
-                        IM_COL32(80, 220, 100, 200), 3.f, 0, 1.5f);
+            // Hold bar body — for cross-lane holds, sample the transition and
+            // draw short segments so the body visibly moves from start track
+            // to end track using the authored style.
+            const ImU32 fill   = IM_COL32(50, 180, 80, 120);
+            const ImU32 stroke = IM_COL32(80, 220, 100, 220);
+            const float barHalf = halfH * 0.6f;
+            const float duration = note.endTime - note.time;
 
-            // Start cap
+            // ── Multi-waypoint path ──────────────────────────────────────────
+            if (!note.waypoints.empty()) {
+                auto laneToY = [&](int lane) {
+                    return regionTop + (lane + 0.5f) * trackH;
+                };
+                // Walk each waypoint segment a → b. Within each segment:
+                //  - From a.tOffset to (b.tOffset - b.transitionLen): straight at lane a
+                //  - Transition window ending at b.tOffset using b.style
+                for (size_t wi = 1; wi < note.waypoints.size(); ++wi) {
+                    const auto& a = note.waypoints[wi - 1];
+                    const auto& b = note.waypoints[wi];
+                    float yA = laneToY(a.lane);
+                    float yB = laneToY(b.lane);
+                    float xA = noteX + (a.tOffset / std::max(0.001f, duration)) * (endX - noteX);
+                    float xB = noteX + (b.tOffset / std::max(0.001f, duration)) * (endX - noteX);
+                    float tLen = std::clamp(b.transitionLen, 0.f, b.tOffset - a.tOffset);
+                    float xTransBeg = xB - (tLen / std::max(0.001f, duration)) * (endX - noteX);
+
+                    // Straight portion at lane a
+                    if (xTransBeg > xA) {
+                        dl->AddRectFilled(ImVec2(xA, yA - barHalf),
+                                          ImVec2(xTransBeg, yA + barHalf),
+                                          fill, 3.f);
+                        dl->AddRect(ImVec2(xA, yA - barHalf),
+                                    ImVec2(xTransBeg, yA + barHalf),
+                                    stroke, 3.f, 0, 1.5f);
+                    }
+                    // Transition window
+                    if (tLen > 0.f && a.lane != b.lane) {
+                        const int N = 16;
+                        std::vector<ImVec2> topPts, botPts;
+                        topPts.reserve(N + 1); botPts.reserve(N + 1);
+                        for (int i = 0; i <= N; ++i) {
+                            float u = (float)i / (float)N;
+                            float px = xTransBeg + (xB - xTransBeg) * u;
+                            float py;
+                            switch (b.style) {
+                                case EditorHoldTransition::Angle90:
+                                    py = (i == N) ? yB : yA;
+                                    break;
+                                case EditorHoldTransition::Curve: {
+                                    float s = u * u * (3.f - 2.f * u);
+                                    py = yA + (yB - yA) * s;
+                                    break;
+                                }
+                                case EditorHoldTransition::Rhomboid:
+                                    py = yA + (yB - yA) * u;
+                                    break;
+                                default:
+                                    py = yA + (yB - yA) * u;
+                                    break;
+                            }
+                            float extra = 0.f;
+                            if (b.style == EditorHoldTransition::Rhomboid) {
+                                float tri = 1.f - std::abs(2.f * u - 1.f);
+                                extra = tri * std::abs(yB - yA) * 0.5f;
+                            }
+                            topPts.push_back(ImVec2(px, py - barHalf - extra));
+                            botPts.push_back(ImVec2(px, py + barHalf + extra));
+                        }
+                        for (int i = 0; i < N; ++i) {
+                            dl->AddQuadFilled(topPts[i], topPts[i + 1],
+                                              botPts[i + 1], botPts[i], fill);
+                        }
+                        dl->AddPolyline(topPts.data(), N + 1, stroke, 0, 1.5f);
+                        dl->AddPolyline(botPts.data(), N + 1, stroke, 0, 1.5f);
+                    } else if (a.lane != b.lane) {
+                        // Instant snap (no transitionLen): vertical connector
+                        dl->AddLine(ImVec2(xB, yA), ImVec2(xB, yB), stroke, 1.5f);
+                    }
+                }
+            } else if (endTrk == note.track) {
+                // Straight: single rect.
+                dl->AddRectFilled(ImVec2(noteX, centerY - barHalf),
+                                  ImVec2(endX,  centerY + barHalf),
+                                  fill, 3.f);
+                dl->AddRect(ImVec2(noteX, centerY - barHalf),
+                            ImVec2(endX,  centerY + barHalf),
+                            stroke, 3.f, 0, 1.5f);
+            } else {
+                // Cross-lane: sample the transition and fill a polygon strip.
+                const int N = 24;
+                const float duration = note.endTime - note.time;
+                const float tLen   = std::clamp(note.transitionLen, 0.f, duration);
+                const float tBegin = (note.transitionStart < 0.f)
+                                         ? std::max(0.f, duration - tLen)
+                                         : std::clamp(note.transitionStart, 0.f, std::max(0.f, duration - tLen));
+                const float tEnd   = tBegin + tLen;
+                const float startY = centerY;
+                const float endY   = endCenterY;
+                const float dY     = endY - startY;
+
+                auto yAt = [&](float tOff) -> float {
+                    if (note.transition == EditorHoldTransition::Straight
+                        || tLen <= 0.f || duration <= 0.f)
+                        return startY;
+                    if (tOff <= tBegin) return startY;
+                    if (tOff >= tEnd)   return endY;
+                    float u = (tOff - tBegin) / tLen;
+                    switch (note.transition) {
+                        case EditorHoldTransition::Angle90:
+                            return endY;
+                        case EditorHoldTransition::Curve: {
+                            float s = u * u * (3.f - 2.f * u);
+                            return startY + dY * s;
+                        }
+                        case EditorHoldTransition::Rhomboid:
+                            return startY + dY * u;
+                        default:
+                            return startY;
+                    }
+                };
+                // Rhomboid gets an inflated body around the transition midpoint.
+                auto extraHalfAt = [&](float tOff) -> float {
+                    if (note.transition != EditorHoldTransition::Rhomboid
+                        || tLen <= 0.f)
+                        return 0.f;
+                    if (tOff <= tBegin || tOff >= tEnd) return 0.f;
+                    float u = (tOff - tBegin) / tLen;
+                    float tri = 1.f - std::abs(2.f * u - 1.f);
+                    return tri * std::abs(dY) * 0.5f;
+                };
+
+                // Build top/bottom polylines, then draw connected quads.
+                std::vector<ImVec2> topPts, botPts;
+                topPts.reserve(N + 1); botPts.reserve(N + 1);
+                for (int i = 0; i <= N; ++i) {
+                    float tOff = (float)i / (float)N * duration;
+                    float px = noteX + (tOff / std::max(0.001f, duration)) * (endX - noteX);
+                    float cy = yAt(tOff);
+                    float hh = barHalf + extraHalfAt(tOff);
+                    topPts.push_back(ImVec2(px, cy - hh));
+                    botPts.push_back(ImVec2(px, cy + hh));
+                }
+                for (int i = 0; i < N; ++i) {
+                    dl->AddQuadFilled(topPts[i], topPts[i+1],
+                                      botPts[i+1], botPts[i], fill);
+                }
+                // Stroke the top and bottom silhouettes
+                dl->AddPolyline(topPts.data(), N + 1, stroke, 0, 1.5f);
+                dl->AddPolyline(botPts.data(), N + 1, stroke, 0, 1.5f);
+            }
+
+            // Start cap on the starting track
             dl->AddRectFilled(ImVec2(noteX - 3, centerY - halfH),
                               ImVec2(noteX + 3, centerY + halfH),
                               IM_COL32(80, 220, 100, 255), 2.f);
-            // End cap
-            dl->AddRectFilled(ImVec2(endX - 3, centerY - halfH),
-                              ImVec2(endX + 3, centerY + halfH),
+            // End cap on the ending track (may be a different lane)
+            dl->AddRectFilled(ImVec2(endX - 3, endCenterY - halfH),
+                              ImVec2(endX + 3, endCenterY + halfH),
                               IM_COL32(80, 220, 100, 255), 2.f);
+
+            // Sample-point markers: small yellow dots on the body.
+            for (float sp : note.samplePoints) {
+                if (sp <= 0.f || sp >= duration) continue;
+                float tx = noteX + (sp / std::max(0.001f, duration)) * (endX - noteX);
+                float ty;
+                if (!note.waypoints.empty()) {
+                    // Build a temporary HoldData proxy and reuse evalHoldLaneAt
+                    HoldData proxy{};
+                    proxy.laneX    = (float)note.track;
+                    proxy.duration = duration;
+                    proxy.waypoints.reserve(note.waypoints.size());
+                    for (const auto& w : note.waypoints) {
+                        HoldWaypoint hw{};
+                        hw.tOffset       = w.tOffset;
+                        hw.lane          = w.lane;
+                        hw.transitionLen = w.transitionLen;
+                        hw.style         = (HoldTransition)(int)w.style;
+                        proxy.waypoints.push_back(hw);
+                    }
+                    float lane = evalHoldLaneAt(proxy, sp);
+                    ty = regionTop + (lane + 0.5f) * trackH;
+                } else if (endTrk == note.track) {
+                    ty = centerY;
+                } else {
+                    // Reuse the same interpolation as the legacy body
+                    const float tLen   = std::clamp(note.transitionLen, 0.f, duration);
+                    const float tBegin = (note.transitionStart < 0.f)
+                                            ? std::max(0.f, duration - tLen)
+                                            : std::clamp(note.transitionStart, 0.f, std::max(0.f, duration - tLen));
+                    const float tEnd   = tBegin + tLen;
+                    const float dY     = endCenterY - centerY;
+                    if (note.transition == EditorHoldTransition::Straight || tLen <= 0.f)
+                        ty = centerY;
+                    else if (sp <= tBegin) ty = centerY;
+                    else if (sp >= tEnd)   ty = endCenterY;
+                    else {
+                        float u = (sp - tBegin) / tLen;
+                        if (note.transition == EditorHoldTransition::Angle90)
+                            ty = endCenterY;
+                        else if (note.transition == EditorHoldTransition::Curve) {
+                            float s = u * u * (3.f - 2.f * u);
+                            ty = centerY + dY * s;
+                        } else {
+                            ty = centerY + dY * u;
+                        }
+                    }
+                }
+                dl->AddCircleFilled(ImVec2(tx, ty), 4.f, IM_COL32(255, 230, 80, 220));
+                dl->AddCircle     (ImVec2(tx, ty), 5.f, IM_COL32(255, 255, 255, 200), 0, 1.5f);
+            }
 
         } else if (note.type == EditorNoteType::Tap) {
             // Click: diamond shape
@@ -2593,6 +4158,20 @@ void SongEditor::renderNotes(ImDrawList* dl, ImVec2 origin, ImVec2 size,
                                   IM_COL32(200, 80, 220, 200));
             dl->AddTriangle(pts[0], pts[1], pts[2],
                             IM_COL32(230, 120, 255, 255), 1.5f);
+        }
+
+        // Selection outline around the whole note row segment plus a width tag.
+        if ((int)ni == m_selectedNoteIdx) {
+            float endX = (note.type == EditorNoteType::Hold)
+                ? origin.x + (note.endTime - startTime) * pxPerSec
+                : noteX;
+            dl->AddRect(ImVec2(noteX - halfH - 2, centerY - halfH - 2),
+                        ImVec2(endX  + halfH + 2, centerY + halfH + 2),
+                        IM_COL32(255, 220, 80, 255), 3.f, 0, 2.f);
+            char tag[8];
+            snprintf(tag, sizeof(tag), "x%d", note.laneSpan);
+            dl->AddText(ImVec2(noteX - halfH, centerY - halfH - 14),
+                        IM_COL32(255, 220, 80, 255), tag);
         }
     }
 }

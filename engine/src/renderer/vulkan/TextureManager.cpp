@@ -1,8 +1,10 @@
 #define STB_IMAGE_IMPLEMENTATION
+#define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "TextureManager.h"
 #include "VulkanContext.h"
 #include "BufferManager.h"
 #include <stb_image.h>
+#include <stb_image_write.h>
 #include <stdexcept>
 #include <cstring>
 
@@ -27,6 +29,11 @@ Texture TextureManager::loadFromFile(VulkanContext& ctx, BufferManager& bufMgr,
 Texture TextureManager::createWhite1x1(VulkanContext& ctx, BufferManager& bufMgr) {
     uint8_t pixels[4] = {255, 255, 255, 255};
     return createTexture(ctx, bufMgr, pixels, 1, 1);
+}
+
+Texture TextureManager::createFromPixels(VulkanContext& ctx, BufferManager& bufMgr,
+                                         const uint8_t* rgba, uint32_t w, uint32_t h) {
+    return createTexture(ctx, bufMgr, rgba, w, h);
 }
 
 Texture TextureManager::createTexture(VulkanContext& ctx, BufferManager& bufMgr,

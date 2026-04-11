@@ -6,13 +6,16 @@
 #include "game/modes/LanotaRenderer.h"
 #include "game/chart/ChartLoader.h"
 #include "input/TouchTypes.h"
+#include "input/ScreenMetrics.h"
 #include <stdexcept>
 #include <iostream>
 #include <algorithm>
 #include <vector>
 #include <string>
 #include <glm/glm.hpp>
+#include <filesystem>
 #ifdef _WIN32
+#include <windows.h>
 #include <ole2.h>
 #pragma comment(lib, "ole32.lib")
 #endif
@@ -68,11 +71,45 @@ void Engine::init(uint32_t width, uint32_t height, const std::string& title,
 
     m_input.init();
 
-    // Keyboard callback (backward compat — desktop lane input)
+    // Keyboard callback (backward compat — desktop lane input).
+    // Hold notes now carry Bandori-style sample points (authored by dropping
+    // a Tap inside the hold's zone). For keyboard play we must actually start
+    // an ActiveHold on press so consumeSampleTicks can gate ticks against the
+    // currently-pressed lane — otherwise the sample points never fire on
+    // desktop.
     m_input.setKeyCallback([this](int lane, bool pressed) {
-        if (pressed && m_activeMode && m_sceneViewer.isPlaying()) {
-            auto hit = m_hitDetector.checkHit(lane, m_clock.songTime());
+        if (!m_activeMode || !m_sceneViewer.isPlaying()) return;
+        double songT = m_clock.songTime();
+
+        if (pressed) {
+            // Every other active keyboard hold tracks whichever lane the
+            // player just pressed — lets cross-lane sample ticks follow the
+            // finger as it jumps between lane keys.
+            for (auto& [_, id] : m_keyboardHolds)
+                m_hitDetector.updateHoldLane(id, lane);
+
+            // Try to start a hold for a hold-head in this lane. If one begins,
+            // still dispatch a tap-judgment for the head; the sample ticks
+            // (and the tail release) are handled by the sample-tick loop.
+            auto holdId = m_hitDetector.beginHold(lane, songT);
+            if (holdId) {
+                m_keyboardHolds[lane] = *holdId;
+                HitResult headHit{*holdId, 0.f, NoteType::Hold};
+                // Use a dummy zero delta — head judgment isn't critical for
+                // keyboard play, the real feedback is sample-tick combo.
+                dispatchHitResult(headHit, lane);
+                return;
+            }
+            auto hit = m_hitDetector.checkHit(lane, songT);
             if (hit) dispatchHitResult(*hit, lane);
+        } else {
+            // Key release: end the keyboard-started hold (if any) for this lane.
+            auto it = m_keyboardHolds.find(lane);
+            if (it != m_keyboardHolds.end()) {
+                auto hit = m_hitDetector.endHold(it->second, songT);
+                if (hit) dispatchHitResult(*hit, lane);
+                m_keyboardHolds.erase(it);
+            }
         }
     });
 
@@ -85,6 +122,10 @@ void Engine::init(uint32_t width, uint32_t height, const std::string& title,
             handleGestureArcaea(evt, t);
         else if (dynamic_cast<PhigrosRenderer*>(m_activeMode.get()))
             handleGesturePhigros(evt, t);
+        else if (auto* lan = dynamic_cast<LanotaRenderer*>(m_activeMode.get()))
+            handleGestureCircle(*lan, evt, t);
+        else if (auto* cyt = dynamic_cast<CytusRenderer*>(m_activeMode.get()))
+            handleGestureScanLine(*cyt, evt, t);
         else
             handleGestureLaneBased(evt, t);
     });
@@ -195,14 +236,40 @@ void Engine::update(float dt) {
     }
 
     if (m_activeMode && m_sceneViewer.isPlaying()) {
-        auto missed = m_hitDetector.update(m_clock.songTime());
+        double songT = m_clock.songTime();
+        auto missed = m_hitDetector.update(songT);
         for (auto& m : missed) {
             m_judgment.recordJudgment(Judgment::Miss);
             m_score.onJudgment(Judgment::Miss);
             if (m_activeMode && m.lane >= 0)
                 m_activeMode->showJudgment(m.lane, Judgment::Miss);
         }
-        m_activeMode->onUpdate(dt, m_clock.songTime());
+
+        // Hold sample-point ticks — Bandori-style. Each tick checks whether
+        // the player's touch is on the lane the cross-lane hold expects at
+        // that moment. A match awards Perfect; a mismatch awards Miss and
+        // counts toward breaking the hold.
+        auto ticks = m_hitDetector.consumeSampleTicks(songT);
+        for (auto& t : ticks) {
+            Judgment j = t.hit ? Judgment::Perfect : Judgment::Miss;
+            m_judgment.recordJudgment(j);
+            m_score.onJudgment(j);
+            if (m_activeMode && t.lane >= 0)
+                m_activeMode->showJudgment(t.lane, j);
+            if (t.hit) m_audio.playClickSfx();
+        }
+        // Holds whose touch wandered off the curve for ≥2 consecutive ticks
+        // are marked broken inside the detector. Remove their touch mapping
+        // here so the held finger no longer references a dead hold.
+        auto broken = m_hitDetector.consumeBrokenHolds();
+        for (uint32_t id : broken) {
+            for (auto it = m_activeTouches.begin(); it != m_activeTouches.end(); ) {
+                if (it->second == id) it = m_activeTouches.erase(it);
+                else                  ++it;
+            }
+        }
+
+        m_activeMode->onUpdate(dt, songT);
     }
 
     // Update preview mode at editor scene time
@@ -364,11 +431,13 @@ std::unique_ptr<GameModeRenderer> Engine::createRenderer(const GameModeConfig& c
                 return std::make_unique<ArcaeaRenderer>();
             return std::make_unique<BandoriRenderer>();
         case GameModeType::Circle:
-            if (config.dimension == DropDimension::ThreeD)
-                return std::make_unique<LanotaRenderer>();
-            return std::make_unique<CytusRenderer>();
+            // Circle = rotating disk with ring notes (Lanota-style).
+            // Dimension toggle isn't exposed for this mode in the editor, so
+            // there's only one renderer here regardless of config.dimension.
+            return std::make_unique<LanotaRenderer>();
         case GameModeType::ScanLine:
-            return std::make_unique<PhigrosRenderer>();
+            // ScanLine = horizontal sweep line crossing notes (Cytus-style).
+            return std::make_unique<CytusRenderer>();
     }
     return std::make_unique<BandoriRenderer>();
 }
@@ -489,6 +558,43 @@ void Engine::exitTestMode() {
     } else {
         m_currentLayer = m_testReturnLayer;
     }
+}
+
+bool Engine::spawnTestGameProcess(const std::string& projectPath) {
+    // Persist the latest music_selection edits so the child process sees
+    // the current trackCount / game mode / notes.
+    m_musicSelectionEditor.save();
+
+#ifdef _WIN32
+    wchar_t exePath[MAX_PATH];
+    GetModuleFileNameW(nullptr, exePath, MAX_PATH);
+
+    std::filesystem::path absProject = std::filesystem::absolute(projectPath);
+    std::string projectArg = absProject.string();
+
+    std::wstring cmdLine = std::wstring(L"\"") + exePath + L"\" --test \"";
+    int len = MultiByteToWideChar(CP_UTF8, 0, projectArg.c_str(), -1, nullptr, 0);
+    std::wstring wProject(len - 1, L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, projectArg.c_str(), -1, wProject.data(), len);
+    cmdLine += wProject + L"\"";
+
+    STARTUPINFOW si = {};
+    si.cb = sizeof(si);
+    PROCESS_INFORMATION pi = {};
+    if (CreateProcessW(nullptr, cmdLine.data(), nullptr, nullptr, FALSE,
+                       0, nullptr, nullptr, &si, &pi)) {
+        CloseHandle(pi.hThread);
+        CloseHandle(pi.hProcess);
+        std::cout << "[Engine] Spawned test game child process\n";
+        return true;
+    }
+    std::cout << "[Engine] Failed to spawn test game process (err=" << GetLastError() << ")\n";
+    return false;
+#else
+    std::string cmd = std::string("\"/proc/self/exe\" --test \"")
+                    + std::filesystem::absolute(projectPath).string() + "\" &";
+    return system(cmd.c_str()) == 0;
+#endif
 }
 
 void Engine::testTransitionTo(EditorLayer target) {
@@ -758,7 +864,21 @@ void Engine::handleGestureLaneBased(const GestureEvent& evt, double songTime) {
             if (noteId) m_activeTouches[evt.touchId] = *noteId;
             break;
         }
-        case GestureType::HoldEnd: {
+        // A held finger that starts moving turns into a Slide. For cross-lane
+        // holds we feed every position update back into the detector so the
+        // sample-tick gate (Bandori-style) sees the player's current lane.
+        case GestureType::SlideBegin:
+        case GestureType::SlideMove: {
+            auto it = m_activeTouches.find(evt.touchId);
+            if (it != m_activeTouches.end())
+                m_hitDetector.updateHoldLane(it->second, lane);
+            break;
+        }
+        case GestureType::HoldEnd:
+        case GestureType::SlideEnd: {
+            // SlideEnd is the natural end-of-touch for any hold that began
+            // straight and then started moving — without this branch the
+            // m_activeTouches entry would leak and the hold never resolves.
             auto it = m_activeTouches.find(evt.touchId);
             if (it != m_activeTouches.end()) {
                 auto hit = m_hitDetector.endHold(it->second, songTime);
@@ -827,6 +947,146 @@ void Engine::handleGesturePhigros(const GestureEvent& evt, double songTime) {
     }
 }
 
+// ── Circle (Lanota) gesture dispatch ─────────────────────────────────────────
+// Touch input for the rotating-disk mode.  Unlike the lane-based handler, this
+// asks the LanotaRenderer to *pick* the specific note whose current screen
+// position is closest to the tap, then asks HitDetector to consume that note
+// by id.  We bypass dispatchHitResult so that visual feedback can be emitted
+// at the picked note's exact disk position rather than via lane-based search.
+//
+// CIRCLE_PICK_DP is in density-independent pixels (160-DPI reference); on a
+// 480-DPI phone it expands to 144 px so a fingertip-sized region around the
+// tap is searched for notes.  See engine/src/input/ScreenMetrics.h.
+void Engine::handleGestureCircle(LanotaRenderer& lan,
+                                 const GestureEvent& evt, double songTime) {
+    constexpr float CIRCLE_PICK_DP = 48.f;  // ≈ 7.6 mm fingertip radius
+    const float pickPx = ScreenMetrics::dp(CIRCLE_PICK_DP);
+
+    auto judgeAndFeedback = [this, &lan](const HitResult& hit, Judgment j) {
+        m_judgment.recordJudgment(j);
+        m_score.onJudgment(j);
+        lan.markNoteHit(hit.noteId);
+        lan.emitHitFeedback(hit.noteId, j);
+    };
+
+    switch (evt.type) {
+        case GestureType::Tap: {
+            auto pick = lan.pickNoteAt(evt.pos, songTime, pickPx);
+            if (!pick) break;
+            auto hit = m_hitDetector.consumeNoteById(pick->noteId, songTime);
+            if (!hit) break;
+            judgeAndFeedback(*hit, m_judgment.judge(hit->timingDelta));
+            break;
+        }
+        case GestureType::Flick: {
+            auto pick = lan.pickNoteAt(evt.pos, songTime, pickPx);
+            if (!pick) break;
+            auto hit = m_hitDetector.consumeNoteById(pick->noteId, songTime);
+            if (!hit) break;
+            if (hit->noteType == NoteType::Flick) {
+                float speed  = glm::length(evt.velocity);
+                float dirAcc = speed > 0.f ? std::abs(evt.velocity.x) / speed : 0.f;
+                judgeAndFeedback(*hit, m_judgment.judgeFlick(hit->timingDelta, dirAcc));
+            } else {
+                // Flick gesture on a non-flick note — fall back to plain tap.
+                judgeAndFeedback(*hit, m_judgment.judge(hit->timingDelta));
+            }
+            break;
+        }
+        case GestureType::HoldBegin: {
+            auto pick = lan.pickNoteAt(evt.pos, songTime, pickPx);
+            if (!pick) break;
+            auto noteId = m_hitDetector.beginHoldById(pick->noteId, songTime);
+            if (noteId) m_activeTouches[evt.touchId] = *noteId;
+            break;
+        }
+        case GestureType::HoldEnd: {
+            auto it = m_activeTouches.find(evt.touchId);
+            if (it == m_activeTouches.end()) break;
+            auto hit = m_hitDetector.endHold(it->second, songTime);
+            if (hit) judgeAndFeedback(*hit, m_judgment.judge(hit->timingDelta));
+            m_activeTouches.erase(it);
+            break;
+        }
+        default: break;
+    }
+}
+
+// ── Scan Line (Cytus) gesture dispatch ───────────────────────────────────────
+// Free-position 2D mode. CytusRenderer::pickNoteAt maps the tap to the
+// nearest chart note within a fingertip-sized pixel tolerance *and* a
+// timing window; HitDetector then validates/consumes that note by id and
+// JudgmentSystem classifies the timing error. Visual feedback is emitted
+// on the picked note's stored screen position via markNoteHit.
+//
+// Slide sample-point ticks are not yet wired — the HitDetector hold/tick
+// state machine is lane-based, and scan-line slides travel a free path
+// rather than a lane index. This is a documented follow-up.
+
+void Engine::handleGestureScanLine(CytusRenderer& cyt,
+                                   const GestureEvent& evt, double songTime) {
+    constexpr float SCAN_PICK_DP = 48.f; // ~fingertip radius (DPI-normalized)
+    const float pickPx = ScreenMetrics::dp(SCAN_PICK_DP);
+
+    auto judgeAndFeedback = [this, &cyt](const HitResult& hit, Judgment j) {
+        m_judgment.recordJudgment(j);
+        m_score.onJudgment(j);
+        cyt.markNoteHit(hit.noteId);
+    };
+
+    switch (evt.type) {
+        case GestureType::Tap: {
+            auto pick = cyt.pickNoteAt(evt.pos, songTime, pickPx);
+            if (!pick) break;
+            auto hit = m_hitDetector.consumeNoteById(pick->noteId, songTime);
+            if (!hit) break;
+            judgeAndFeedback(*hit, m_judgment.judge(hit->timingDelta));
+            break;
+        }
+        case GestureType::Flick: {
+            auto pick = cyt.pickNoteAt(evt.pos, songTime, pickPx);
+            if (!pick) break;
+            auto hit = m_hitDetector.consumeNoteById(pick->noteId, songTime);
+            if (!hit) break;
+            if (hit->noteType == NoteType::Flick) {
+                float speed  = glm::length(evt.velocity);
+                float dirAcc = speed > 0.f ? std::abs(evt.velocity.x) / speed : 0.f;
+                judgeAndFeedback(*hit, m_judgment.judgeFlick(hit->timingDelta, dirAcc));
+            } else {
+                judgeAndFeedback(*hit, m_judgment.judge(hit->timingDelta));
+            }
+            break;
+        }
+        case GestureType::HoldBegin: {
+            auto pick = cyt.pickNoteAt(evt.pos, songTime, pickPx);
+            if (!pick) break;
+            // Both Hold and Slide begin as a held touch — beginHoldById
+            // handles either NoteType as long as HitDetector has it as a
+            // duration-bearing note.
+            auto noteId = m_hitDetector.beginHoldById(pick->noteId, songTime);
+            if (noteId) m_activeTouches[evt.touchId] = *noteId;
+            break;
+        }
+        case GestureType::SlideBegin:
+        case GestureType::SlideMove:
+            // Scan-line slides trace a free path; HitDetector's lane-based
+            // sample-tick machinery doesn't apply. Head was consumed on the
+            // initial HoldBegin (tap); final judgment happens on release.
+            // Mid-flight slide scoring is a documented follow-up.
+            break;
+        case GestureType::SlideEnd:
+        case GestureType::HoldEnd: {
+            auto it = m_activeTouches.find(evt.touchId);
+            if (it == m_activeTouches.end()) break;
+            auto hit = m_hitDetector.endHold(it->second, songTime);
+            if (hit) judgeAndFeedback(*hit, m_judgment.judge(hit->timingDelta));
+            m_activeTouches.erase(it);
+            break;
+        }
+        default: break;
+    }
+}
+
 // ── Static GLFW callbacks ─────────────────────────────────────────────────────
 
 void Engine::framebufferResizeCallback(GLFWwindow* window, int, int) {
@@ -871,16 +1131,32 @@ void Engine::cursorPosCallback(GLFWwindow* window, double x, double y) {
 }
 
 void Engine::dropCallback(GLFWwindow* window, int count, const char** paths) {
-    auto* engine = reinterpret_cast<Engine*>(glfwGetWindowUserPointer(window));
-    std::cout << "[drop] layer=" << (int)engine->m_currentLayer
-              << " project='" << engine->m_startScreenEditor.projectPath() << "'\n";
-    if (engine->m_currentLayer != EditorLayer::StartScreen) return;
-    if (engine->m_startScreenEditor.projectPath().empty()) return;
+    try {
+        auto* engine = reinterpret_cast<Engine*>(glfwGetWindowUserPointer(window));
+        std::vector<std::string> srcPaths;
+        srcPaths.reserve(count);
+        for (int i = 0; i < count; ++i)
+            srcPaths.emplace_back(paths[i]);
 
-    std::vector<std::string> srcPaths;
-    srcPaths.reserve(count);
-    for (int i = 0; i < count; ++i)
-        srcPaths.emplace_back(paths[i]);
-
-    engine->m_startScreenEditor.importFiles(srcPaths);
+        switch (engine->m_currentLayer) {
+        case EditorLayer::StartScreen:
+            if (!engine->m_startScreenEditor.projectPath().empty())
+                engine->m_startScreenEditor.importFiles(srcPaths);
+            break;
+        case EditorLayer::MusicSelection:
+            if (!engine->m_musicSelectionEditor.projectPath().empty())
+                engine->m_musicSelectionEditor.importFiles(srcPaths);
+            break;
+        case EditorLayer::SongEditor:
+            if (!engine->m_songEditor.projectPath().empty())
+                engine->m_songEditor.importFiles(srcPaths);
+            break;
+        default:
+            break;
+        }
+    } catch (const std::exception& e) {
+        std::cerr << "[drop] Error: " << e.what() << "\n";
+    } catch (...) {
+        std::cerr << "[drop] Unknown error\n";
+    }
 }

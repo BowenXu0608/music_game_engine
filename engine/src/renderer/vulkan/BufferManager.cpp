@@ -9,7 +9,17 @@ void BufferManager::init(VulkanContext& ctx) {
     ai.physicalDevice = ctx.physicalDevice();
     ai.device         = ctx.device();
     ai.instance       = ctx.instance();
+    // VMA_VULKAN_VERSION is set per-target in CMake. On Android we restrict
+    // it to 1000000 (Vulkan 1.0); on desktop it stays at the VMA default
+    // (1003000 = Vulkan 1.3). The vulkanApiVersion field passed to VMA must
+    // not exceed VMA_VULKAN_VERSION or the allocator constructor asserts.
+    // Note: VK_API_VERSION_1_2 expands to a (uint32_t) cast, which is not a
+    // valid expression in #if, so we compare against the raw value 4198400.
+#if defined(VMA_VULKAN_VERSION) && VMA_VULKAN_VERSION < 4198400
+    ai.vulkanApiVersion = VK_API_VERSION_1_0;
+#else
     ai.vulkanApiVersion = VK_API_VERSION_1_2;
+#endif
 
     if (vmaCreateAllocator(&ai, &m_allocator) != VK_SUCCESS)
         throw std::runtime_error("Failed to create VMA allocator");

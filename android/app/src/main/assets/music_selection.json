@@ -1,0 +1,182 @@
+{
+  "sets": [
+    {
+      "coverImage": "",
+      "name": "A",
+      "songs": [
+        {
+          "achievement": "",
+          "artist": "me",
+          "audioFile": "assets/audio/M800001Ms8Wg3B9QbY.mp3",
+          "chartEasy": "assets/charts/Aa_easy.json",
+          "chartHard": "assets/charts/Aa_hard.json",
+          "chartMedium": "assets/charts/Aa_medium.json",
+          "coverImage": "",
+          "gameMode": {
+            "apImage": "",
+            "audioOffset": 0.0,
+            "backgroundImage": "",
+            "badMs": 150.0,
+            "badScore": 200,
+            "cameraEye": [
+              0.0,
+              12.0,
+              14.0
+            ],
+            "cameraFov": 55.0,
+            "cameraTarget": [
+              0.0,
+              0.0,
+              -20.0
+            ],
+            "comboHud": {
+              "bold": false,
+              "color": [
+                1.0,
+                0.8999999761581421,
+                0.30000001192092896,
+                1.0
+              ],
+              "fontSize": 32.0,
+              "glow": false,
+              "glowColor": [
+                1.0,
+                0.800000011920929,
+                0.20000000298023224,
+                0.6000000238418579
+              ],
+              "glowRadius": 8.0,
+              "pos": [
+                0.5,
+                0.05000000074505806
+              ],
+              "scale": 1.0
+            },
+            "dimension": "2D",
+            "fcImage": "",
+            "goodMs": 100.0,
+            "goodScore": 600,
+            "perfectMs": 50.0,
+            "perfectScore": 1000,
+            "scoreHud": {
+              "bold": true,
+              "color": [
+                1.0,
+                1.0,
+                1.0,
+                1.0
+              ],
+              "fontSize": 24.0,
+              "glow": false,
+              "glowColor": [
+                0.0,
+                0.0,
+                0.0,
+                0.0
+              ],
+              "glowRadius": 6.0,
+              "pos": [
+                0.9399999976158142,
+                0.05999999865889549
+              ],
+              "scale": 1.0
+            },
+            "trackCount": 7,
+            "type": "dropNotes"
+          },
+          "name": "Aa",
+          "score": 158300
+        }
+      ]
+    },
+    {
+      "coverImage": "",
+      "name": "B",
+      "songs": [
+        {
+          "achievement": "",
+          "artist": "me",
+          "audioFile": "assets/audio/M800001Ms8Wg3B9QbY.mp3",
+          "chartEasy": "assets/charts/Ba_easy.json",
+          "chartHard": "assets/charts/Ba_hard.json",
+          "chartMedium": "assets/charts/Ba_medium.json",
+          "coverImage": "",
+          "gameMode": {
+            "apImage": "",
+            "audioOffset": 0.0,
+            "backgroundImage": "",
+            "badMs": 150.0,
+            "badScore": 200,
+            "cameraEye": [
+              0.0,
+              12.0,
+              14.0
+            ],
+            "cameraFov": 55.0,
+            "cameraTarget": [
+              0.0,
+              0.0,
+              -20.0
+            ],
+            "comboHud": {
+              "bold": false,
+              "color": [
+                1.0,
+                0.8999999761581421,
+                0.30000001192092896,
+                1.0
+              ],
+              "fontSize": 32.0,
+              "glow": false,
+              "glowColor": [
+                1.0,
+                0.800000011920929,
+                0.20000000298023224,
+                0.6000000238418579
+              ],
+              "glowRadius": 8.0,
+              "pos": [
+                0.5,
+                0.18000000715255737
+              ],
+              "scale": 1.0
+            },
+            "dimension": "2D",
+            "fcImage": "",
+            "goodMs": 100.0,
+            "goodScore": 600,
+            "perfectMs": 50.0,
+            "perfectScore": 1000,
+            "scoreHud": {
+              "bold": true,
+              "color": [
+                1.0,
+                1.0,
+                1.0,
+                1.0
+              ],
+              "fontSize": 24.0,
+              "glow": false,
+              "glowColor": [
+                0.0,
+                0.0,
+                0.0,
+                0.0
+              ],
+              "glowRadius": 6.0,
+              "pos": [
+                0.8500000238418579,
+                0.05999999865889549
+              ],
+              "scale": 1.0
+            },
+            "trackCount": 9,
+            "type": "dropNotes"
+          },
+          "name": "Ba",
+          "score": 0
+        }
+      ]
+    }
+  ]
+}

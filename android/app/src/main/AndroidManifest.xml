@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- Audio playback (miniaudio AAudio/OpenSL backend) -->
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+
+    <application
+        android:label="@string/app_name"
+        android:theme="@style/AppTheme"
+        android:hasCode="true">
+
+        <!-- Launcher: checks for crash logs, then starts NativeActivity -->
+        <activity
+            android:name=".LauncherActivity"
+            android:screenOrientation="sensorLandscape"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!-- Game engine (NativeActivity subclass that forces landscape in onCreate) -->
+        <activity
+            android:name=".MainActivity"
+            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|navigation"
+            android:screenOrientation="sensorLandscape"
+            android:resizeableActivity="false"
+            android:exported="true">
+
+            <meta-data
+                android:name="android.app.lib_name"
+                android:value="musicgame" />
+        </activity>
+    </application>
+
+    <!-- Require Vulkan support -->
+    <uses-feature
+        android:name="android.hardware.vulkan.level"
+        android:version="0"
+        android:required="true" />
+
+</manifest>

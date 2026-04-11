@@ -6,10 +6,16 @@
 #include <functional>
 #include <mutex>
 
+struct BpmChange {
+    float time = 0.f;   // seconds
+    float bpm  = 120.f;
+};
+
 struct AudioAnalysisResult {
     bool        success = false;
     std::string errorMessage;
-    float       bpm = 0.f;
+    float       bpm = 0.f;                    // dominant BPM
+    std::vector<BpmChange> bpmChanges;        // dynamic tempo map
     std::vector<float> easyMarkers;
     std::vector<float> mediumMarkers;
     std::vector<float> hardMarkers;

@@ -3,8 +3,6 @@
  "artist": "me",
  "offset": 0,
  "notes": [
-    {"time": 0, "type": "tap", "lane": 0},
-    {"time": 0.67, "type": "tap", "lane": 0},
     {"time": 1.35, "type": "tap", "lane": 1},
     {"time": 2.02, "type": "tap", "lane": 2},
     {"time": 2.68, "type": "tap", "lane": 3},

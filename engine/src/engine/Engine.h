@@ -73,6 +73,10 @@ private:
     void handleGestureLaneBased(const GestureEvent& evt, double songTime);
     void handleGestureArcaea(const GestureEvent& evt, double songTime);
     void handleGesturePhigros(const GestureEvent& evt, double songTime);
+    void handleGestureCircle(class LanotaRenderer& lan,
+                             const GestureEvent& evt, double songTime);
+    void handleGestureScanLine(class CytusRenderer& cyt,
+                               const GestureEvent& evt, double songTime);
 
     static std::unique_ptr<GameModeRenderer> createRenderer(const GameModeConfig& config);
     void togglePause();
@@ -104,6 +108,7 @@ private:
     ScoreTracker                       m_score;
     std::unique_ptr<GameModeRenderer>  m_activeMode;
     std::unordered_map<int32_t, uint32_t> m_activeTouches; // touchId → noteId for holds
+    std::unordered_map<int, uint32_t>     m_keyboardHolds; // lane → noteId for keyboard-initiated holds
     EditorLayer                        m_preGameplayLayer = EditorLayer::MusicSelection;
     GameModeConfig                     m_gameplayConfig;  // config for current gameplay session
     bool                               m_gameplayPaused = false;
@@ -141,4 +146,10 @@ public:
     void enterTestMode(EditorLayer returnLayer);
     void exitTestMode();
     void testTransitionTo(EditorLayer target);
+
+    // Spawn `MusicGameEngineTest.exe --test <project>` as a child process so
+    // the test game runs in its own window and the editor process keeps
+    // running. Saves music_selection.json first so the child sees the latest
+    // edits. Returns true on success.
+    bool spawnTestGameProcess(const std::string& projectPath);
 };

@@ -110,7 +110,121 @@ void BandoriRenderer::onRender(Renderer& renderer) {
         renderer.lines().drawLine(l, r, 8.f, {1.f, 0.9f, 0.2f, 0.3f}); // glow
     }
 
-    // Notes
+    // ── Hold bodies (draw before heads so the head marker sits on top) ──────
+    // For each Hold note, tessellate a ribbon along the interpolated lane path
+    // from start lane → end lane, using the HoldTransition style. Also drops
+    // sample-point markers along the ribbon.
+    auto laneToWorldX = [&](float lane) {
+        return (lane - (m_laneCount - 1) * 0.5f) * m_laneSpacing;
+    };
+    for (auto& note : m_notes) {
+        if (note.type != NoteType::Hold) continue;
+        if (m_hitNotes.count(note.id)) continue;
+        auto* hold = std::get_if<HoldData>(&note.data);
+        if (!hold || hold->duration <= 0.f) continue;
+
+        const float dur      = hold->duration;
+        const float baseHalf = m_noteWorldW * 0.5f;
+
+        // Rhomboid half-width — for the multi-waypoint path, bulges during
+        // each rhomboid segment's transition window. Falls back to the legacy
+        // single-transition spread when waypoints are empty.
+        auto halfWAt = [&](float tOff) -> float {
+            if (!hold->waypoints.empty()) {
+                int seg = holdActiveSegment(*hold, tOff);
+                if (seg <= 0) return baseHalf;
+                const auto& a = hold->waypoints[seg - 1];
+                const auto& b = hold->waypoints[seg];
+                if (b.style != HoldTransition::Rhomboid) return baseHalf;
+                float tLen = std::max(0.f, b.transitionLen);
+                if (tLen <= 0.f) return baseHalf;
+                float u = (tOff - (b.tOffset - tLen)) / tLen;
+                float tri = 1.f - std::abs(2.f * u - 1.f);
+                float spread = std::abs((float)b.lane - (float)a.lane) * m_laneSpacing;
+                return baseHalf + tri * spread * 0.5f;
+            }
+            if (hold->transition != HoldTransition::Rhomboid
+                || hold->effectiveEndLane() == hold->laneX)
+                return baseHalf;
+            float tLen = std::clamp(hold->transitionLen, 0.f, dur);
+            if (tLen <= 0.f) return baseHalf;
+            float tBegin = holdTransitionBegin(*hold);
+            float tEnd   = tBegin + tLen;
+            if (tOff <= tBegin || tOff >= tEnd) return baseHalf;
+            float u = (tOff - tBegin) / tLen;
+            float tri = 1.f - std::abs(2.f * u - 1.f);
+            float spread = std::abs(hold->effectiveEndLane() - hold->laneX) * m_laneSpacing;
+            return baseHalf + tri * spread * 0.5f;
+        };
+
+        const glm::vec4 holdBodyColor = {0.2f, 0.8f, 1.f, 0.85f};
+
+        // Tessellate ribbon with ~16 segments; more for Curve style.
+        const int N = (hold->transition == HoldTransition::Curve) ? 20 : 12;
+        bool havePrev = false;
+        glm::vec3 prevL{}, prevR{};
+        for (int i = 0; i <= N; ++i) {
+            float tOff = (float)i / (float)N * dur;
+            // Keep past (consumed) portions visible so the whole hold shape
+            // is readable while the player is still holding. The body is only
+            // clipped when its Z goes far behind the camera or far past the
+            // approach plane — not by "absT has passed songTime".
+            double absT = note.time + tOff;
+
+            float lane = evalHoldLaneAt(*hold, tOff);
+            float wx   = laneToWorldX(lane);
+            float wz   = -static_cast<float>(absT - m_songTime) * SCROLL_SPEED;
+            // Upper clip raised to +12 so a segment just behind the hit zone
+            // stays on screen long enough for the player to see it.
+            if (wz > 12.f || wz < APPROACH_Z - 2.f) { havePrev = false; continue; }
+
+            float hw = halfWAt(tOff);
+            glm::vec3 L{wx - hw, 0.f, wz};
+            glm::vec3 R{wx + hw, 0.f, wz};
+            if (havePrev) {
+                glm::vec2 sPL = w2s(prevL, m_perspVP, sw, sh);
+                glm::vec2 sPR = w2s(prevR, m_perspVP, sw, sh);
+                glm::vec2 sR  = w2s(R,     m_perspVP, sw, sh);
+                glm::vec2 sL  = w2s(L,     m_perspVP, sw, sh);
+                renderer.quads().drawQuadCorners(
+                    sPL, sPR, sR, sL,
+                    holdBodyColor, {0.f, 0.f, 1.f, 1.f},
+                    renderer.whiteView(), renderer.whiteSampler(),
+                    renderer.context(), renderer.descriptors());
+            }
+            prevL = L; prevR = R; havePrev = true;
+        }
+
+        // Sample-point markers (small bright yellow squares on the ribbon).
+        // Kept visible through the whole hold window so the player can see
+        // which checkpoints are still ahead and which have already passed.
+        for (const auto& sp : hold->samplePoints) {
+            float tOff = sp.tOffset;
+            if (tOff < 0.f || tOff > dur) continue;
+            double absT = note.time + tOff;
+
+            float lane = evalHoldLaneAt(*hold, tOff);
+            float wx   = laneToWorldX(lane);
+            float wz   = -static_cast<float>(absT - m_songTime) * SCROLL_SPEED;
+            if (wz > 12.f || wz < APPROACH_Z - 1.f) continue;
+
+            float r = m_noteWorldW * 0.25f;
+            glm::vec3 wNL{wx - r, 0.f, wz + r};
+            glm::vec3 wNR{wx + r, 0.f, wz + r};
+            glm::vec3 wFR{wx + r, 0.f, wz - r};
+            glm::vec3 wFL{wx - r, 0.f, wz - r};
+            renderer.quads().drawQuadCorners(
+                w2s(wNL, m_perspVP, sw, sh),
+                w2s(wNR, m_perspVP, sw, sh),
+                w2s(wFR, m_perspVP, sw, sh),
+                w2s(wFL, m_perspVP, sw, sh),
+                {1.f, 0.95f, 0.3f, 0.95f}, {0.f, 0.f, 1.f, 1.f},
+                renderer.whiteView(), renderer.whiteSampler(),
+                renderer.context(), renderer.descriptors());
+        }
+    }
+
+    // Notes (heads)
     for (auto& note : m_notes) {
         float laneX = 0.f;
         if      (auto* tap   = std::get_if<TapData>  (&note.data)) laneX = tap->laneX;
@@ -120,27 +234,49 @@ void BandoriRenderer::onRender(Renderer& renderer) {
 
         float timeDiff = static_cast<float>(note.time - m_songTime);
         float noteZ    = -timeDiff * SCROLL_SPEED;
-        // Only render notes on the visible highway section
-        if (noteZ > 2.f || noteZ < APPROACH_Z - 2.f) continue;
+        // Only render notes on the visible highway section. Holds keep their
+        // head quad visible longer so the reference stays on screen while
+        // the player is still tracking the body.
+        const float upperClip = (note.type == NoteType::Hold) ? 12.f : 2.f;
+        if (noteZ > upperClip || noteZ < APPROACH_Z - 2.f) continue;
 
         float worldX = (laneX - (m_laneCount - 1) * 0.5f) * m_laneSpacing;
-        glm::vec3 worldPos{worldX, 0.f, noteZ};
-        glm::vec4 clip = m_perspVP * glm::vec4(worldPos, 1.f);
-        if (clip.w <= 0.f) continue;
 
-        glm::vec2 screen = w2s(worldPos, m_perspVP, sw, sh);
-        float sz = pxSize(m_noteWorldW, clip.w, m_proj11y, sh);
-        if (sz < 2.f) continue;
+        // Skip rendering notes that were already hit (they get particle effect instead)
+        if (m_hitNotes.count(note.id)) continue;
+
+        // Project 4 ground-plane corners so the note follows the same perspective
+        // foreshortening as the lanes — far edge is narrower than near edge.
+        float hw = m_noteWorldW * 0.5f;                 // half-width across lane
+        float hd = m_noteWorldW * 0.4f * 0.5f;          // half-depth along scroll axis
+        glm::vec3 wNL{worldX - hw, 0.f, noteZ + hd};    // near-left  (closer to camera)
+        glm::vec3 wNR{worldX + hw, 0.f, noteZ + hd};    // near-right
+        glm::vec3 wFR{worldX + hw, 0.f, noteZ - hd};    // far-right
+        glm::vec3 wFL{worldX - hw, 0.f, noteZ - hd};    // far-left
+
+        glm::vec4 cNL = m_perspVP * glm::vec4(wNL, 1.f);
+        glm::vec4 cNR = m_perspVP * glm::vec4(wNR, 1.f);
+        glm::vec4 cFR = m_perspVP * glm::vec4(wFR, 1.f);
+        glm::vec4 cFL = m_perspVP * glm::vec4(wFL, 1.f);
+        if (cNL.w <= 0.f || cNR.w <= 0.f || cFR.w <= 0.f || cFL.w <= 0.f) continue;
+
+        glm::vec2 sNL = w2s(wNL, m_perspVP, sw, sh);
+        glm::vec2 sNR = w2s(wNR, m_perspVP, sw, sh);
+        glm::vec2 sFR = w2s(wFR, m_perspVP, sw, sh);
+        glm::vec2 sFL = w2s(wFL, m_perspVP, sw, sh);
+
+        // Cull tiny far notes
+        float nearW = std::abs(sNR.x - sNL.x);
+        if (nearW < 2.f) continue;
 
         glm::vec4 color = {1.f, 0.8f, 0.2f, 1.f};
         if (note.type == NoteType::Hold)  color = {0.2f, 0.8f, 1.f, 1.f};
         if (note.type == NoteType::Flick) color = {1.f, 0.3f, 0.3f, 1.f};
 
-        // Skip rendering notes that were already hit (they get particle effect instead)
-        if (m_hitNotes.count(note.id)) continue;
-
-        renderer.quads().drawQuad(
-            screen, {sz, sz * 0.4f}, 0.f,
+        // Order: NL, NR, FR, FL — matches drawQuad's BL,BR,TR,TL winding so the
+        // existing index pattern (0,1,2, 2,3,0) tessellates correctly.
+        renderer.quads().drawQuadCorners(
+            sNL, sNR, sFR, sFL,
             color, {0.f, 0.f, 1.f, 1.f},
             renderer.whiteView(), renderer.whiteSampler(),
             renderer.context(), renderer.descriptors());
@@ -154,15 +290,20 @@ void BandoriRenderer::showJudgment(int lane, Judgment judgment) {
 
     m_judgmentDisplays[lane].spawn(judgment, {0.f, 0.f});
 
-    // Mark the closest note in this lane as hit
+    // Mark the closest note in this lane as hit — EXCEPT Hold notes, which
+    // must stay visible until the player releases the key/finger. The hold
+    // body (and head) get culled naturally once the whole shape scrolls past
+    // the hit zone clip window; marking them here would make them vanish the
+    // instant the head is struck, which also kills every downstream sample
+    // tick's rendered marker.
     float bestDist = 999.f;
     uint32_t bestId = 0;
     bool found = false;
     for (auto& note : m_notes) {
+        if (note.type == NoteType::Hold) continue;
         if (m_hitNotes.count(note.id)) continue;
         int noteLane = -1;
         if (auto* tap = std::get_if<TapData>(&note.data))        noteLane = (int)tap->laneX;
-        else if (auto* hold = std::get_if<HoldData>(&note.data)) noteLane = (int)hold->laneX;
         else if (auto* flick = std::get_if<FlickData>(&note.data)) noteLane = (int)flick->laneX;
         if (noteLane != lane) continue;
         float d = std::abs((float)(note.time - m_songTime));

@@ -255,6 +255,53 @@ AudioAnalysisResult AudioAnalyzer::parseJson(const std::string& jsonStr) {
     result.mediumMarkers = extractArray("medium");
     result.hardMarkers   = extractArray("hard");
 
+    // Parse bpm_changes: [{"time":0.0,"bpm":128.0}, ...]
+    {
+        std::string key = "\"bpm_changes\"";
+        auto pos = jsonStr.find(key);
+        if (pos != std::string::npos) {
+            auto arrStart = jsonStr.find('[', pos);
+            if (arrStart != std::string::npos) {
+                // Find matching closing bracket (handle nested objects)
+                int depth = 0;
+                size_t arrEnd = arrStart;
+                for (size_t i = arrStart; i < jsonStr.size(); i++) {
+                    if (jsonStr[i] == '[') depth++;
+                    else if (jsonStr[i] == ']') { depth--; if (depth == 0) { arrEnd = i; break; } }
+                }
+                std::string arrStr = jsonStr.substr(arrStart + 1, arrEnd - arrStart - 1);
+
+                // Parse each {time, bpm} object
+                size_t objPos = 0;
+                while ((objPos = arrStr.find('{', objPos)) != std::string::npos) {
+                    auto objEnd = arrStr.find('}', objPos);
+                    if (objEnd == std::string::npos) break;
+                    std::string obj = arrStr.substr(objPos, objEnd - objPos + 1);
+
+                    BpmChange bc;
+                    // Extract "time" value
+                    auto tPos = obj.find("\"time\"");
+                    if (tPos != std::string::npos) {
+                        auto colon = obj.find(':', tPos);
+                        if (colon != std::string::npos) {
+                            try { bc.time = std::stof(obj.substr(colon + 1)); } catch (...) {}
+                        }
+                    }
+                    // Extract "bpm" value
+                    auto bPos = obj.find("\"bpm\"");
+                    if (bPos != std::string::npos) {
+                        auto colon = obj.find(':', bPos);
+                        if (colon != std::string::npos) {
+                            try { bc.bpm = std::stof(obj.substr(colon + 1)); } catch (...) {}
+                        }
+                    }
+                    result.bpmChanges.push_back(bc);
+                    objPos = objEnd + 1;
+                }
+            }
+        }
+    }
+
     result.success = !result.easyMarkers.empty() ||
                      !result.mediumMarkers.empty() ||
                      !result.hardMarkers.empty();
@@ -263,6 +310,7 @@ AudioAnalysisResult AudioAnalyzer::parseJson(const std::string& jsonStr) {
         result.errorMessage = "No beats detected in audio";
 
     std::cout << "[AudioAnalyzer] Parsed: bpm=" << result.bpm
+              << " bpm_changes=" << result.bpmChanges.size()
               << " easy=" << result.easyMarkers.size()
               << " medium=" << result.mediumMarkers.size()
               << " hard=" << result.hardMarkers.size() << "\n";

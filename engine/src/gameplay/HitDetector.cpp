@@ -57,6 +57,18 @@ std::optional<HitResult> HitDetector::checkHit(int lane, double songTime) {
     return std::nullopt;
 }
 
+std::optional<HitResult> HitDetector::consumeNoteById(uint32_t noteId, double songTime) {
+    for (auto it = m_activeNotes.begin(); it != m_activeNotes.end(); ++it) {
+        if (it->id != noteId) continue;
+        float timingDelta = static_cast<float>(it->time - songTime);
+        if (std::abs(timingDelta) > 0.15f) return std::nullopt; // outside window
+        HitResult result{it->id, timingDelta, it->type};
+        m_activeNotes.erase(it);
+        return result;
+    }
+    return std::nullopt;
+}
+
 std::optional<HitResult> HitDetector::checkHitPosition(glm::vec2 screenPos,
                                                          glm::vec2 screenSize,
                                                          double songTime) {
@@ -115,14 +127,50 @@ std::optional<uint32_t> HitDetector::beginHold(int lane, double songTime) {
         if (std::abs(timingDelta) > 0.1f) continue;
 
         if (std::holds_alternative<HoldData>(it->data)) {
-            int noteLane = static_cast<int>(std::get<HoldData>(it->data).laneX);
+            const auto& hd = std::get<HoldData>(it->data);
+            int noteLane = static_cast<int>(hd.laneX);
             if (noteLane == lane) {
-                float duration = std::get<HoldData>(it->data).duration;
-                ActiveHold hold{it->id, songTime, it->time, duration, it->type, {}};
+                ActiveHold hold{};
+                hold.noteId        = it->id;
+                hold.startTime     = songTime;
+                hold.noteStartTime = it->time;
+                hold.noteDuration  = hd.duration;
+                hold.noteType      = it->type;
+                hold.lane          = noteLane;
+                hold.currentLane   = noteLane;
+                hold.holdData      = hd;
+                hold.sampleOffsets.reserve(hd.samplePoints.size());
+                for (const auto& sp : hd.samplePoints) hold.sampleOffsets.push_back(sp.tOffset);
+                std::sort(hold.sampleOffsets.begin(), hold.sampleOffsets.end());
                 m_activeHolds[it->id] = std::move(hold);
                 return it->id;
             }
         }
+    }
+    return std::nullopt;
+}
+
+std::optional<uint32_t> HitDetector::beginHoldById(uint32_t noteId, double songTime) {
+    for (auto it = m_activeNotes.begin(); it != m_activeNotes.end(); ++it) {
+        if (it->id != noteId) continue;
+        if (!std::holds_alternative<HoldData>(it->data)) return std::nullopt;
+        float timingDelta = static_cast<float>(it->time - songTime);
+        if (std::abs(timingDelta) > 0.15f) return std::nullopt;
+        const auto& hd = std::get<HoldData>(it->data);
+        ActiveHold hold{};
+        hold.noteId        = it->id;
+        hold.startTime     = songTime;
+        hold.noteStartTime = it->time;
+        hold.noteDuration  = hd.duration;
+        hold.noteType      = it->type;
+        hold.lane          = static_cast<int>(hd.laneX);
+        hold.currentLane   = hold.lane;
+        hold.holdData      = hd;
+        hold.sampleOffsets.reserve(hd.samplePoints.size());
+        for (const auto& sp : hd.samplePoints) hold.sampleOffsets.push_back(sp.tOffset);
+        std::sort(hold.sampleOffsets.begin(), hold.sampleOffsets.end());
+        m_activeHolds[it->id] = std::move(hold);
+        return it->id;
     }
     return std::nullopt;
 }
@@ -141,7 +189,12 @@ std::optional<uint32_t> HitDetector::beginHoldPosition(glm::vec2 screenPos,
             float noteScreenY = (1.0f - (arc.startPos.y * 0.5f + 0.5f)) * screenSize.y;
             glm::vec2 notePos{noteScreenX, noteScreenY};
             if (glm::length(screenPos - notePos) < HIT_RADIUS_PX) {
-                ActiveHold hold{it->id, songTime, it->time, arc.duration, it->type, {}};
+                ActiveHold hold{};
+                hold.noteId        = it->id;
+                hold.startTime     = songTime;
+                hold.noteStartTime = it->time;
+                hold.noteDuration  = arc.duration;
+                hold.noteType      = it->type;
                 m_activeHolds[it->id] = std::move(hold);
                 return it->id;
             }
@@ -168,6 +221,66 @@ std::optional<HitResult> HitDetector::endHold(uint32_t noteId, double releaseTim
 
     m_activeHolds.erase(holdIt);
     return result;
+}
+
+std::vector<HoldSampleTick> HitDetector::consumeSampleTicks(double songTime) {
+    constexpr int BREAK_AFTER = 2; // consecutive miss ticks → hold breaks
+
+    std::vector<HoldSampleTick> ticks;
+    for (auto& [id, hold] : m_activeHolds) {
+        if (hold.broken) continue;
+        while (hold.nextSampleIdx < hold.sampleOffsets.size()) {
+            float tOff = hold.sampleOffsets[hold.nextSampleIdx];
+            double absT = hold.noteStartTime + tOff;
+            if (songTime < absT) break;
+
+            // Bandori-style gate: at the tick's time, the player must be on
+            // the lane the hold is *currently expected to be at*. We round
+            // the smoothstep value to the nearest lane.
+            int expected = static_cast<int>(std::lround(evalHoldLaneAt(hold.holdData, tOff)));
+            bool ok = (hold.currentLane == expected);
+
+            ticks.push_back({id, expected, ok});
+            if (ok) {
+                hold.consecutiveMissedTicks = 0;
+            } else {
+                hold.consecutiveMissedTicks++;
+                if (hold.consecutiveMissedTicks >= BREAK_AFTER) {
+                    hold.broken = true;
+                    hold.nextSampleIdx++;
+                    break;
+                }
+            }
+            hold.nextSampleIdx++;
+        }
+    }
+    return ticks;
+}
+
+void HitDetector::updateHoldLane(uint32_t noteId, int lane) {
+    auto it = m_activeHolds.find(noteId);
+    if (it == m_activeHolds.end()) return;
+    it->second.currentLane = lane;
+}
+
+std::vector<uint32_t> HitDetector::consumeBrokenHolds() {
+    std::vector<uint32_t> out;
+    for (auto it = m_activeHolds.begin(); it != m_activeHolds.end(); ) {
+        if (it->second.broken) {
+            out.push_back(it->first);
+            // Also remove the underlying note so it isn't double-counted as
+            // a Miss by the timing-window sweep in update().
+            uint32_t id = it->first;
+            m_activeNotes.erase(
+                std::remove_if(m_activeNotes.begin(), m_activeNotes.end(),
+                    [id](const NoteEvent& n) { return n.id == id; }),
+                m_activeNotes.end());
+            it = m_activeHolds.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    return out;
 }
 
 void HitDetector::updateSlide(uint32_t noteId, glm::vec2 currentPos, double /*songTime*/) {

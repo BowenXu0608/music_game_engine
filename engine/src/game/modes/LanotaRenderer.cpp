@@ -1,8 +1,11 @@
 #include "LanotaRenderer.h"
 #include "renderer/Renderer.h"
+#include "ui/ProjectHub.h"   // GameModeConfig definition
 #include <glm/gtc/matrix_transform.hpp>
 #include <cmath>
 #include <algorithm>
+#include <iostream>
+#include <limits>
 #include <unordered_map>
 
 static constexpr float TWO_PI = 6.28318530717958f;
@@ -19,13 +22,56 @@ glm::vec2 LanotaRenderer::w2s(glm::vec3 pos, const glm::mat4& vp, float sw, floa
     };
 }
 
-void LanotaRenderer::onInit(Renderer& renderer, const ChartData& chart, const GameModeConfig*) {
+void LanotaRenderer::onInit(Renderer& renderer, const ChartData& chart,
+                            const GameModeConfig* config) {
+    m_renderer = &renderer;
     onResize(renderer.width(), renderer.height());
+
+    // Track count for the lane→angle fallback (used when the chart has no
+    // LanotaRingData notes — e.g. a chart authored in Drop-Notes mode that the
+    // user is now playing in Circle mode).  Also stored as m_trackCount so the
+    // keyboard hit path (showJudgment) can reverse-map lane → angle.
+    m_trackCount = (config && config->trackCount > 0) ? config->trackCount : 7;
+    int trackCount = m_trackCount;
+    std::cout << "[LanotaRenderer] onInit trackCount=" << trackCount
+              << " chart.notes=" << chart.notes.size() << "\n";
+
+    m_holdBodies.clear();
+    for (const auto& note : chart.notes) {
+        if (note.type != NoteType::Hold) continue;
+        if (auto* hd = std::get_if<HoldData>(&note.data))
+            m_holdBodies.push_back({note.time, *hd});
+    }
 
     std::unordered_map<int, std::vector<NoteEvent>> ringNotes;
     for (auto& note : chart.notes)
         if (auto* rd = std::get_if<LanotaRingData>(&note.data))
             ringNotes[rd->ringIndex].push_back(note);
+
+    // Fallback: chart has no native ring notes — synthesize one ring from
+    // lane-based notes (TapData / HoldData / FlickData).  Each lane index is
+    // mapped to an evenly-spaced angle around the disk.  Without this, picking
+    // Circle mode for a Drop-Notes chart would render an empty screen.
+    if (ringNotes.empty()) {
+        std::vector<NoteEvent>& dst = ringNotes[0];
+        for (auto& note : chart.notes) {
+            int   lane = -1;
+            int   span = 1;
+            if      (auto* tap   = std::get_if<TapData>  (&note.data)) { lane = (int)tap->laneX;  span = tap->laneSpan;  }
+            else if (auto* hold  = std::get_if<HoldData> (&note.data)) { lane = (int)hold->laneX; span = hold->laneSpan; }
+            else if (auto* flick = std::get_if<FlickData>(&note.data)) { lane = (int)flick->laneX; }
+            if (lane < 0) continue;
+
+            // Lane 0 sits at the top of the disk (12 o'clock) and lane numbers
+            // increase clockwise. World +Y projects to screen top, so clockwise
+            // in screen space corresponds to *decreasing* angle — hence the
+            // `π/2 − lane·θ` form (not `lane·θ − π/2`).
+            float angle = PI * 0.5f - (static_cast<float>(lane) / trackCount) * TWO_PI;
+            NoteEvent converted = note;
+            converted.data = LanotaRingData{angle, 0, span};
+            dst.push_back(converted);
+        }
+    }
 
     for (auto& [idx, notes] : ringNotes) {
         Ring ring{};
@@ -148,8 +194,12 @@ void LanotaRenderer::onUpdate(float dt, double songTime) {
     m_songTime = loopDuration > 0.0 ? fmod(songTime, loopDuration) : songTime;
 
     for (auto& ring : m_rings) {
+        // Disk rotation is disabled by default so notes travel straight out
+        // along a fixed radial line. Chart-authored rotationEvents still
+        // override the disk pose if present; in that case notes inherit the
+        // disk's current angle (rd->angle + ring.currentAngle in onRender).
         if (ring.rotationEvents.empty()) {
-            ring.currentAngle += ring.rotationSpeed * dt;
+            ring.currentAngle = 0.f;
         } else {
             ring.currentAngle = getCurrentRotation(m_songTime,
                                                    ring.rotationEvents,
@@ -186,13 +236,68 @@ void LanotaRenderer::onRender(Renderer& renderer) {
     float sw = static_cast<float>(m_width);
     float sh = static_cast<float>(m_height);
 
+    // ── Small (inner) spawn disk ─────────────────────────────────────────────
+    // Drawn once; all rings share the same inner spawn radius. Notes fly
+    // radially outward from this disk toward each ring's hit circle.
+    {
+        std::vector<glm::vec2> inner;
+        buildRingPolyline(INNER_RADIUS, inner);
+        renderer.lines().drawPolyline(inner, 2.f, {0.35f, 0.55f, 0.9f, 0.6f}, true);
+    }
+
+    // ── Lane dividers + first-lane marker ────────────────────────────────────
+    // Radial guides from the inner disk out to — but not past — the outer
+    // hit disk, so nothing bleeds outside the large ring. Lane 0 sits at
+    // the top (12 o'clock); lane numbers increase clockwise.
+    if (m_trackCount > 0 && !m_rings.empty()) {
+        float outermost = 0.f;
+        for (auto& r : m_rings) outermost = std::max(outermost, r.radius);
+        // Keep the divider's inner/outer endpoints strictly between the two
+        // disks: a hair outside the inner disk and a hair inside the outer.
+        const float dividerInner = INNER_RADIUS + 0.01f;
+        const float dividerOuter = outermost   - 0.01f;
+
+        // Dividers are drawn at lane *boundaries*, half a lane offset from
+        // lane *centers*. In the clockwise-decreasing convention, the CCW
+        // (counter-clockwise, i.e. visually "left") edge of lane N sits at
+        // (π/2 − N·θ) + θ/2 = π/2 − (N−½)·θ.
+        float halfLane = PI / static_cast<float>(m_trackCount);  // ½·(2π/n)
+        for (int lane = 0; lane < m_trackCount; ++lane) {
+            float a = PI * 0.5f - (static_cast<float>(lane) / m_trackCount) * TWO_PI + halfLane;
+            float ca = cosf(a), sa = sinf(a);
+            glm::vec2 p0 = w2s({ca * dividerInner, sa * dividerInner, 0.f}, m_perspVP, sw, sh);
+            glm::vec2 p1 = w2s({ca * dividerOuter, sa * dividerOuter, 0.f}, m_perspVP, sw, sh);
+
+            glm::vec4 col{0.6f, 0.75f, 1.f, 0.35f}; // dim blue dividers
+            renderer.lines().drawLine(p0, p1, 1.5f, col);
+        }
+
+        // Lane-0 center marker: short gold tick at 12 o'clock, sitting on
+        // the outer edge of the large disk and pointing slightly inward.
+        {
+            float a = PI * 0.5f;
+            float ca = cosf(a), sa = sinf(a);
+            glm::vec2 p0 = w2s({ca * (dividerOuter - 0.25f), sa * (dividerOuter - 0.25f), 0.f},
+                               m_perspVP, sw, sh);
+            glm::vec2 p1 = w2s({ca * dividerOuter, sa * dividerOuter, 0.f},
+                               m_perspVP, sw, sh);
+            renderer.lines().drawLine(p0, p1, 3.f, {1.f, 0.9f, 0.3f, 0.95f});
+        }
+    }
+
+    // Draw cross-lane hold bodies before note heads so heads render on top.
+    drawHoldBodies(renderer);
+
     for (auto& ring : m_rings) {
-        // Hit ring circle at Z=0
+        // Outer hit ring circle at Z=0
         std::vector<glm::vec2> pts;
         buildRingPolyline(ring.radius, pts);
-        renderer.lines().drawPolyline(pts, 2.f, {0.5f, 0.7f, 1.f, 0.5f}, true);
+        renderer.lines().drawPolyline(pts, 2.f, {0.5f, 0.7f, 1.f, 0.8f}, true);
 
         for (auto& note : ring.notes) {
+            // Skip already-consumed notes (touch picked them, or showJudgment hit them).
+            if (m_hitNotes.count(note.id)) continue;
+
             float timeDiff = static_cast<float>(note.time - m_songTime);
             if (timeDiff < -0.3f || timeDiff > APPROACH_SECS) continue;
 
@@ -209,19 +314,26 @@ void LanotaRenderer::onRender(Renderer& renderer) {
             // Model-matrix rotation would only be preferable if notes were drawn via
             // instanced GPU calls with a per-ring uniform block.  In the CPU-batcher
             // architecture the trig is the transform, and this single line is it:
-            float angle = rd->angle + ring.currentAngle;
-            // Note travels from deep in the tunnel (large negative Z) toward Z=0.
-            // At timeDiff == 0 the note lands on the ring plane.
-            float noteZ = -timeDiff * SCROLL_SPEED_Z;
+            // `rd->angle` is the *authored* lane's center angle. Wider notes
+            // expand clockwise: a span-S note at lane N covers lanes N..N+S-1,
+            // so its visual center sits (S-1)/2 lanes clockwise of rd->angle.
+            int   span        = std::clamp(rd->laneSpan, 1, 3);
+            float laneAngular = (m_trackCount > 0 ? TWO_PI / m_trackCount : TWO_PI / 7.f);
+            float angle       = rd->angle + ring.currentAngle
+                              - static_cast<float>(span - 1) * 0.5f * laneAngular;
+            // Notes fly radially outward across a flat disk: at timeDiff ==
+            // APPROACH_SECS the note spawns on the small inner disk, and at
+            // timeDiff == 0 it reaches the large hit ring at ring.radius.
+            float travelT    = std::clamp(timeDiff / APPROACH_SECS, 0.f, 1.f);
+            float noteRadius = ring.radius - travelT * (ring.radius - INNER_RADIUS);
+            float noteZ      = 0.f;
 
-            glm::vec3 notePos{cosf(angle) * ring.radius, sinf(angle) * ring.radius, noteZ};
-            glm::vec4 clip = m_perspVP * glm::vec4(notePos, 1.f);
-            if (clip.w <= 0.f) continue;
-
-            glm::vec2 screen = w2s(notePos, m_perspVP, sw, sh);
-            // Perspective-correct size: appears tiny at depth, full size at Z=0
-            float sz = NOTE_WORLD_R * m_proj11y * sh * 0.5f / clip.w;
-            if (sz < 2.f) continue;
+            // Centre clip-space test to cull notes behind the camera.
+            glm::vec3 centerWorld{cosf(angle) * noteRadius,
+                                  sinf(angle) * noteRadius,
+                                  noteZ};
+            glm::vec4 clipC = m_perspVP * glm::vec4(centerWorld, 1.f);
+            if (clipC.w <= 0.f) continue;
 
             float alpha = timeDiff < 0.f
                 ? std::max(0.f, 1.f + timeDiff / 0.3f)
@@ -231,15 +343,247 @@ void LanotaRenderer::onRender(Renderer& renderer) {
                 ? glm::vec4{1.f, 0.35f, 0.35f, alpha}
                 : glm::vec4{1.f, 0.85f, 0.3f,  alpha};
 
-            // Dark outer halo + bright inner fill
-            renderer.quads().drawQuad(
-                screen, {sz * 1.3f, sz * 1.3f}, 0.f,
-                {0.f, 0.f, 0.f, alpha * 0.5f}, {0.f, 0.f, 1.f, 1.f},
-                renderer.whiteView(), renderer.whiteSampler(),
-                renderer.context(), renderer.descriptors());
-            renderer.quads().drawQuad(
-                screen, {sz, sz}, 0.f,
-                color, {0.f, 0.f, 1.f, 1.f},
+            // ── Curved arc tile, foreshortened by m_perspVP ──────────────────
+            // The note is a tile on the disk (a plane parallel to z=0 at z=noteZ)
+            // that hugs the ring: tangential extent along the arc, radial extent
+            // across the ring's thickness.  Tessellate into N quads so the arc
+            // bends smoothly with the ring instead of being a flat rectangle.
+            constexpr int   NOTE_ARC_SEGMENTS = 12;
+            // Full-lane-width arc: angular width = laneSpan * (2π / trackCount).
+            // Small 2% padding keeps adjacent notes visually distinct when
+            // two same-time notes sit in neighboring lanes. `span` and
+            // `laneAngular` are already computed above.
+            float angularHalf = 0.5f * span * laneAngular * 0.96f;
+            const float radialHalf = NOTE_WORLD_R * 0.55f;      // thickness across the ring
+            float       innerR     = noteRadius - radialHalf;
+            float       outerR     = noteRadius + radialHalf;
+
+            // Pre-project all sample points along the arc on inner & outer rings.
+            glm::vec2 inner[NOTE_ARC_SEGMENTS + 1];
+            glm::vec2 outer[NOTE_ARC_SEGMENTS + 1];
+            bool      anyOnscreen = false;
+            for (int i = 0; i <= NOTE_ARC_SEGMENTS; ++i) {
+                float t = static_cast<float>(i) / NOTE_ARC_SEGMENTS;
+                float a = angle - angularHalf + t * (2.f * angularHalf);
+                float ca = cosf(a), sa = sinf(a);
+                glm::vec3 wIn { ca * innerR, sa * innerR, noteZ };
+                glm::vec3 wOut{ ca * outerR, sa * outerR, noteZ };
+                glm::vec4 cIn  = m_perspVP * glm::vec4(wIn,  1.f);
+                glm::vec4 cOut = m_perspVP * glm::vec4(wOut, 1.f);
+                if (cIn.w <= 0.f || cOut.w <= 0.f) {
+                    // Mark this column as offscreen by setting a sentinel.
+                    inner[i] = outer[i] = {-99999.f, -99999.f};
+                    continue;
+                }
+                inner[i] = w2s(wIn,  m_perspVP, sw, sh);
+                outer[i] = w2s(wOut, m_perspVP, sw, sh);
+                anyOnscreen = true;
+            }
+            if (!anyOnscreen) continue;
+
+            // Optional dark halo: build a slightly thicker arc just outside.
+            float       haloRadial    = radialHalf * 1.35f;
+            float       haloAngular   = angularHalf * 1.10f;
+            float       haloInnerR    = noteRadius - haloRadial;
+            float       haloOuterR    = noteRadius + haloRadial;
+            glm::vec2   haloIn[NOTE_ARC_SEGMENTS + 1];
+            glm::vec2   haloOut[NOTE_ARC_SEGMENTS + 1];
+            bool        haloOk = true;
+            for (int i = 0; i <= NOTE_ARC_SEGMENTS && haloOk; ++i) {
+                float t = static_cast<float>(i) / NOTE_ARC_SEGMENTS;
+                float a = angle - haloAngular + t * (2.f * haloAngular);
+                float ca = cosf(a), sa = sinf(a);
+                glm::vec3 wIn { ca * haloInnerR, sa * haloInnerR, noteZ };
+                glm::vec3 wOut{ ca * haloOuterR, sa * haloOuterR, noteZ };
+                glm::vec4 cIn  = m_perspVP * glm::vec4(wIn,  1.f);
+                glm::vec4 cOut = m_perspVP * glm::vec4(wOut, 1.f);
+                if (cIn.w <= 0.f || cOut.w <= 0.f) { haloOk = false; break; }
+                haloIn[i]  = w2s(wIn,  m_perspVP, sw, sh);
+                haloOut[i] = w2s(wOut, m_perspVP, sw, sh);
+            }
+
+            glm::vec4 haloColor{0.f, 0.f, 0.f, alpha * 0.5f};
+
+            // Halo first (drawn behind the bright fill).
+            if (haloOk) {
+                for (int i = 0; i < NOTE_ARC_SEGMENTS; ++i) {
+                    // Order: inner-current, outer-current, outer-next, inner-next
+                    // → matches drawQuadCorners' BL,BR,TR,TL winding.
+                    renderer.quads().drawQuadCorners(
+                        haloIn[i],  haloOut[i],
+                        haloOut[i+1], haloIn[i+1],
+                        haloColor, {0.f, 0.f, 1.f, 1.f},
+                        renderer.whiteView(), renderer.whiteSampler(),
+                        renderer.context(), renderer.descriptors());
+                }
+            }
+
+            // Bright fill on top.
+            for (int i = 0; i < NOTE_ARC_SEGMENTS; ++i) {
+                if (inner[i].x  < -90000.f || inner[i+1].x < -90000.f) continue;
+                renderer.quads().drawQuadCorners(
+                    inner[i],  outer[i],
+                    outer[i+1], inner[i+1],
+                    color, {0.f, 0.f, 1.f, 1.f},
+                    renderer.whiteView(), renderer.whiteSampler(),
+                    renderer.context(), renderer.descriptors());
+            }
+        }
+    }
+}
+
+void LanotaRenderer::drawHoldBodies(Renderer& renderer) {
+    if (m_holdBodies.empty() || m_rings.empty()) return;
+
+    float sw = static_cast<float>(m_width);
+    float sh = static_cast<float>(m_height);
+
+    // Use the outer ring's radius as the hold's "hit" radius. All holds share
+    // ring 0 in the Circle-mode fallback.
+    const float hitRadius = m_rings.front().radius;
+
+    auto laneToAngle = [&](float lane) {
+        return PI * 0.5f - (lane / static_cast<float>(m_trackCount)) * TWO_PI;
+    };
+
+    const float laneAngular = (m_trackCount > 0 ? TWO_PI / m_trackCount : TWO_PI / 7.f);
+
+    for (const auto& hb : m_holdBodies) {
+        const HoldData& h = hb.data;
+        const double headT = hb.startTime;
+        const double tailT = headT + h.duration;
+        if (tailT < m_songTime - 0.3) continue;
+        if (headT > m_songTime + APPROACH_SECS) continue;
+        if (h.duration <= 0.f) continue;
+
+        // Tessellate the hold body along its duration. Each sample gives an
+        // angle (from the interpolated lane) and a radius (from timeDiff).
+        const int N = (h.transition == HoldTransition::Curve) ? 22 : 14;
+        const int span = std::clamp(h.laneSpan, 1, 3);
+        const float halfA = 0.5f * span * laneAngular * 0.85f;
+
+        // Rhomboid angular half-width — bulges during each rhomboid waypoint
+        // transition window. Falls back to legacy single-transition spread.
+        auto halfAAt = [&](float tOff) -> float {
+            if (!h.waypoints.empty()) {
+                int seg = holdActiveSegment(h, tOff);
+                if (seg <= 0) return halfA;
+                const auto& a = h.waypoints[seg - 1];
+                const auto& b = h.waypoints[seg];
+                if (b.style != HoldTransition::Rhomboid) return halfA;
+                float tLen = std::max(0.f, b.transitionLen);
+                if (tLen <= 0.f) return halfA;
+                float u = (tOff - (b.tOffset - tLen)) / tLen;
+                float tri = 1.f - std::abs(2.f * u - 1.f);
+                float spreadA = std::abs((float)b.lane - (float)a.lane) * laneAngular;
+                return halfA + tri * spreadA * 0.5f;
+            }
+            if (h.transition != HoldTransition::Rhomboid
+                || h.effectiveEndLane() == h.laneX)
+                return halfA;
+            float tLen = std::clamp(h.transitionLen, 0.f, h.duration);
+            if (tLen <= 0.f) return halfA;
+            float tBegin = holdTransitionBegin(h);
+            float tEnd   = tBegin + tLen;
+            if (tOff <= tBegin || tOff >= tEnd) return halfA;
+            float u = (tOff - tBegin) / tLen;
+            float tri = 1.f - std::abs(2.f * u - 1.f);
+            float spreadA = std::abs(h.effectiveEndLane() - h.laneX) * laneAngular;
+            return halfA + tri * spreadA * 0.5f;
+        };
+
+        bool havePrev = false;
+        glm::vec2 prevIn{}, prevOut{};
+        for (int i = 0; i <= N; ++i) {
+            float tOff = (float)i / (float)N * h.duration;
+            double absT = headT + tOff;
+            if (absT < m_songTime - 0.1) { havePrev = false; continue; }
+            if (absT > m_songTime + APPROACH_SECS) { havePrev = false; continue; }
+
+            float timeDiff = static_cast<float>(absT - m_songTime);
+            float travelT  = std::clamp(timeDiff / APPROACH_SECS, 0.f, 1.f);
+            float radius   = hitRadius - travelT * (hitRadius - INNER_RADIUS);
+
+            float lane  = evalHoldLaneAt(h, tOff);
+            float angle = laneToAngle(lane) + m_rings.front().currentAngle
+                        - static_cast<float>(span - 1) * 0.5f * laneAngular;
+            float hA = halfAAt(tOff);
+
+            float aL = angle - hA;
+            float aR = angle + hA;
+            // Inner/outer edge of the arc tile
+            float radialHalf = NOTE_WORLD_R * 0.55f;
+            float rIn  = radius - radialHalf;
+            float rOut = radius + radialHalf;
+
+            // Pick left/right points of the arc — this gives a ribbon that
+            // sweeps angularly along the hold path. Use the arc midpoint;
+            // ribbon thickness is purely radial here.
+            float ca = cosf(angle), sa = sinf(angle);
+            glm::vec3 wIn { ca * rIn,  sa * rIn,  0.f };
+            glm::vec3 wOut{ ca * rOut, sa * rOut, 0.f };
+            glm::vec4 cIn4  = m_perspVP * glm::vec4(wIn, 1.f);
+            glm::vec4 cOut4 = m_perspVP * glm::vec4(wOut, 1.f);
+            if (cIn4.w <= 0.f || cOut4.w <= 0.f) { havePrev = false; continue; }
+            glm::vec2 sIn  = w2s(wIn,  m_perspVP, sw, sh);
+            glm::vec2 sOut = w2s(wOut, m_perspVP, sw, sh);
+
+            // For rhomboid/angular width, also widen tangentially by offsetting
+            // the inner/outer points along the perpendicular direction.
+            glm::vec2 perp{-sa, ca};
+            float tangentOffset = hA * radius; // world-space arc length estimate
+            glm::vec3 wInL { wIn.x  + perp.x * tangentOffset, wIn.y  + perp.y * tangentOffset, 0.f };
+            glm::vec3 wOutL{ wOut.x + perp.x * tangentOffset, wOut.y + perp.y * tangentOffset, 0.f };
+            glm::vec3 wInR { wIn.x  - perp.x * tangentOffset, wIn.y  - perp.y * tangentOffset, 0.f };
+            glm::vec3 wOutR{ wOut.x - perp.x * tangentOffset, wOut.y - perp.y * tangentOffset, 0.f };
+            (void)sIn; (void)sOut;
+            glm::vec2 sInL  = w2s(wInL,  m_perspVP, sw, sh);
+            glm::vec2 sInR  = w2s(wInR,  m_perspVP, sw, sh);
+            glm::vec2 sOutL = w2s(wOutL, m_perspVP, sw, sh);
+            glm::vec2 sOutR = w2s(wOutR, m_perspVP, sw, sh);
+
+            // Midline used for the ribbon connection: average inner/outer
+            glm::vec2 centerL = (sInL + sOutL) * 0.5f;
+            glm::vec2 centerR = (sInR + sOutR) * 0.5f;
+
+            if (havePrev) {
+                renderer.quads().drawQuadCorners(
+                    prevIn, prevOut, centerR, centerL,
+                    {0.3f, 0.8f, 1.f, 0.75f}, {0.f, 0.f, 1.f, 1.f},
+                    renderer.whiteView(), renderer.whiteSampler(),
+                    renderer.context(), renderer.descriptors());
+            }
+            prevIn  = centerL;
+            prevOut = centerR;
+            havePrev = true;
+        }
+
+        // Sample-point markers
+        for (const auto& sp : h.samplePoints) {
+            float tOff = sp.tOffset;
+            if (tOff < 0.f || tOff > h.duration) continue;
+            double absT = headT + tOff;
+            if (absT < m_songTime - 0.05 || absT > m_songTime + APPROACH_SECS) continue;
+
+            float timeDiff = static_cast<float>(absT - m_songTime);
+            float travelT  = std::clamp(timeDiff / APPROACH_SECS, 0.f, 1.f);
+            float radius   = hitRadius - travelT * (hitRadius - INNER_RADIUS);
+
+            float lane  = evalHoldLaneAt(h, tOff);
+            float angle = laneToAngle(lane) + m_rings.front().currentAngle
+                        - static_cast<float>(span - 1) * 0.5f * laneAngular;
+            float ca = cosf(angle), sa = sinf(angle);
+            float r  = NOTE_WORLD_R * 0.4f;
+            glm::vec3 wA{ca * (radius - r), sa * (radius - r), 0.f};
+            glm::vec3 wB{ca * (radius + r), sa * (radius + r), 0.f};
+            glm::vec2 perp{-sa * r, ca * r};
+            glm::vec2 sBL = w2s({wA.x - perp.x, wA.y - perp.y, 0.f}, m_perspVP, sw, sh);
+            glm::vec2 sBR = w2s({wA.x + perp.x, wA.y + perp.y, 0.f}, m_perspVP, sw, sh);
+            glm::vec2 sTR = w2s({wB.x + perp.x, wB.y + perp.y, 0.f}, m_perspVP, sw, sh);
+            glm::vec2 sTL = w2s({wB.x - perp.x, wB.y - perp.y, 0.f}, m_perspVP, sw, sh);
+            renderer.quads().drawQuadCorners(
+                sBL, sBR, sTR, sTL,
+                {1.f, 0.95f, 0.3f, 0.95f}, {0.f, 0.f, 1.f, 1.f},
                 renderer.whiteView(), renderer.whiteSampler(),
                 renderer.context(), renderer.descriptors());
         }
@@ -248,4 +592,193 @@ void LanotaRenderer::onRender(Renderer& renderer) {
 
 void LanotaRenderer::onShutdown(Renderer& renderer) {
     m_rings.clear();
+    m_hitNotes.clear();
+    m_holdBodies.clear();
+    m_renderer = nullptr;
+}
+
+// ── Hit picking + visual feedback ────────────────────────────────────────────
+
+void LanotaRenderer::markNoteHit(uint32_t noteId) {
+    m_hitNotes.insert(noteId);
+}
+
+bool LanotaRenderer::projectNoteScreen(uint32_t noteId, glm::vec2& outScreen) const {
+    float sw = static_cast<float>(m_width);
+    float sh = static_cast<float>(m_height);
+    for (const auto& ring : m_rings) {
+        for (const auto& note : ring.notes) {
+            if (note.id != noteId) continue;
+            const auto* rd = std::get_if<LanotaRingData>(&note.data);
+            if (!rd) return false;
+            int   span        = std::clamp(rd->laneSpan, 1, 3);
+            float laneAngular = (m_trackCount > 0 ? TWO_PI / m_trackCount : TWO_PI / 7.f);
+            float angle    = rd->angle + ring.currentAngle
+                           - static_cast<float>(span - 1) * 0.5f * laneAngular;
+            float timeDiff = static_cast<float>(note.time - m_songTime);
+            float travelT    = std::clamp(timeDiff / APPROACH_SECS, 0.f, 1.f);
+            float noteRadius = ring.radius - travelT * (ring.radius - INNER_RADIUS);
+            glm::vec3 world{cosf(angle) * noteRadius,
+                            sinf(angle) * noteRadius,
+                            0.f};
+            glm::vec4 clip = m_perspVP * glm::vec4(world, 1.f);
+            if (clip.w <= 0.f) return false;
+            outScreen = w2s(world, m_perspVP, sw, sh);
+            return true;
+        }
+    }
+    return false;
+}
+
+std::optional<LanotaRenderer::PickResult>
+LanotaRenderer::pickNoteAt(glm::vec2 screenPx, double songTime, float pixelTol) const {
+    float sw = static_cast<float>(m_width);
+    float sh = static_cast<float>(m_height);
+    const float HIT_WINDOW_SEC = 0.15f;
+
+    std::optional<PickResult> best;
+    float bestScore = std::numeric_limits<float>::max();
+    const float pxTolSq = pixelTol * pixelTol;
+
+    for (size_t r = 0; r < m_rings.size(); ++r) {
+        const auto& ring = m_rings[r];
+        for (const auto& note : ring.notes) {
+            if (m_hitNotes.count(note.id)) continue;
+
+            float timeDiff = static_cast<float>(note.time - songTime);
+            if (std::abs(timeDiff) > HIT_WINDOW_SEC) continue;
+
+            const auto* rd = std::get_if<LanotaRingData>(&note.data);
+            if (!rd) continue;
+
+            int   span        = std::clamp(rd->laneSpan, 1, 3);
+            float laneAngular = (m_trackCount > 0 ? TWO_PI / m_trackCount : TWO_PI / 7.f);
+            float angle      = rd->angle + ring.currentAngle
+                             - static_cast<float>(span - 1) * 0.5f * laneAngular;
+            float travelT    = std::clamp(timeDiff / APPROACH_SECS, 0.f, 1.f);
+            float noteRadius = ring.radius - travelT * (ring.radius - INNER_RADIUS);
+            glm::vec3 world{cosf(angle) * noteRadius,
+                            sinf(angle) * noteRadius,
+                            0.f};
+            glm::vec4 clip = m_perspVP * glm::vec4(world, 1.f);
+            if (clip.w <= 0.f) continue;
+
+            glm::vec2 screen = w2s(world, m_perspVP, sw, sh);
+            glm::vec2 d  = screen - screenPx;
+            float distSq = d.x * d.x + d.y * d.y;
+            if (distSq > pxTolSq) continue;
+
+            // Combined score: prefer notes that are both close in pixels and
+            // close in time.  Pixel distance dominates so a closer note wins
+            // even if its timing is slightly worse, but ties are broken by time.
+            float score = distSq + (timeDiff * timeDiff) * 2.0e5f;
+            if (score < bestScore) {
+                bestScore = score;
+                best = PickResult{note.id, static_cast<int>(r), note.type};
+            }
+        }
+    }
+    return best;
+}
+
+void LanotaRenderer::emitHitFeedback(uint32_t noteId, Judgment judgment) {
+    if (!m_renderer) return;
+    if (judgment == Judgment::Miss) return;
+
+    glm::vec2 screen;
+    if (!projectNoteScreen(noteId, screen)) return;
+
+    glm::vec4 pColor;
+    int       pCount = 12;
+    switch (judgment) {
+        case Judgment::Perfect: pColor = {0.2f, 1.f,   0.3f, 1.f}; pCount = 20; break;
+        case Judgment::Good:    pColor = {0.3f, 0.6f,  1.f,  1.f}; pCount = 14; break;
+        case Judgment::Bad:     pColor = {1.f,  0.25f, 0.2f, 1.f}; pCount = 8;  break;
+        default: return;
+    }
+    m_renderer->particles().emitBurst(screen, pColor, pCount, 200.f, 8.f, 0.5f);
+}
+
+std::optional<uint32_t>
+LanotaRenderer::findNoteByAngle(float targetAngle, float angularTol) const {
+    const float HIT_WINDOW_SEC = 0.15f;
+
+    std::optional<uint32_t> best;
+    float bestScore = std::numeric_limits<float>::max();
+
+    // Wrap helper: shortest signed angular delta in (-π, π].
+    auto wrapDelta = [](float a, float b) {
+        float d = std::fmod(a - b + PI, TWO_PI);
+        if (d < 0.f) d += TWO_PI;
+        return d - PI;
+    };
+
+    for (const auto& ring : m_rings) {
+        for (const auto& note : ring.notes) {
+            if (m_hitNotes.count(note.id)) continue;
+
+            float timeDiff = static_cast<float>(note.time - m_songTime);
+            if (std::abs(timeDiff) > HIT_WINDOW_SEC) continue;
+
+            const auto* rd = std::get_if<LanotaRingData>(&note.data);
+            if (!rd) continue;
+
+            // Compare against the *authored* angle (rd->angle), not the rotated
+            // one — the keyboard maps lane → authored angle directly so the
+            // mental model is "key N hits the note that was originally placed
+            // at lane N's angle", regardless of how far the disk has spun.
+            float dAngle = std::abs(wrapDelta(rd->angle, targetAngle));
+            if (dAngle > angularTol) continue;
+
+            float score = dAngle * dAngle + (timeDiff * timeDiff) * 100.f;
+            if (score < bestScore) {
+                bestScore = score;
+                best = note.id;
+            }
+        }
+    }
+    return best;
+}
+
+void LanotaRenderer::showJudgment(int lane, Judgment judgment) {
+    if (m_trackCount <= 0) return;
+    // Same formula as the lane→angle fallback in onInit so the keyboard maps
+    // back to the same notes the fallback synthesized.
+    float targetAngle = PI * 0.5f - (static_cast<float>(lane) / m_trackCount) * TWO_PI;
+
+    // Tolerance = half a lane, so lane N only matches notes authored in lane N.
+    float angularTol = 0.5f * TWO_PI / static_cast<float>(m_trackCount);
+    auto noteId = findNoteByAngle(targetAngle, angularTol);
+    if (noteId) {
+        markNoteHit(*noteId);
+        emitHitFeedback(*noteId, judgment);
+        return;
+    }
+
+    // No standalone note at this lane/time — this is a Bandori-style hold
+    // sample tick passing under the hit line. Emit a burst anyway so the
+    // player sees feedback as the hold carves its path.
+    if (judgment == Judgment::Miss || !m_renderer) return;
+    glm::vec4 pColor;
+    int       pCount = 12;
+    switch (judgment) {
+        case Judgment::Perfect: pColor = {0.2f, 1.f,   0.3f, 1.f}; pCount = 20; break;
+        case Judgment::Good:    pColor = {0.3f, 0.6f,  1.f,  1.f}; pCount = 14; break;
+        case Judgment::Bad:     pColor = {1.f,  0.25f, 0.2f, 1.f}; pCount = 8;  break;
+        default: return;
+    }
+    // Position the burst on the innermost ring at the lane's angle — that's
+    // where the hold body is currently touching the hit line in Lanota mode.
+    float sw = static_cast<float>(m_width);
+    float sh = static_cast<float>(m_height);
+    // Use the first ring's angle offset so it matches the hold body drawn path.
+    float ringAngleOffset = m_rings.empty() ? 0.f : m_rings.front().currentAngle;
+    float angle = targetAngle + ringAngleOffset;
+    glm::vec3 world{cosf(angle) * INNER_RADIUS,
+                    sinf(angle) * INNER_RADIUS,
+                    0.f};
+    glm::vec4 clip = m_perspVP * glm::vec4(world, 1.f);
+    if (clip.w <= 0.f) return;
+    glm::vec2 screen = w2s(world, m_perspVP, sw, sh);
+    m_renderer->particles().emitBurst(screen, pColor, pCount, 200.f, 8.f, 0.5f);
 }
