@@ -71,9 +71,11 @@ ChartData ChartLoader::loadUnified(const std::string& path) {
         if (pos == std::string::npos) return "";
         pos = content.find(":", pos) + 1;
         while (pos < content.size() && (content[pos] == ' ' || content[pos] == '\t')) pos++;
+        if (pos >= content.size()) return "";
         if (content[pos] == '"') {
             pos++;
             auto end = content.find('"', pos);
+            if (end == std::string::npos) return "";
             return content.substr(pos, end - pos);
         }
         auto end = pos;
@@ -166,9 +168,11 @@ ChartData ChartLoader::loadUnified(const std::string& path) {
                 if (p == std::string::npos) return std::string("");
                 p = noteObj.find(":", p) + 1;
                 while (p < noteObj.size() && (noteObj[p] == ' ' || noteObj[p] == '\t')) p++;
+                if (p >= noteObj.size()) return std::string("");
                 if (noteObj[p] == '"') {
                     p++;
                     auto e = noteObj.find('"', p);
+                    if (e == std::string::npos) return std::string("");
                     return noteObj.substr(p, e - p);
                 }
                 auto e = p;
@@ -378,6 +382,7 @@ ChartData ChartLoader::loadUnified(const std::string& path) {
                     float sx = getF("x", 0.f);
                     float sy = getF("y", 0.f);
                     float sey = getF("endY", -1.f);
+                    int   sweeps = static_cast<int>(getF("sweeps", 0.f));
 
                     // Parse path: [[x,y], [x,y], ...]
                     std::vector<std::pair<float,float>> path;
@@ -415,9 +420,10 @@ ChartData ChartLoader::loadUnified(const std::string& path) {
                         tap->scanY = sy;
                         if (!path.empty()) tap->scanPath = std::move(path);
                     } else if (auto* hold = std::get_if<HoldData>(&ev.data)) {
-                        hold->scanX    = sx;
-                        hold->scanY    = sy;
-                        hold->scanEndY = sey;
+                        hold->scanX           = sx;
+                        hold->scanY           = sy;
+                        hold->scanEndY        = sey;
+                        hold->scanHoldSweeps  = sweeps;
                     } else if (auto* flick = std::get_if<FlickData>(&ev.data)) {
                         flick->scanX = sx;
                         flick->scanY = sy;
@@ -427,6 +433,188 @@ ChartData ChartLoader::loadUnified(const std::string& path) {
 
             chart.notes.push_back(ev);
             pos = objEnd + 1;
+        }
+    }
+
+    // ── Lanota / circle-mode disk animation ────────────────────────────
+    // "diskAnimation": { "rotations": [...], "moves": [...], "scales": [...] }
+    // Each entry: {"startTime": 1.0, "duration": 0.5, "target": 3.14 | [x,y] | 0.8, "easing": "sineInOut"}
+    {
+        auto daKey = content.find("\"diskAnimation\"");
+        if (daKey != std::string::npos) {
+            auto daBraceL = content.find('{', daKey);
+            auto daBraceR = (daBraceL != std::string::npos)
+                            ? findMatchingBrace(content, daBraceL)
+                            : std::string::npos;
+            if (daBraceL != std::string::npos && daBraceR != std::string::npos) {
+                std::string daBody = content.substr(daBraceL + 1, daBraceR - daBraceL - 1);
+
+                auto parseEasing = [](const std::string& s) {
+                    if (s == "linear")      return DiskEasing::Linear;
+                    if (s == "quadInOut")   return DiskEasing::QuadInOut;
+                    if (s == "cubicInOut")  return DiskEasing::CubicInOut;
+                    return DiskEasing::SineInOut;
+                };
+                auto findArray = [&](const std::string& key) -> std::string {
+                    auto kp = daBody.find("\"" + key + "\"");
+                    if (kp == std::string::npos) return "";
+                    auto lb = daBody.find('[', kp);
+                    if (lb == std::string::npos) return "";
+                    auto rb = findMatchingBracket(daBody, lb);
+                    if (rb == std::string::npos) return "";
+                    return daBody.substr(lb + 1, rb - lb - 1);
+                };
+                auto objGetStr = [](const std::string& obj, const std::string& k) {
+                    auto p = obj.find("\"" + k + "\"");
+                    if (p == std::string::npos) return std::string();
+                    p = obj.find(':', p) + 1;
+                    while (p < obj.size() && (obj[p]==' '||obj[p]=='\t')) p++;
+                    if (p < obj.size() && obj[p] == '"') {
+                        p++;
+                        auto e = obj.find('"', p);
+                        return obj.substr(p, e - p);
+                    }
+                    auto e = p;
+                    while (e < obj.size() && obj[e] != ',' && obj[e] != '}') e++;
+                    return obj.substr(p, e - p);
+                };
+                auto objGetFloat = [&](const std::string& obj, const std::string& k, float def) {
+                    std::string v = objGetStr(obj, k);
+                    if (v.empty()) return def;
+                    try { return std::stof(v); } catch (...) { return def; }
+                };
+                auto objGetDouble = [&](const std::string& obj, const std::string& k, double def) {
+                    std::string v = objGetStr(obj, k);
+                    if (v.empty()) return def;
+                    try { return std::stod(v); } catch (...) { return def; }
+                };
+                auto objGetVec2 = [](const std::string& obj, glm::vec2 def) {
+                    auto p = obj.find("\"target\"");
+                    if (p == std::string::npos) return def;
+                    auto lb = obj.find('[', p);
+                    auto rb = (lb != std::string::npos) ? obj.find(']', lb) : std::string::npos;
+                    if (lb == std::string::npos || rb == std::string::npos) return def;
+                    std::string inner = obj.substr(lb + 1, rb - lb - 1);
+                    auto comma = inner.find(',');
+                    if (comma == std::string::npos) return def;
+                    try {
+                        return glm::vec2(std::stof(inner.substr(0, comma)),
+                                         std::stof(inner.substr(comma + 1)));
+                    } catch (...) { return def; }
+                };
+
+                // Rotations
+                {
+                    std::string arr = findArray("rotations");
+                    size_t p = 0;
+                    while ((p = arr.find('{', p)) != std::string::npos) {
+                        auto e = arr.find('}', p);
+                        if (e == std::string::npos) break;
+                        std::string obj = arr.substr(p, e - p + 1);
+                        DiskRotationEvent dev{};
+                        dev.startTime   = objGetDouble(obj, "startTime", 0.0);
+                        dev.duration    = objGetDouble(obj, "duration",  0.0);
+                        dev.targetAngle = objGetFloat (obj, "target",    0.f);
+                        dev.easing      = parseEasing (objGetStr(obj, "easing"));
+                        chart.diskAnimation.rotations.push_back(dev);
+                        p = e + 1;
+                    }
+                }
+                // Moves (target is a [x,y] array, so match with findMatchingBrace)
+                {
+                    std::string arr = findArray("moves");
+                    size_t p = 0;
+                    while ((p = arr.find('{', p)) != std::string::npos) {
+                        auto e = findMatchingBrace(arr, p);
+                        if (e == std::string::npos) break;
+                        std::string obj = arr.substr(p, e - p + 1);
+                        DiskMoveEvent dev{};
+                        dev.startTime = objGetDouble(obj, "startTime", 0.0);
+                        dev.duration  = objGetDouble(obj, "duration",  0.0);
+                        dev.target    = objGetVec2  (obj, {0.f, 0.f});
+                        dev.easing    = parseEasing (objGetStr(obj, "easing"));
+                        chart.diskAnimation.moves.push_back(dev);
+                        p = e + 1;
+                    }
+                }
+                // Scales
+                {
+                    std::string arr = findArray("scales");
+                    size_t p = 0;
+                    while ((p = arr.find('{', p)) != std::string::npos) {
+                        auto e = arr.find('}', p);
+                        if (e == std::string::npos) break;
+                        std::string obj = arr.substr(p, e - p + 1);
+                        DiskScaleEvent dev{};
+                        dev.startTime   = objGetDouble(obj, "startTime", 0.0);
+                        dev.duration    = objGetDouble(obj, "duration",  0.0);
+                        dev.targetScale = objGetFloat (obj, "target",    1.f);
+                        dev.easing      = parseEasing (objGetStr(obj, "easing"));
+                        chart.diskAnimation.scales.push_back(dev);
+                        p = e + 1;
+                    }
+                }
+            }
+        }
+    }
+
+    // ── Scan-line speed events ──────────────────────────────────────────
+    // "scanSpeedEvents": [{ "startTime": 5.0, "duration": 2.0, "targetSpeed": 2.0, "easing": "sineInOut" }]
+    {
+        auto ssKey = content.find("\"scanSpeedEvents\"");
+        if (ssKey != std::string::npos) {
+            auto arrStart = content.find('[', ssKey);
+            if (arrStart != std::string::npos) {
+                auto arrEnd = findMatchingBracket(content, arrStart);
+                if (arrEnd != std::string::npos) {
+                    std::string arr = content.substr(arrStart + 1, arrEnd - arrStart - 1);
+                    auto parseEasingLocal = [](const std::string& s) {
+                        if (s == "linear")     return DiskEasing::Linear;
+                        if (s == "quadInOut")  return DiskEasing::QuadInOut;
+                        if (s == "cubicInOut") return DiskEasing::CubicInOut;
+                        return DiskEasing::SineInOut;
+                    };
+                    auto objStr = [](const std::string& obj, const std::string& k) {
+                        auto p = obj.find("\"" + k + "\"");
+                        if (p == std::string::npos) return std::string();
+                        p = obj.find(':', p) + 1;
+                        while (p < obj.size() && (obj[p]==' '||obj[p]=='\t')) p++;
+                        if (p < obj.size() && obj[p] == '"') {
+                            p++;
+                            auto e = obj.find('"', p);
+                            if (e == std::string::npos) return std::string();
+                            return obj.substr(p, e - p);
+                        }
+                        auto e = p;
+                        while (e < obj.size() && obj[e] != ',' && obj[e] != '}') e++;
+                        return obj.substr(p, e - p);
+                    };
+                    auto objDbl = [&](const std::string& obj, const std::string& k, double def) {
+                        std::string v = objStr(obj, k);
+                        if (v.empty()) return def;
+                        try { return std::stod(v); } catch (...) { return def; }
+                    };
+                    auto objFlt = [&](const std::string& obj, const std::string& k, float def) {
+                        std::string v = objStr(obj, k);
+                        if (v.empty()) return def;
+                        try { return std::stof(v); } catch (...) { return def; }
+                    };
+
+                    size_t p = 0;
+                    while ((p = arr.find('{', p)) != std::string::npos) {
+                        auto e = arr.find('}', p);
+                        if (e == std::string::npos) break;
+                        std::string obj = arr.substr(p, e - p + 1);
+                        ScanSpeedEvent ev{};
+                        ev.startTime   = objDbl(obj, "startTime", 0.0);
+                        ev.duration    = objDbl(obj, "duration",  0.0);
+                        ev.targetSpeed = objFlt(obj, "targetSpeed", 1.f);
+                        ev.easing      = parseEasingLocal(objStr(obj, "easing"));
+                        chart.scanSpeedEvents.push_back(ev);
+                        p = e + 1;
+                    }
+                }
+            }
         }
     }
 
@@ -447,9 +635,11 @@ ChartData ChartLoader::loadBandori(const std::string& path) {
         if (pos == std::string::npos) return "";
         pos = content.find(":", pos) + 1;
         while (pos < content.size() && (content[pos] == ' ' || content[pos] == '\t')) pos++;
+        if (pos >= content.size()) return "";
         if (content[pos] == '"') {
             pos++;
             auto end = content.find('"', pos);
+            if (end == std::string::npos) return "";
             return content.substr(pos, end - pos);
         }
         auto end = pos;
@@ -524,9 +714,11 @@ ChartData ChartLoader::loadBandori(const std::string& path) {
                 if (p == std::string::npos) return std::string("");
                 p = noteObj.find(":", p) + 1;
                 while (p < noteObj.size() && (noteObj[p] == ' ' || noteObj[p] == '\t')) p++;
+                if (p >= noteObj.size()) return std::string("");
                 if (noteObj[p] == '"') {
                     p++;
                     auto e = noteObj.find('"', p);
+                    if (e == std::string::npos) return std::string("");
                     return noteObj.substr(p, e - p);
                 }
                 auto e = p;

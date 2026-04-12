@@ -8,29 +8,147 @@ static constexpr float NOTE_RADIUS    = 30.f;
 static constexpr float NOTE_SIZE      = NOTE_RADIUS * 2.f;
 static constexpr float SCAN_THICKNESS = 4.f;
 
-// Bit-stable scan-line schedule. Mirrors the editor's helpers in
-// SongEditor.cpp so authored positions and runtime sweep line agree.
+// ── Scan-line schedule ──────────────────────────────────────────────────────
+// Base period = 240/BPM (1 bar @ 4/4). With speed events, scanLineFrac()
+// uses a precomputed phase table so the line can speed up / slow down.
 
 float CytusRenderer::scanLinePeriod() const {
     float bpm = m_bpm > 0.f ? m_bpm : 120.f;
     return 240.0f / bpm;
 }
 
+float CytusRenderer::applyDiskEasing(float t, DiskEasing e) {
+    constexpr float kPi = 3.14159265358979f;
+    switch (e) {
+        case DiskEasing::SineInOut:
+            return -(std::cos(kPi * t) - 1.f) * 0.5f;
+        case DiskEasing::QuadInOut:
+            return t < 0.5f ? 2.f * t * t
+                            : 1.f - (-2.f * t + 2.f) * (-2.f * t + 2.f) * 0.5f;
+        case DiskEasing::CubicInOut:
+            return t < 0.5f ? 4.f * t * t * t
+                            : 1.f - (-2.f * t + 2.f) * (-2.f * t + 2.f) * (-2.f * t + 2.f) * 0.5f;
+        case DiskEasing::Linear:
+        default:
+            return t;
+    }
+}
+
+void CytusRenderer::buildPhaseTable() {
+    m_phaseTable.clear();
+    if (m_speedEvents.empty()) return;
+
+    // Collect boundary times from speed events
+    std::vector<double> boundaries;
+    boundaries.push_back(0.0);
+    for (auto& ev : m_speedEvents) {
+        boundaries.push_back(ev.startTime);
+        boundaries.push_back(ev.startTime + ev.duration);
+    }
+    // Extend past the last note so phase is defined for the whole song
+    double maxT = 0.0;
+    for (auto& n : m_notes)
+        maxT = std::max(maxT, std::max(n.time, n.endTime) + 2.0);
+    boundaries.push_back(maxT);
+    std::sort(boundaries.begin(), boundaries.end());
+    boundaries.erase(std::unique(boundaries.begin(), boundaries.end(),
+        [](double a, double b) { return std::abs(a - b) < 1e-9; }), boundaries.end());
+
+    // Sample the instantaneous speed at time t using the segment-based
+    // interpolation (same pattern as disk animation sampling).
+    auto sampleSpeed = [&](double t) -> double {
+        if (m_speedEvents.empty() || t < m_speedEvents.front().startTime) return 1.0;
+        // Find the last event with startTime <= t
+        size_t idx = 0;
+        for (size_t i = 1; i < m_speedEvents.size(); ++i)
+            if (m_speedEvents[i].startTime <= t) idx = i;
+        const auto& cur = m_speedEvents[idx];
+        double prev = (idx == 0) ? 1.0 : (double)m_speedEvents[idx - 1].targetSpeed;
+        double segEnd = cur.startTime + cur.duration;
+        if (cur.duration <= 1e-6 || t >= segEnd) return (double)cur.targetSpeed;
+        float u = static_cast<float>((t - cur.startTime) / cur.duration);
+        float e = applyDiskEasing(std::clamp(u, 0.f, 1.f), cur.easing);
+        return prev + e * ((double)cur.targetSpeed - prev);
+    };
+
+    // Build table: numerically integrate speed to get accumulated phase.
+    // Phase is measured in "sweep units" (1.0 = one full sweep = basePeriod).
+    double accPhase = 0.0;
+    m_phaseTable.push_back({0.0, 0.0, sampleSpeed(0.0)});
+
+    for (size_t bi = 1; bi < boundaries.size(); ++bi) {
+        double t0 = boundaries[bi - 1];
+        double t1 = boundaries[bi];
+        if (t1 <= t0) continue;
+
+        // Simpson's rule with 16 subdivisions for accurate easing integration
+        constexpr int N = 16;
+        double dt = (t1 - t0) / N;
+        double integral = 0.0;
+        for (int k = 0; k <= N; ++k) {
+            double tk = t0 + k * dt;
+            double w = (k == 0 || k == N) ? 1.0 : (k % 2 == 1) ? 4.0 : 2.0;
+            integral += w * sampleSpeed(tk);
+        }
+        integral *= dt / 3.0;
+        accPhase += integral / m_basePeriod;
+
+        m_phaseTable.push_back({t1, accPhase, sampleSpeed(t1)});
+    }
+}
+
+double CytusRenderer::interpolatePhase(double t) const {
+    if (m_phaseTable.empty()) return (t < 0 ? 0 : t) / m_basePeriod;
+    if (t <= m_phaseTable.front().time) return m_phaseTable.front().phase;
+    if (t >= m_phaseTable.back().time) {
+        // Extrapolate beyond table at the final speed
+        const auto& last = m_phaseTable.back();
+        double dt = t - last.time;
+        return last.phase + last.speed * dt / m_basePeriod;
+    }
+    // Binary search
+    auto it = std::upper_bound(m_phaseTable.begin(), m_phaseTable.end(), t,
+        [](double tt, const PhaseEntry& e) { return tt < e.time; });
+    const auto& cur = *std::prev(it);
+    const auto& nxt = *it;
+    double segDt = nxt.time - cur.time;
+    if (segDt < 1e-9) return cur.phase;
+    double frac = (t - cur.time) / segDt;
+    return cur.phase + frac * (nxt.phase - cur.phase);
+}
+
 float CytusRenderer::scanLineFrac(double t) const {
-    const double T = (double)scanLinePeriod();
-    if (T <= 1e-6) return 1.f;
-    const double tt    = t < 0.0 ? 0.0 : t;
-    const double phase = std::fmod(tt, 2.0 * T);
-    if (phase < T) return (float)(1.0 - phase / T);
-    return (float)((phase - T) / T);
+    double phase;
+    if (m_phaseTable.empty()) {
+        // Constant-speed fallback
+        const double T = m_basePeriod;
+        if (T <= 1e-6) return 1.f;
+        const double tt = t < 0.0 ? 0.0 : t;
+        const double p = std::fmod(tt, 2.0 * T);
+        if (p < T) return static_cast<float>(1.0 - p / T);
+        return static_cast<float>((p - T) / T);
+    }
+    phase = interpolatePhase(t < 0.0 ? 0.0 : t);
+    // Triangle wave: phase in [0,2) maps to frac bouncing 1→0→1
+    double cyclePhase = std::fmod(phase, 2.0);
+    if (cyclePhase < 0.0) cyclePhase += 2.0;
+    if (cyclePhase < 1.0) return static_cast<float>(1.0 - cyclePhase);
+    return static_cast<float>(cyclePhase - 1.0);
 }
 
 bool CytusRenderer::scanLineGoingUp(double t) const {
-    const double T = (double)scanLinePeriod();
-    if (T <= 1e-6) return true;
-    const double tt    = t < 0.0 ? 0.0 : t;
-    const double phase = std::fmod(tt, 2.0 * T);
-    return phase < T;
+    double phase;
+    if (m_phaseTable.empty()) {
+        const double T = m_basePeriod;
+        if (T <= 1e-6) return true;
+        const double tt = t < 0.0 ? 0.0 : t;
+        phase = std::fmod(tt, 2.0 * T) / T;
+    } else {
+        phase = interpolatePhase(t < 0.0 ? 0.0 : t);
+    }
+    double cyclePhase = std::fmod(phase, 2.0);
+    if (cyclePhase < 0.0) cyclePhase += 2.0;
+    return cyclePhase < 1.0;
 }
 
 void CytusRenderer::onInit(Renderer& renderer, const ChartData& chart,
@@ -40,6 +158,13 @@ void CytusRenderer::onInit(Renderer& renderer, const ChartData& chart,
     m_bpm = chart.timingPoints.empty() ? 120.f
                                        : chart.timingPoints.front().bpm;
     if (m_bpm <= 0.f) m_bpm = 120.f;
+    m_basePeriod = 240.0 / m_bpm;
+
+    // Load and sort speed events, then build phase table
+    m_speedEvents = chart.scanSpeedEvents;
+    std::sort(m_speedEvents.begin(), m_speedEvents.end(),
+              [](const ScanSpeedEvent& a, const ScanSpeedEvent& b) {
+                  return a.startTime < b.startTime; });
 
     for (const auto& n : chart.notes) {
         ScanNote sn{};
@@ -60,12 +185,13 @@ void CytusRenderer::onInit(Renderer& renderer, const ChartData& chart,
                 sn.isTap = true;
             }
         } else if (auto* hold = std::get_if<HoldData>(&n.data)) {
-            sn.sx      = hold->scanX;
-            sn.sy      = hold->scanY;
-            sn.endY    = hold->scanEndY >= 0.f ? hold->scanEndY : hold->scanY;
-            sn.lane    = (int)hold->laneX;
-            sn.isHold  = true;
-            sn.endTime = n.time + hold->duration;
+            sn.sx         = hold->scanX;
+            sn.sy         = hold->scanY;
+            sn.endY       = hold->scanEndY >= 0.f ? hold->scanEndY : hold->scanY;
+            sn.lane       = (int)hold->laneX;
+            sn.isHold     = true;
+            sn.endTime    = n.time + hold->duration;
+            sn.holdSweeps = hold->scanHoldSweeps;
         } else if (auto* flick = std::get_if<FlickData>(&n.data)) {
             sn.sx      = flick->scanX;
             sn.sy      = flick->scanY;
@@ -75,9 +201,15 @@ void CytusRenderer::onInit(Renderer& renderer, const ChartData& chart,
             continue;
         }
 
-        sn.goingUpAtTime = scanLineGoingUp(sn.time);
         m_notes.push_back(std::move(sn));
     }
+
+    // Build phase table after notes are loaded (buildPhaseTable reads m_notes
+    // to determine song length) but before goingUpAtTime is assigned (so the
+    // phase-aware scanLineGoingUp is available).
+    buildPhaseTable();
+    for (auto& sn : m_notes)
+        sn.goingUpAtTime = scanLineGoingUp(sn.time);
 
     onResize(renderer.width(), renderer.height());
 }
@@ -147,17 +279,28 @@ void CytusRenderer::onRender(Renderer& renderer) {
             continue;
 
         const int notePage = T_sweep > 1e-4 ? (int)std::floor(note.time / T_sweep) : 0;
-        if (notePage != curPage) continue;  // different sweep
+        // Multi-sweep holds span multiple pages — check if current page
+        // falls within the note's page range.
+        if (note.isHold && note.holdSweeps > 0) {
+            const int endPage = T_sweep > 1e-4 ? (int)std::floor(note.endTime / T_sweep) : 0;
+            if (curPage < notePage || curPage > endPage) continue;
+        } else {
+            if (notePage != curPage) continue;
+        }
 
-        const double pageStart = (double)notePage * T_sweep;
-        const double pageEnd   = pageStart + T_sweep;
-        const double tailTime  = (note.isHold || note.isSlide)
-                                 ? std::max(note.endTime, note.time) : note.time;
+        // For multi-sweep holds, use the END page boundaries so the hold
+        // stays visible throughout its duration, not just the head page.
+        const double visPageStart = (double)notePage * T_sweep;
+        const int    endPageIdx   = (note.isHold && note.holdSweeps > 0 && T_sweep > 1e-4)
+                                    ? (int)std::floor(note.endTime / T_sweep) : notePage;
+        const double visPageEnd   = (double)(endPageIdx + 1) * T_sweep;
+        const double tailTime     = (note.isHold || note.isSlide)
+                                    ? std::max(note.endTime, note.time) : note.time;
 
         float scale, alpha;
         if (m_songTime <= note.time) {
-            double denom = std::max(0.0001, note.time - pageStart);
-            double u = std::clamp((m_songTime - pageStart) / denom, 0.0, 1.0);
+            double denom = std::max(0.0001, note.time - visPageStart);
+            double u = std::clamp((m_songTime - visPageStart) / denom, 0.0, 1.0);
             scale = (float)(0.30 + 0.70 * u);
             alpha = (float)(0.25 + 0.75 * u);
         } else if (m_songTime <= tailTime) {
@@ -165,7 +308,7 @@ void CytusRenderer::onRender(Renderer& renderer) {
             alpha = 1.f;
         } else {
             double tailDt = m_songTime - tailTime;
-            if (tailDt > scanTailPad || m_songTime > pageEnd) continue;
+            if (tailDt > scanTailPad || m_songTime > visPageEnd) continue;
             scale = 1.f;
             alpha = (float)std::clamp(1.0 - tailDt / scanTailPad, 0.0, 1.0);
         }
@@ -174,63 +317,66 @@ void CytusRenderer::onRender(Renderer& renderer) {
         const glm::vec2 head(scanToScreenX(note.sx), scanToScreenY(note.sy));
 
         if (note.isHold) {
-            const glm::vec2 end(scanToScreenX(note.sx), scanToScreenY(note.endY));
-            // Body = a thin rectangle between head and tail
-            const float bodyH = std::abs(end.y - head.y);
-            const glm::vec2 mid(head.x, (head.y + end.y) * 0.5f);
-            drawQuadAt(mid, {NOTE_RADIUS * 0.5f, bodyH},
-                       {0.3f, 0.7f, 1.f, alpha * 0.45f});
+            const float holdW = NOTE_RADIUS * 0.5f;
+            if (note.holdSweeps == 0) {
+                // Single-sweep hold: simple rectangle
+                const glm::vec2 end(scanToScreenX(note.sx), scanToScreenY(note.endY));
+                const float bodyH = std::abs(end.y - head.y);
+                const glm::vec2 mid(head.x, (head.y + end.y) * 0.5f);
+                drawQuadAt(mid, {holdW, bodyH}, {0.3f, 0.7f, 1.f, alpha * 0.45f});
+                drawQuadAt(end, {NOTE_RADIUS, NOTE_RADIUS},
+                           {0.3f, 0.7f, 1.f, alpha * 0.8f});
+            } else {
+                // Multi-sweep hold: draw body segments through each sweep
+                bool sweepUp = note.goingUpAtTime;
+                float segStartY = head.y;
+                for (int s = 0; s <= note.holdSweeps; ++s) {
+                    float segEndY;
+                    if (s < note.holdSweeps) {
+                        // Full sweep to turn boundary
+                        segEndY = scanToScreenY(sweepUp ? 0.f : 1.f);
+                    } else {
+                        // Final sweep to tail
+                        segEndY = scanToScreenY(note.endY);
+                    }
+                    float bodyH = std::abs(segEndY - segStartY);
+                    float midY  = (segStartY + segEndY) * 0.5f;
+                    drawQuadAt({head.x, midY}, {holdW, bodyH},
+                               {0.3f, 0.7f, 1.f, alpha * 0.45f});
+                    segStartY = segEndY;
+                    sweepUp = !sweepUp;
+                }
+                // Tail cap
+                glm::vec2 end(scanToScreenX(note.sx), scanToScreenY(note.endY));
+                drawQuadAt(end, {NOTE_RADIUS, NOTE_RADIUS},
+                           {0.3f, 0.7f, 1.f, alpha * 0.8f});
+            }
             // Head
             drawQuadAt(head, {sz, sz}, {0.3f, 0.7f, 1.f, alpha});
-            // Tail cap
-            drawQuadAt(end, {NOTE_RADIUS, NOTE_RADIUS},
-                       {0.3f, 0.7f, 1.f, alpha * 0.8f});
             continue;
         }
 
         if (note.isSlide) {
-            // Catmull-Rom tessellated body — matches the editor's smooth
-            // preview so runtime and authoring look identical.
+            // Straight-line segments between control points (Cytus-style).
             if (note.path.size() >= 2) {
-                constexpr int SUBDIV = 12;
-                auto cr = [](float p0, float p1, float p2, float p3, float t) {
-                    float t2 = t * t, t3 = t2 * t;
-                    return 0.5f * ((2.f * p1) +
-                                   (-p0 + p2) * t +
-                                   (2.f*p0 - 5.f*p1 + 4.f*p2 - p3) * t2 +
-                                   (-p0 + 3.f*p1 - 3.f*p2 + p3) * t3);
-                };
-                glm::vec2 prev(scanToScreenX(note.path.front().first),
-                               scanToScreenY(note.path.front().second));
-                for (size_t i = 0; i + 1 < note.path.size(); ++i) {
-                    const auto& p1 = note.path[i];
-                    const auto& p2 = note.path[i + 1];
-                    const auto& p0 = (i == 0) ? p1 : note.path[i - 1];
-                    const auto& p3 = (i + 2 < note.path.size()) ? note.path[i + 2] : p2;
-                    for (int s = 1; s <= SUBDIV; ++s) {
-                        float t = (float)s / (float)SUBDIV;
-                        float nx = cr(p0.first,  p1.first,  p2.first,  p3.first,  t);
-                        float ny = cr(p0.second, p1.second, p2.second, p3.second, t);
-                        glm::vec2 cur(scanToScreenX(nx), scanToScreenY(ny));
-                        renderer.lines().drawLine(prev, cur, NOTE_RADIUS * 0.4f,
-                                                  {0.85f, 0.5f, 1.f, alpha * 0.55f});
-                        prev = cur;
-                    }
+                glm::vec2 prev(scanToScreenX(note.path[0].first),
+                               scanToScreenY(note.path[0].second));
+                for (size_t i = 1; i < note.path.size(); ++i) {
+                    glm::vec2 cur(scanToScreenX(note.path[i].first),
+                                  scanToScreenY(note.path[i].second));
+                    renderer.lines().drawLine(prev, cur, NOTE_RADIUS * 0.4f,
+                                              {0.85f, 0.5f, 1.f, alpha * 0.55f});
+                    prev = cur;
                 }
             }
-            // Head + sample markers
+            // Head marker
             drawQuadAt(head, {sz, sz}, {0.85f, 0.5f, 1.f, alpha});
-            if (note.path.size() >= 2 && note.slideEndTime > note.time) {
-                const float total = (float)(note.slideEndTime - note.time);
-                for (float sp : note.samplePoints) {
-                    float u = std::clamp(sp / std::max(0.0001f, total), 0.f, 1.f);
-                    size_t idx = (size_t)(u * (note.path.size() - 1));
-                    if (idx >= note.path.size()) idx = note.path.size() - 1;
-                    glm::vec2 pp(scanToScreenX(note.path[idx].first),
-                                 scanToScreenY(note.path[idx].second));
-                    drawQuadAt(pp, {NOTE_RADIUS * 0.6f, NOTE_RADIUS * 0.6f},
-                               {1.f, 1.f, 1.f, alpha});
-                }
+            // Node markers at each control point after the head
+            for (size_t i = 1; i < note.path.size(); ++i) {
+                glm::vec2 pp(scanToScreenX(note.path[i].first),
+                             scanToScreenY(note.path[i].second));
+                drawQuadAt(pp, {NOTE_RADIUS * 0.6f, NOTE_RADIUS * 0.6f},
+                           {1.f, 1.f, 1.f, alpha});
             }
             continue;
         }
@@ -329,6 +475,54 @@ void CytusRenderer::showJudgment(int lane, Judgment judgment) {
         if (d < bestDist) { bestDist = d; best = &note; }
     }
     if (best) best->isHit = true;
+}
+
+// Linear interpolation along a piecewise-linear path at parameter u ∈ [0,1].
+static std::pair<float,float> linearPathEval(
+    const std::vector<std::pair<float,float>>& pts, float u) {
+    if (pts.empty()) return {0.f, 0.f};
+    if (pts.size() == 1 || u <= 0.f) return pts.front();
+    if (u >= 1.f) return pts.back();
+    float scaled = u * static_cast<float>(pts.size() - 1);
+    size_t i = static_cast<size_t>(scaled);
+    if (i >= pts.size() - 1) i = pts.size() - 2;
+    float t = scaled - static_cast<float>(i);
+    return { pts[i].first  + t * (pts[i+1].first  - pts[i].first),
+             pts[i].second + t * (pts[i+1].second - pts[i].second) };
+}
+
+bool CytusRenderer::slideExpectedPos(uint32_t noteId, double songTime,
+                                     glm::vec2& outScreen) const {
+    for (auto& note : m_notes) {
+        if (note.id != noteId || !note.isSlide) continue;
+        if (note.path.size() < 2 || note.slideEndTime <= note.time) return false;
+        float total = static_cast<float>(note.slideEndTime - note.time);
+        float elapsed = static_cast<float>(songTime - note.time);
+        float u = std::clamp(elapsed / std::max(0.0001f, total), 0.f, 1.f);
+        auto [px, py] = linearPathEval(note.path, u);
+        outScreen = {scanToScreenX(px), scanToScreenY(py)};
+        return true;
+    }
+    return false;
+}
+
+std::vector<CytusRenderer::SlideTick> CytusRenderer::consumeSlideTicks(double songTime) {
+    std::vector<SlideTick> ticks;
+    for (auto& note : m_notes) {
+        if (!note.isSlide || note.path.size() < 2) continue;
+        if (note.samplePoints.empty()) continue;
+        float total = static_cast<float>(note.slideEndTime - note.time);
+        while (note.nextSampleIdx < note.samplePoints.size()) {
+            float spOff = note.samplePoints[note.nextSampleIdx];
+            double absTime = note.time + spOff;
+            if (absTime > songTime) break;
+            float u = std::clamp(spOff / std::max(0.0001f, total), 0.f, 1.f);
+            auto [px, py] = linearPathEval(note.path, u);
+            ticks.push_back({note.id, scanToScreenX(px), scanToScreenY(py)});
+            note.nextSampleIdx++;
+        }
+    }
+    return ticks;
 }
 
 void CytusRenderer::onShutdown(Renderer& /*renderer*/) {

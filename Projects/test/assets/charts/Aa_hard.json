@@ -742,5 +742,10 @@
     {"time": 171.56, "type": "tap", "lane": 0},
     {"time": 171.96, "type": "tap", "lane": 1},
     {"time": 172.36, "type": "tap", "lane": 2}
-  ]
+  ],
+ "diskAnimation": {
+   "rotations": [],
+   "moves": [],
+   "scales": [{"startTime": 0, "duration": 1, "target": 0.57, "easing": "sineInOut"}]
+ }
 }

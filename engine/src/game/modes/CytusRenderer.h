@@ -35,47 +35,75 @@ public:
     // expanding-ring hit effect.
     void markNoteHit(uint32_t noteId);
 
+    // Evaluate expected screen position along a slide's path at `songTime`.
+    // Returns false if noteId is not a slide or time is out of range.
+    bool slideExpectedPos(uint32_t noteId, double songTime,
+                          glm::vec2& outScreen) const;
+
+    // Return sample-point times (absolute) for a slide note that haven't
+    // been consumed yet. Marks consumed ones internally.
+    struct SlideTick {
+        uint32_t noteId;
+        float    expectedX, expectedY; // screen-space expected position
+    };
+    std::vector<SlideTick> consumeSlideTicks(double songTime);
+
 private:
     // ── Scan-line schedule ─────────────────────────────────────────────
-    // Period = 240/BPM seconds per sweep (1 bar @ 4/4). Computed in
-    // onInit from the chart's first TimingPoint (fallback 120 BPM).
-    float scanLinePeriod() const;
-    float scanLineFrac(double t) const;  // normalized [0..1], 0 = top
-    bool  scanLineGoingUp(double t) const;
+    // Base period = 240/BPM seconds per sweep (1 bar @ 4/4).
+    // With speed events, the actual scan position is driven by a
+    // precomputed phase-accumulation table.
+    float  scanLinePeriod() const;             // base period (constant)
+    float  scanLineFrac(double t) const;       // normalized [0..1], 0 = top
+    bool   scanLineGoingUp(double t) const;
+
+    // Phase-table helpers
+    void   buildPhaseTable();
+    double interpolatePhase(double t) const;
+    static float applyDiskEasing(float t, DiskEasing e);
 
     // Author-space → screen conversion
     float scanToScreenX(float nx) const { return nx * (float)m_width;  }
     float scanToScreenY(float ny) const { return ny * (float)m_height; }
 
     struct ScanNote {
-        uint32_t id         = 0;  // NoteEvent.id from chart
-        double time;              // hit time (head)
-        float  sx, sy;            // normalized head position
+        uint32_t id         = 0;
+        double time;
+        float  sx, sy;
         bool   isTap      = false;
         bool   isFlick    = false;
         bool   isHold     = false;
         bool   isSlide    = false;
-        int    lane       = 0;    // for legacy showJudgment
+        int    lane       = 0;
         bool   goingUpAtTime = true;
 
-        // Hold-only
-        float  endY       = 0.f;  // normalized
-        double endTime    = 0.0;
+        float  endY        = 0.f;
+        double endTime     = 0.0;
+        int    holdSweeps  = 0;   // extra sweeps the hold crosses
 
-        // Slide-only
-        std::vector<std::pair<float,float>> path; // normalized
+        std::vector<std::pair<float,float>> path;
         double slideEndTime = 0.0;
-        std::vector<float>  samplePoints; // seconds from head
+        std::vector<float>  samplePoints;
 
-        // Runtime state
-        bool   isHit     = false;
-        float  hitTimer  = 0.f;
+        bool   isHit         = false;
+        float  hitTimer      = 0.f;
+        size_t nextSampleIdx = 0;
+    };
+
+    // Phase accumulation table for variable-speed scan line
+    struct PhaseEntry {
+        double time;
+        double phase;  // accumulated phase (1.0 = one full sweep)
+        double speed;  // instantaneous speed multiplier at this time
     };
 
     Camera   m_camera;
     uint32_t m_width = 0, m_height = 0;
     double   m_songTime = 0.0;
     float    m_bpm      = 120.f;
+    double   m_basePeriod = 2.0;
 
-    std::vector<ScanNote> m_notes;
+    std::vector<ScanNote>       m_notes;
+    std::vector<ScanSpeedEvent> m_speedEvents;
+    std::vector<PhaseEntry>     m_phaseTable;
 };

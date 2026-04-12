@@ -3,7 +3,6 @@
 #include "gameplay/JudgmentDisplay.h"
 #include <vector>
 #include <unordered_set>
-#include <array>
 #include <glm/glm.hpp>
 
 class BandoriRenderer : public GameModeRenderer {
@@ -35,7 +34,7 @@ private:
 
     std::vector<NoteEvent>       m_notes;
     std::unordered_set<uint32_t> m_hitNotes;
-    std::array<JudgmentDisplay, 12> m_judgmentDisplays;  // up to 12 tracks
+    std::vector<JudgmentDisplay> m_judgmentDisplays;
 
     // Lane count (set from chart or config)
     int m_laneCount = 7;

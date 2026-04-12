@@ -52,7 +52,6 @@
               ],
               "scale": 1.0
             },
-            "dimension": "2D",
             "fcImage": "",
             "goodMs": 100.0,
             "goodScore": 600,
@@ -82,7 +81,7 @@
               "scale": 1.0
             },
             "trackCount": 7,
-            "type": "dropNotes"
+            "type": "circle"
           },
           "name": "Aa",
           "score": 158300

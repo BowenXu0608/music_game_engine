@@ -77,6 +77,7 @@ struct HoldData {
     float scanX    = 0.f;
     float scanY    = 0.f;
     float scanEndY = -1.f;  // -1 = unused
+    int   scanHoldSweeps = 0; // extra sweeps the hold crosses (0 = single sweep)
 
     float effectiveEndLane() const {
         if (!waypoints.empty()) return static_cast<float>(waypoints.back().lane);
@@ -233,6 +234,91 @@ struct JudgmentLineEvent {
     std::vector<NoteEvent> attachedNotes;
 };
 
+// ── Lanota / circle-mode disk animation ─────────────────────────────────────
+//
+// Segment-based keyframes: each event describes a transform change that
+// starts at `startTime` and finishes `duration` seconds later. Between the
+// end of one event and the start of the next, the value holds. Before the
+// first event, the value is the base (0 rot, {0,0} pos, 1.0 scale).
+
+enum class DiskEasing { Linear = 0, SineInOut = 1, QuadInOut = 2, CubicInOut = 3 };
+
+struct DiskRotationEvent {
+    double     startTime   = 0.0;
+    double     duration    = 0.0;
+    float      targetAngle = 0.f;   // radians, absolute
+    DiskEasing easing      = DiskEasing::SineInOut;
+};
+
+struct DiskMoveEvent {
+    double     startTime = 0.0;
+    double     duration  = 0.0;
+    glm::vec2  target{0.f, 0.f};    // world-space XY of the disk center
+    DiskEasing easing    = DiskEasing::SineInOut;
+};
+
+struct DiskScaleEvent {
+    double     startTime   = 0.0;
+    double     duration    = 0.0;
+    float      targetScale = 1.f;   // multiplies base radii (1.0 = untouched)
+    DiskEasing easing      = DiskEasing::SineInOut;
+};
+
+struct DiskAnimation {
+    std::vector<DiskRotationEvent> rotations;
+    std::vector<DiskMoveEvent>     moves;
+    std::vector<DiskScaleEvent>    scales;
+};
+
+// ── Scan-line speed events ──────────────────────────────────────────────────
+//
+// Segment-based speed multiplier changes for the Cytus-style scan line.
+// Identical shape to disk animation events: the speed transitions from
+// the previous value to targetSpeed over `duration` seconds starting at
+// `startTime`.  Between events the speed holds.  Before the first event,
+// speed = 1.0 (the base BPM speed).
+
+struct ScanSpeedEvent {
+    double     startTime   = 0.0;
+    double     duration    = 0.0;
+    float      targetSpeed = 1.0f;  // multiplier: 1.0 = base BPM, 2.0 = 2x fast
+    DiskEasing easing      = DiskEasing::SineInOut;
+};
+
+// ── Shared Catmull-Rom path interpolation ───────────────────────────────────
+//
+// Evaluate a Catmull-Rom spline along a path of (x,y) pairs.
+// `u` is in [0,1] spanning the entire path.  Used by both CytusRenderer
+// (gameplay) and SongEditor (preview) for smooth slide curve evaluation.
+
+inline std::pair<float,float> catmullRomPathEval(
+    const std::vector<std::pair<float,float>>& pts, float u)
+{
+    if (pts.empty()) return {0.f, 0.f};
+    if (pts.size() == 1 || u <= 0.f) return pts.front();
+    if (u >= 1.f) return pts.back();
+
+    float scaled = u * static_cast<float>(pts.size() - 1);
+    size_t i = static_cast<size_t>(scaled);
+    if (i >= pts.size() - 1) i = pts.size() - 2;
+    float t = scaled - static_cast<float>(i);
+
+    const auto& p1 = pts[i];
+    const auto& p2 = pts[i + 1];
+    const auto& p0 = (i == 0) ? p1 : pts[i - 1];
+    const auto& p3 = (i + 2 < pts.size()) ? pts[i + 2] : p2;
+
+    auto cr = [](float a, float b, float c, float d, float t) {
+        float t2 = t * t, t3 = t2 * t;
+        return 0.5f * ((2.f * b) +
+                       (-a + c) * t +
+                       (2.f*a - 5.f*b + 4.f*c - d) * t2 +
+                       (-a + 3.f*b - 3.f*c + d) * t3);
+    };
+    return { cr(p0.first,  p1.first,  p2.first,  p3.first,  t),
+             cr(p0.second, p1.second, p2.second, p3.second, t) };
+}
+
 // ── Unified chart data ───────────────────────────────────────────────────────
 
 struct ChartData {
@@ -243,4 +329,7 @@ struct ChartData {
     std::vector<TimingPoint>       timingPoints;
     std::vector<NoteEvent>         notes;
     std::vector<JudgmentLineEvent> judgmentLines;  // Phigros only
+
+    DiskAnimation diskAnimation;                   // Lanota / circle mode
+    std::vector<ScanSpeedEvent> scanSpeedEvents;   // Cytus scan-line speed
 };

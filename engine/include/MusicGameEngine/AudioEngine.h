@@ -19,6 +19,9 @@ public:
 
     bool isPlaying() const { return m_playing; }
 
+    // Short click SFX played on per-hold sample-tick hits.
+    void playClickSfx();
+
 private:
     struct Impl;
     Impl* m_impl = nullptr;

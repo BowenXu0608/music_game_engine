@@ -33,6 +33,7 @@ public:
     static constexpr float HIT_RADIUS_PX = 90.0f;
 
     void init(const ChartData& chart);
+    void setTrackCount(int count) { m_trackCount = count; }
     std::vector<MissedNote> update(double songTime);
 
     // Pop any sample-point ticks that have elapsed since the last call.
@@ -54,6 +55,11 @@ public:
 
     // Lane-based hit (Bandori, Cytus, Lanota)
     std::optional<HitResult> checkHit(int lane, double songTime);
+
+    // Consume any Drag notes in `lane` within a generous timing window.
+    // Drag notes auto-hit when the player's finger passes through the lane
+    // (no precise tap needed). Returns all consumed drags.
+    std::vector<HitResult> consumeDrags(int lane, double songTime);
 
     // Id-based hit consumption — used when the caller (e.g. LanotaRenderer's
     // touch picker) has already chosen the specific note geometrically and
@@ -79,7 +85,8 @@ public:
                                                double songTime);
 
     // Id-based hold begin — caller already picked the specific HoldData note.
-    std::optional<uint32_t> beginHoldById(uint32_t noteId, double songTime);
+    // Returns HitResult with timingDelta for the hold head judgment.
+    std::optional<HitResult> beginHoldById(uint32_t noteId, double songTime);
 
     // Finalise a tracked hold; returns HitResult with timingDelta = release error
     std::optional<HitResult> endHold(uint32_t noteId, double releaseTime);
@@ -90,7 +97,6 @@ public:
     // Average position error across all slide samples (0 = perfect)
     float getSlideAccuracy(uint32_t noteId) const;
 
-private:
     struct ActiveHold {
         uint32_t  noteId;
         double    startTime;
@@ -102,12 +108,21 @@ private:
         int       consecutiveMissedTicks = 0;    // run length of bad sample ticks
         bool      broken = false;                // set when a break threshold is crossed
         HoldData  holdData{};                    // captured for evalHoldLaneAt
-        std::vector<glm::vec2> positionSamples;  // (Arcaea arc sampling)
+        std::vector<glm::vec2> positionSamples;  // (Arcaea arc sampling / slide tracking)
         std::vector<float>     sampleOffsets;    // authored hold sample point times
         size_t                 nextSampleIdx = 0;
     };
 
+    // Access an active hold's state (read-only). Returns nullptr if not found.
+    const ActiveHold* getActiveHold(uint32_t noteId) const;
+
+private:
+
+    // Convert LanotaRingData angle to integer lane (keyboard compat)
+    int angleToLane(float angle) const;
+
     std::vector<NoteEvent>                    m_activeNotes;
     std::unordered_map<uint32_t, ActiveHold>  m_activeHolds;
     size_t m_nextNoteIndex = 0;
+    int    m_trackCount    = 7;
 };

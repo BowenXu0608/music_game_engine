@@ -22,6 +22,91 @@
 
 namespace fs = std::filesystem;
 
+// ── Disk animation sampling helpers (used by both scene preview and
+//    chart timeline lane-mask builder) ────────────────────────────────────────
+//
+// Mirrors LanotaRenderer::{getDiskCenter, getCurrentRotation, getDiskScale}
+// so the editor can evaluate the current disk pose at any song time without
+// instantiating the gameplay renderer.  Keep in sync with LanotaRenderer.cpp.
+
+namespace {
+    constexpr float kPi_ = 3.14159265358979f;
+
+    float applyDiskEasing(float t, DiskEasing e) {
+        switch (e) {
+            case DiskEasing::SineInOut:
+                return -(std::cos(kPi_ * t) - 1.f) * 0.5f;
+            case DiskEasing::QuadInOut:
+                return t < 0.5f ? 2.f * t * t
+                                 : 1.f - (-2.f * t + 2.f) * (-2.f * t + 2.f) * 0.5f;
+            case DiskEasing::CubicInOut:
+                return t < 0.5f ? 4.f * t * t * t
+                                 : 1.f - (-2.f * t + 2.f) * (-2.f * t + 2.f) * (-2.f * t + 2.f) * 0.5f;
+            case DiskEasing::Linear:
+            default:
+                return t;
+        }
+    }
+
+    template <typename EventT, typename ValueT, typename GetTarget>
+    ValueT sampleSegment(double songTime,
+                         const std::vector<EventT>& events,
+                         const ValueT& base,
+                         GetTarget getTarget) {
+        if (events.empty() || songTime < events.front().startTime) return base;
+        size_t i = 0;
+        for (; i + 1 < events.size(); ++i)
+            if (events[i + 1].startTime > songTime) break;
+        const EventT& cur = events[i];
+        ValueT prev = (i == 0) ? base : getTarget(events[i - 1]);
+        double segEnd = cur.startTime + cur.duration;
+        if (cur.duration <= 1e-6 || songTime >= segEnd) return getTarget(cur);
+        float t = static_cast<float>((songTime - cur.startTime) / cur.duration);
+        float e = applyDiskEasing(std::clamp(t, 0.f, 1.f), cur.easing);
+        return prev + e * (getTarget(cur) - prev);
+    }
+
+    glm::vec2 sampleDiskCenter(double t, const std::vector<DiskMoveEvent>& ev) {
+        return sampleSegment<DiskMoveEvent, glm::vec2>(
+            t, ev, {0.f, 0.f},
+            [](const DiskMoveEvent& e){ return e.target; });
+    }
+    float sampleDiskScale(double t, const std::vector<DiskScaleEvent>& ev) {
+        return sampleSegment<DiskScaleEvent, float>(
+            t, ev, 1.f,
+            [](const DiskScaleEvent& e){ return e.targetScale; });
+    }
+    float sampleDiskRotation(double t, const std::vector<DiskRotationEvent>& ev) {
+        return sampleSegment<DiskRotationEvent, float>(
+            t, ev, 0.f,
+            [](const DiskRotationEvent& e){ return e.targetAngle; });
+    }
+
+    // Reachability predicate bounds match the FOV/Z=0 hit plane used by
+    // LanotaRenderer (FOV_Y=60°, eye at z=4): ~±3.0 world-units horizontally
+    // and ~±2.3 vertically, shrunk by a 5% inner margin.
+    constexpr float kPlayHalfX = 3.0f * 0.95f;
+    constexpr float kPlayHalfY = 2.3f * 0.95f;
+    constexpr float kBaseRadius = 2.4f;  // LanotaRenderer BASE_RADIUS
+
+    uint32_t laneMaskForTransform(int trackCount,
+                                  const glm::vec2& center,
+                                  float scale,
+                                  float rotation) {
+        if (trackCount <= 0) return 0xFFFFFFFFu;
+        const float outerR = kBaseRadius * scale;
+        uint32_t mask = 0;
+        for (int lane = 0; lane < trackCount && lane < 32; ++lane) {
+            float a = kPi_ * 0.5f - (static_cast<float>(lane) / trackCount) * (kPi_ * 2.f) + rotation;
+            float lx = center.x + std::cos(a) * outerR;
+            float ly = center.y + std::sin(a) * outerR;
+            if (std::abs(lx) > kPlayHalfX || std::abs(ly) > kPlayHalfY) continue;
+            mask |= (1u << lane);
+        }
+        return mask;
+    }
+} // namespace
+
 // ── Vulkan lifecycle ─────────────────────────────────────────────────────────
 
 void SongEditor::initVulkan(VulkanContext& ctx, BufferManager& bufMgr,
@@ -74,9 +159,10 @@ void SongEditor::setSong(SongInfo* song, const std::string& projectPath) {
                     if (!tap->samplePoints.empty()) en.samplePoints = tap->samplePoints;
                 } else if (auto* hold = std::get_if<HoldData>(&n.data)) {
                     lane = (int)hold->laneX;
-                    en.scanX    = hold->scanX;
-                    en.scanY    = hold->scanY;
-                    en.scanEndY = hold->scanEndY;
+                    en.scanX           = hold->scanX;
+                    en.scanY           = hold->scanY;
+                    en.scanEndY        = hold->scanEndY;
+                    en.scanHoldSweeps  = hold->scanHoldSweeps;
                 } else if (auto* flick = std::get_if<FlickData>(&n.data)) {
                     lane = (int)flick->laneX;
                     en.scanX = flick->scanX;
@@ -122,6 +208,16 @@ void SongEditor::setSong(SongInfo* song, const std::string& projectPath) {
                 }
                 edNotes.push_back(en);
             }
+
+            // Disk animation (circle mode) — copy into the per-difficulty
+            // editor state so the author can edit existing keyframes.
+            m_diffDiskRot  [(int)diff] = chart.diskAnimation.rotations;
+            m_diffDiskMove [(int)diff] = chart.diskAnimation.moves;
+            m_diffDiskScale[(int)diff] = chart.diskAnimation.scales;
+            m_diffScanSpeed[(int)diff] = chart.scanSpeedEvents;
+            m_laneMaskDirty = true;
+            m_scanPhaseDirty = true;
+
             std::cout << "[SongEditor] Loaded " << edNotes.size() << " notes from " << chartRel << "\n";
         } catch (...) {
             // Chart file doesn't exist or can't be parsed — start empty
@@ -888,6 +984,298 @@ void SongEditor::renderGameModeConfig() {
             ImGui::SetTooltip("Rewrite every note in the current difficulty\n"
                               "to use the Default Note Width above.");
         ImGui::Spacing();
+
+        // ── Disk Animation (rotate / scale / move keyframes) ────────────
+        // Each keyframe has a startTime (when the change begins) and a
+        // duration (how long the transform takes to reach its target).
+        // Start time is captured from the playhead; duration is either
+        // typed in the panel or dragged on the Disk FX timeline lane.
+        if (ImGui::CollapsingHeader("Disk Animation", ImGuiTreeNodeFlags_DefaultOpen)) {
+            ImGui::Spacing();
+
+            // Track tabs.
+            struct TrackOpt { const char* label; DiskKfTrack v; };
+            TrackOpt tracks[] = {
+                {"Rotate", DiskKfTrack::Rotation},
+                {"Scale",  DiskKfTrack::Scale   },
+                {"Move",   DiskKfTrack::Move    },
+            };
+            float tw = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x * 2) / 3.f;
+            for (int ti = 0; ti < 3; ++ti) {
+                bool sel = (m_diskKfTrack == tracks[ti].v);
+                if (sel) {
+                    ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.2f, 0.4f, 0.8f, 1.0f));
+                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.3f, 0.5f, 0.9f, 1.0f));
+                    ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(0.15f, 0.35f, 0.75f, 1.0f));
+                }
+                if (ImGui::Button(tracks[ti].label, ImVec2(tw, 22))) {
+                    m_diskKfTrack    = tracks[ti].v;
+                    m_selectedDiskKf = -1;
+                }
+                if (sel) ImGui::PopStyleColor(3);
+                if (ti < 2) ImGui::SameLine();
+            }
+            ImGui::Spacing();
+
+            // Count for the current track.
+            auto trackCount = [&]() -> size_t {
+                switch (m_diskKfTrack) {
+                    case DiskKfTrack::Rotation: return diskRot().size();
+                    case DiskKfTrack::Scale:    return diskScale().size();
+                    case DiskKfTrack::Move:     return diskMove().size();
+                }
+                return 0;
+            };
+
+            // Add at playhead — the answer to "how to set start time easily".
+            char addLabel[64];
+            snprintf(addLabel, sizeof(addLabel), "+ Add at Playhead (t=%.2fs)", m_sceneTime);
+            if (ImGui::Button(addLabel, ImVec2(-1, 26))) {
+                switch (m_diskKfTrack) {
+                    case DiskKfTrack::Rotation: {
+                        DiskRotationEvent e{};
+                        e.startTime   = m_sceneTime;
+                        e.duration    = 1.0;
+                        e.targetAngle = 0.f;
+                        diskRot().push_back(e);
+                        std::sort(diskRot().begin(), diskRot().end(),
+                                  [](const DiskRotationEvent& a, const DiskRotationEvent& b){ return a.startTime < b.startTime; });
+                        m_selectedDiskKf = (int)diskRot().size() - 1;
+                        break;
+                    }
+                    case DiskKfTrack::Scale: {
+                        DiskScaleEvent e{};
+                        e.startTime   = m_sceneTime;
+                        e.duration    = 1.0;
+                        e.targetScale = 1.f;
+                        diskScale().push_back(e);
+                        std::sort(diskScale().begin(), diskScale().end(),
+                                  [](const DiskScaleEvent& a, const DiskScaleEvent& b){ return a.startTime < b.startTime; });
+                        m_selectedDiskKf = (int)diskScale().size() - 1;
+                        break;
+                    }
+                    case DiskKfTrack::Move: {
+                        DiskMoveEvent e{};
+                        e.startTime = m_sceneTime;
+                        e.duration  = 1.0;
+                        e.target    = {0.f, 0.f};
+                        diskMove().push_back(e);
+                        std::sort(diskMove().begin(), diskMove().end(),
+                                  [](const DiskMoveEvent& a, const DiskMoveEvent& b){ return a.startTime < b.startTime; });
+                        m_selectedDiskKf = (int)diskMove().size() - 1;
+                        break;
+                    }
+                }
+                m_laneMaskDirty = true;
+            }
+
+            ImGui::Spacing();
+            ImGui::TextDisabled("%zu keyframe(s)", trackCount());
+            ImGui::Spacing();
+
+            // Inline list of every keyframe on the active track. Each row
+            // is a selectable button — click to edit it below. Displayed in
+            // a scrollable child so long lists stay usable.
+            {
+                const float rowH  = ImGui::GetFrameHeight();
+                const float listH = std::min(6.f, (float)std::max<size_t>(1, trackCount())) * (rowH + 4.f) + 8.f;
+                ImGui::BeginChild("##diskKfList", ImVec2(-1, listH), true);
+                auto renderRow = [&](int idx, const char* summary) {
+                    bool sel = (m_selectedDiskKf == idx);
+                    ImGui::PushID(idx);
+                    if (ImGui::Selectable(summary, sel, 0, ImVec2(0, rowH))) {
+                        m_selectedDiskKf = idx;
+                    }
+                    ImGui::PopID();
+                };
+                char buf[96];
+                switch (m_diskKfTrack) {
+                    case DiskKfTrack::Rotation:
+                        for (int i = 0; i < (int)diskRot().size(); ++i) {
+                            const auto& e = diskRot()[i];
+                            snprintf(buf, sizeof(buf),
+                                     "#%d  t=%.2fs  dur=%.2fs  %.0f°",
+                                     i, e.startTime, e.duration,
+                                     e.targetAngle * 57.2957795f);
+                            renderRow(i, buf);
+                        }
+                        break;
+                    case DiskKfTrack::Scale:
+                        for (int i = 0; i < (int)diskScale().size(); ++i) {
+                            const auto& e = diskScale()[i];
+                            snprintf(buf, sizeof(buf),
+                                     "#%d  t=%.2fs  dur=%.2fs  %.2f×",
+                                     i, e.startTime, e.duration, e.targetScale);
+                            renderRow(i, buf);
+                        }
+                        break;
+                    case DiskKfTrack::Move:
+                        for (int i = 0; i < (int)diskMove().size(); ++i) {
+                            const auto& e = diskMove()[i];
+                            snprintf(buf, sizeof(buf),
+                                     "#%d  t=%.2fs  dur=%.2fs  (%.2f,%.2f)",
+                                     i, e.startTime, e.duration,
+                                     e.target.x, e.target.y);
+                            renderRow(i, buf);
+                        }
+                        break;
+                }
+                if (trackCount() == 0)
+                    ImGui::TextDisabled("No keyframes yet — use + Add at Playhead.");
+                ImGui::EndChild();
+            }
+            ImGui::Spacing();
+
+            // Selected keyframe editor.
+            const auto easingCombo = [](const char* label, DiskEasing& e) {
+                const char* names[] = {"Linear", "SineInOut", "QuadInOut", "CubicInOut"};
+                int cur = (int)e;
+                if (ImGui::Combo(label, &cur, names, 4)) e = (DiskEasing)cur;
+            };
+
+            int sel = m_selectedDiskKf;
+            if (sel >= 0 && sel < (int)trackCount()) {
+                ImGui::Separator();
+                ImGui::Text("Selected keyframe #%d", sel);
+                ImGui::Spacing();
+
+                auto editCommon = [&](double& startTime, double& duration, DiskEasing& easing) {
+                    float st = (float)startTime;
+                    if (ImGui::InputFloat("Start (s)", &st, 0.05f, 0.25f, "%.3f")) {
+                        startTime = std::max(0.0, (double)st);
+                        m_laneMaskDirty = true;
+                    }
+                    float du = (float)duration;
+                    if (ImGui::InputFloat("Duration (s)", &du, 0.05f, 0.25f, "%.3f")) {
+                        duration = std::max(0.0, (double)du);
+                        m_laneMaskDirty = true;
+                    }
+                    easingCombo("Easing", easing);
+                };
+
+                bool remove = false;
+                switch (m_diskKfTrack) {
+                    case DiskKfTrack::Rotation: {
+                        auto& ev = diskRot()[sel];
+                        editCommon(ev.startTime, ev.duration, ev.easing);
+                        float deg = ev.targetAngle * 57.2957795f;
+                        if (ImGui::SliderFloat("Target angle (deg)", &deg, -360.f, 360.f, "%.1f")) {
+                            ev.targetAngle = deg * 0.01745329252f;
+                            m_laneMaskDirty = true;
+                        }
+                        if (ImGui::Button("Delete##kf", ImVec2(-1, 22))) remove = true;
+                        if (remove) {
+                            diskRot().erase(diskRot().begin() + sel);
+                            m_selectedDiskKf = -1;
+                            m_laneMaskDirty = true;
+                        }
+                        break;
+                    }
+                    case DiskKfTrack::Scale: {
+                        auto& ev = diskScale()[sel];
+                        editCommon(ev.startTime, ev.duration, ev.easing);
+                        if (ImGui::SliderFloat("Target scale", &ev.targetScale, 0.1f, 3.0f, "%.2f×"))
+                            m_laneMaskDirty = true;
+                        if (ImGui::Button("Delete##kf", ImVec2(-1, 22))) remove = true;
+                        if (remove) {
+                            diskScale().erase(diskScale().begin() + sel);
+                            m_selectedDiskKf = -1;
+                            m_laneMaskDirty = true;
+                        }
+                        break;
+                    }
+                    case DiskKfTrack::Move: {
+                        auto& ev = diskMove()[sel];
+                        editCommon(ev.startTime, ev.duration, ev.easing);
+                        float xy[2] = {ev.target.x, ev.target.y};
+                        if (ImGui::SliderFloat2("Target XY (world)", xy, -5.f, 5.f, "%.2f")) {
+                            ev.target = {xy[0], xy[1]};
+                            m_laneMaskDirty = true;
+                        }
+                        if (ImGui::Button("Delete##kf", ImVec2(-1, 22))) remove = true;
+                        if (remove) {
+                            diskMove().erase(diskMove().begin() + sel);
+                            m_selectedDiskKf = -1;
+                            m_laneMaskDirty = true;
+                        }
+                        break;
+                    }
+                }
+            } else if (trackCount() > 0) {
+                ImGui::TextDisabled("Select a keyframe from the list above.");
+            }
+
+            ImGui::Spacing();
+        }
+    }
+
+    // ── Scan Line Speed (Cytus mode only) ──────────────────────────────────
+    if (gm.type == GameModeType::ScanLine &&
+        ImGui::CollapsingHeader("Scan Line Speed")) {
+        ImGui::Spacing();
+        ImGui::TextWrapped("Speed multiplier keyframes. 1.0x = base BPM speed.");
+        ImGui::Spacing();
+
+        auto& ssList = scanSpeed();
+        for (int i = 0; i < (int)ssList.size(); ++i) {
+            char label[64];
+            snprintf(label, sizeof(label), "#%d  t=%.2fs  %.2fx##ss%d",
+                     i, ssList[i].startTime, ssList[i].targetSpeed, i);
+            bool selected = (m_selectedScanSpeedKf == i);
+            if (ImGui::Selectable(label, selected))
+                m_selectedScanSpeedKf = i;
+        }
+
+        ImGui::Spacing();
+        char addLabel[64];
+        snprintf(addLabel, sizeof(addLabel), "+ Add at Playhead (t=%.2fs)##ss_add", m_sceneTime);
+        if (ImGui::Button(addLabel, ImVec2(-1, 26))) {
+            ScanSpeedEvent e{};
+            e.startTime   = m_sceneTime;
+            e.duration    = 1.0;
+            e.targetSpeed = 1.0f;
+            ssList.push_back(e);
+            std::sort(ssList.begin(), ssList.end(),
+                      [](const ScanSpeedEvent& a, const ScanSpeedEvent& b) {
+                          return a.startTime < b.startTime; });
+            m_selectedScanSpeedKf = -1;
+            for (int i = 0; i < (int)ssList.size(); ++i)
+                if (std::abs(ssList[i].startTime - m_sceneTime) < 1e-4)
+                    m_selectedScanSpeedKf = i;
+            m_scanPhaseDirty = true;
+        }
+
+        int sel = m_selectedScanSpeedKf;
+        if (sel >= 0 && sel < (int)ssList.size()) {
+            ImGui::Separator();
+            auto& ev = ssList[sel];
+            float st = (float)ev.startTime;
+            if (ImGui::InputFloat("Start (s)##ss", &st, 0.05f, 0.25f, "%.3f")) {
+                ev.startTime = std::max(0.0, (double)st);
+                m_scanPhaseDirty = true;
+            }
+            float du = (float)ev.duration;
+            if (ImGui::InputFloat("Duration (s)##ss", &du, 0.05f, 0.25f, "%.3f")) {
+                ev.duration = std::max(0.0, (double)du);
+                m_scanPhaseDirty = true;
+            }
+            if (ImGui::SliderFloat("Target Speed##ss", &ev.targetSpeed, 0.1f, 4.0f, "%.2fx"))
+                m_scanPhaseDirty = true;
+
+            const char* easingNames[] = {"Linear", "SineInOut", "QuadInOut", "CubicInOut"};
+            int curEase = (int)ev.easing;
+            if (ImGui::Combo("Easing##ss", &curEase, easingNames, 4)) {
+                ev.easing = (DiskEasing)curEase;
+                m_scanPhaseDirty = true;
+            }
+
+            if (ImGui::Button("Delete##ss_del", ImVec2(-1, 22))) {
+                ssList.erase(ssList.begin() + sel);
+                m_selectedScanSpeedKf = -1;
+                m_scanPhaseDirty = true;
+            }
+        }
+        ImGui::Spacing();
     }
 
     // ── Judgment Windows ─────────────────────────────────────────────────────
@@ -1236,11 +1624,17 @@ void SongEditor::renderChartTimeline(ImDrawList* dl, ImVec2 origin, ImVec2 size,
 
     } else {
         // ── 2D Drop Notes / Circle: tc horizontal track lanes + judge line ──
-        float trackH = size.y / tc;
+        // Circle mode reserves a short strip at the top for Disk FX keyframes
+        // (rotate / scale / move), so lane height is computed after that.
+        const bool  isCircle  = (gm.type == GameModeType::Circle);
+        const float diskFxH   = isCircle ? 34.f : 0.f;
+        const float laneTop   = origin.y + diskFxH;
+        const float laneAreaH = size.y - diskFxH;
+        float trackH = laneAreaH / tc;
 
         // Track lane separators
         for (int i = 0; i <= tc; i++) {
-            float y = origin.y + i * trackH;
+            float y = laneTop + i * trackH;
             ImU32 col = (i == 0 || i == tc) ? IM_COL32(60, 80, 140, 160)
                                              : IM_COL32(40, 50, 80, 80);
             dl->AddLine(ImVec2(origin.x, y), ImVec2(pMax.x, y), col, 1.f);
@@ -1248,12 +1642,111 @@ void SongEditor::renderChartTimeline(ImDrawList* dl, ImVec2 origin, ImVec2 size,
 
         // Track number labels (left side)
         for (int i = 0; i < tc; i++) {
-            float y = origin.y + (i + 0.5f) * trackH;
+            float y = laneTop + (i + 0.5f) * trackH;
             char label[8]; snprintf(label, sizeof(label), "%d", i + 1);
             dl->AddText(ImVec2(origin.x + 4, y - 6),
                         IM_COL32(80, 100, 150, 140), label);
         }
 
+        // ── Circle mode: Disk FX strip + lane gray-out overlay ──────────
+        if (isCircle) {
+            // Three tiny sub-lanes (Rot/Scale/Move) in the top strip.
+            const float subH = (diskFxH - 4.f) / 3.f;
+            const ImU32 rotCol   = IM_COL32(220, 120, 240, 220);
+            const ImU32 scaleCol = IM_COL32(120, 220, 180, 220);
+            const ImU32 moveCol  = IM_COL32(240, 180, 100, 220);
+            const ImU32 rotColDim   = IM_COL32(220, 120, 240, 120);
+            const ImU32 scaleColDim = IM_COL32(120, 220, 180, 120);
+            const ImU32 moveColDim  = IM_COL32(240, 180, 100, 120);
+
+            auto drawStripBg = [&](float y0, const char* label, ImU32 lblCol) {
+                dl->AddRectFilled(ImVec2(origin.x, y0), ImVec2(pMax.x, y0 + subH),
+                                  IM_COL32(25, 25, 45, 255));
+                dl->AddLine(ImVec2(origin.x, y0 + subH), ImVec2(pMax.x, y0 + subH),
+                            IM_COL32(60, 60, 90, 120), 1.f);
+                dl->AddText(ImVec2(origin.x + 4, y0 + 1), lblCol, label);
+            };
+            const float rotY   = origin.y + 2.f;
+            const float scaleY = rotY   + subH;
+            const float moveY  = scaleY + subH;
+            drawStripBg(rotY,   "ROT",   IM_COL32(220, 160, 255, 200));
+            drawStripBg(scaleY, "SCL",   IM_COL32(180, 255, 220, 200));
+            drawStripBg(moveY,  "MOV",   IM_COL32(255, 220, 160, 200));
+
+            const ImVec2 mp = ImGui::GetIO().MousePos;
+            const bool   mouseClicked = ImGui::IsMouseClicked(ImGuiMouseButton_Left);
+            const bool   rightClicked = ImGui::IsMouseClicked(ImGuiMouseButton_Right);
+
+            auto drawTrack = [&](auto& list, float yTop, ImU32 col, ImU32 colDim,
+                                 DiskKfTrack trackId) {
+                for (int idx = 0; idx < (int)list.size(); ++idx) {
+                    auto& ev = list[idx];
+                    float bx0 = origin.x + ((float)ev.startTime - startTime) * m_timelineZoom;
+                    float bx1 = bx0 + (float)ev.duration * m_timelineZoom;
+                    if (bx1 < origin.x || bx0 > pMax.x) continue;
+                    bool selected = (m_diskKfTrack == trackId && m_selectedDiskKf == idx);
+                    ImU32 fill = selected ? col : colDim;
+                    dl->AddRectFilled(ImVec2(std::max(bx0, origin.x), yTop + 2),
+                                      ImVec2(std::min(bx1, pMax.x),  yTop + subH - 2),
+                                      fill, 3.f);
+                    if (selected) {
+                        dl->AddRect(ImVec2(std::max(bx0, origin.x), yTop + 2),
+                                    ImVec2(std::min(bx1, pMax.x),  yTop + subH - 2),
+                                    IM_COL32(255, 255, 255, 255), 3.f, 0, 2.f);
+                    }
+                    dl->AddLine(ImVec2(bx1 - 1, yTop + 3), ImVec2(bx1 - 1, yTop + subH - 3),
+                                IM_COL32(255, 255, 255, 220), 2.f);
+                    const bool overBar = (mp.x >= bx0 && mp.x <= bx1 &&
+                                          mp.y >= yTop && mp.y <= yTop + subH);
+                    if (overBar) {
+                        if (mouseClicked) {
+                            m_diskKfTrack    = trackId;
+                            m_selectedDiskKf = idx;
+                        }
+                        if (rightClicked) {
+                            list.erase(list.begin() + idx);
+                            if (m_diskKfTrack == trackId && m_selectedDiskKf >= (int)list.size())
+                                m_selectedDiskKf = -1;
+                            m_laneMaskDirty = true;
+                            return;
+                        }
+                    }
+                }
+            };
+            drawTrack(diskRot(),   rotY,   rotCol,   rotColDim,   DiskKfTrack::Rotation);
+            drawTrack(diskScale(), scaleY, scaleCol, scaleColDim, DiskKfTrack::Scale);
+            drawTrack(diskMove(),  moveY,  moveCol,  moveColDim,  DiskKfTrack::Move);
+
+            // ── Lane gray-out overlay for disabled segments ─────────────
+            // Mask timeline is rebuilt lazily from the current keyframes.
+            if (m_laneMaskDirty) rebuildLaneMaskTimeline();
+            if (!m_laneMaskTimeline.empty() && tc > 0 && tc <= 32) {
+                for (size_t si = 0; si < m_laneMaskTimeline.size(); ++si) {
+                    double tBeg = m_laneMaskTimeline[si].startTime;
+                    double tEnd = (si + 1 < m_laneMaskTimeline.size())
+                                  ? m_laneMaskTimeline[si + 1].startTime
+                                  : (double)endTime;
+                    uint32_t mask = m_laneMaskTimeline[si].mask;
+                    float bx0 = origin.x + ((float)tBeg - startTime) * m_timelineZoom;
+                    float bx1 = origin.x + ((float)tEnd - startTime) * m_timelineZoom;
+                    if (bx1 < origin.x || bx0 > pMax.x) continue;
+                    bx0 = std::max(bx0, origin.x);
+                    bx1 = std::min(bx1, pMax.x);
+                    for (int lane = 0; lane < tc; ++lane) {
+                        if (mask & (1u << lane)) continue;
+                        float ly0 = laneTop + lane       * trackH;
+                        float ly1 = laneTop + (lane + 1) * trackH;
+                        dl->AddRectFilled(ImVec2(bx0, ly0), ImVec2(bx1, ly1),
+                                          IM_COL32(80, 80, 80, 140));
+                        // Diagonal hatching so it reads as "disabled".
+                        for (float xh = bx0; xh < bx1; xh += 8.f) {
+                            dl->AddLine(ImVec2(xh, ly0), ImVec2(xh + 8.f, ly1),
+                                        IM_COL32(140, 140, 140, 120), 1.f);
+                        }
+                    }
+                }
+            }
+        }
     }
 
     // Draw BPM change markers (orange band + label at top)
@@ -1322,12 +1815,19 @@ void SongEditor::renderChartTimeline(ImDrawList* dl, ImVec2 origin, ImVec2 size,
             }
         }
     } else if (gm.type != GameModeType::ScanLine) {
-        // 2D Drop Notes or Circle: single region
-        float trackH = size.y / tc;
-        renderNotes(dl, origin, size, startTime, tc, trackH, origin.y, false);
+        // 2D Drop Notes or Circle: single region. Circle mode reserves the
+        // top 34 px for the Disk FX strip, so note lanes start below it.
+        const float diskFxH = (gm.type == GameModeType::Circle) ? 34.f : 0.f;
+        const float laneTop  = origin.y + diskFxH;
+        const float laneAreaH = size.y - diskFxH;
+        float trackH = laneAreaH / tc;
+        renderNotes(dl, origin, size, startTime, tc, trackH, laneTop, false);
 
         if (mouseInTimeline && m_noteTool != NoteTool::None) {
-            handleNotePlacement(origin, size, startTime, tc, false, trackH, origin.y, engine);
+            ImVec2 mpos3 = ImGui::GetIO().MousePos;
+            if (mpos3.y >= laneTop) {
+                handleNotePlacement(origin, size, startTime, tc, false, trackH, laneTop, engine);
+            }
         }
     }
 
@@ -1689,6 +2189,9 @@ void SongEditor::renderSceneView(ImDrawList* dl, ImVec2 origin, ImVec2 size,
                                  Engine* engine) {
     if (!m_song) return;
 
+    // Rebuild scan-line phase table lazily when speed events change
+    if (m_scanPhaseDirty) rebuildScanPhaseTable();
+
     const GameModeConfig& gm = m_song->gameMode;
     const auto& curNotes = notes();
 
@@ -1923,11 +2426,26 @@ void SongEditor::renderSceneView(ImDrawList* dl, ImVec2 origin, ImVec2 size,
 
     } else if (gm.type == GameModeType::Circle) {
         // ── Circle mode ─────────────────────────────────────────────────────
-        float centerX = origin.x + size.x * 0.5f;
-        float centerY = origin.y + size.y * 0.52f;
+        // Sample the live disk pose from the current keyframes so that
+        // scrubbing the playhead animates the scene preview exactly like
+        // the runtime renderer does.
+        glm::vec2 diskC   = sampleDiskCenter  (curTime, diskMove());
+        float     diskS   = sampleDiskScale   (curTime, diskScale());
+        float     diskRot_= sampleDiskRotation(curTime, diskRot());
+
+        float baseCX = origin.x + size.x * 0.5f;
+        float baseCY = origin.y + size.y * 0.52f;
         float minDim = (size.x < size.y) ? size.x : size.y;
-        float outerR = minDim * 0.44f;
-        float innerR = outerR * 0.28f;
+        float baseOuterR = minDim * 0.44f;
+
+        // Preview uses a "world unit = (baseOuterR / kBaseRadius) pixels"
+        // mapping so move-keyframe world XY drives the preview center
+        // proportionally.  Y is flipped because ImGui y grows downward.
+        const float worldToPx = baseOuterR / kBaseRadius;
+        float centerX = baseCX + diskC.x * worldToPx;
+        float centerY = baseCY - diskC.y * worldToPx;
+        float outerR  = baseOuterR * diskS;
+        float innerR  = outerR * 0.28f;
 
         // Draw rings and radial lines
         dl->AddCircle(ImVec2(centerX, centerY), outerR,
@@ -1937,9 +2455,21 @@ void SongEditor::renderSceneView(ImDrawList* dl, ImVec2 origin, ImVec2 size,
         dl->AddCircleFilled(ImVec2(centerX, centerY), innerR * 0.3f,
                             IM_COL32(100, 80, 50, 120));
 
+        // Gameplay LanotaRenderer places lane 0 at 12 o'clock and counts
+        // clockwise (matches onRender: angle = π/2 − lane·Δ + diskRotation).
+        // ImGui y grows downward, so clockwise in screen space corresponds
+        // to *increasing* angle in this coordinate system. We negate the
+        // sampled disk rotation when mapping to screen so a positive target
+        // angle spins the disk counter-clockwise on-screen, matching the
+        // runtime renderer's y-flip.
         float angleStep = 6.2831853f / tc;
+        auto laneAngle = [&](float laneIdx) {
+            // screen angle: start at -π/2 (top), increase clockwise by lane
+            return -1.5707963f + laneIdx * angleStep - diskRot_;
+        };
+
         for (int i = 0; i < tc; i++) {
-            float angle = i * angleStep - 1.5707963f;
+            float angle = laneAngle((float)i);
             dl->AddLine(ImVec2(centerX + innerR * cosf(angle), centerY + innerR * sinf(angle)),
                         ImVec2(centerX + outerR * cosf(angle), centerY + outerR * sinf(angle)),
                         IM_COL32(80, 70, 50, 120), 1.f);
@@ -1961,8 +2491,8 @@ void SongEditor::renderSceneView(ImDrawList* dl, ImVec2 origin, ImVec2 size,
             // lane N; aR is the CW edge of lane N+S-1.
             int track = note.track % tc;
             int span  = std::clamp(note.laneSpan, 1, 3);
-            float aL = track * angleStep - 1.5707963f;
-            float aR = (track + span) * angleStep - 1.5707963f;
+            float aL = laneAngle((float)track);
+            float aR = laneAngle((float)(track + span));
 
             ImVec2 quad[4] = {
                 ImVec2(centerX + rInner2 * cosf(aL), centerY + rInner2 * sinf(aL)),
@@ -2036,7 +2566,12 @@ void SongEditor::renderSceneView(ImDrawList* dl, ImVec2 origin, ImVec2 size,
                 return false;
 
             const int notePage = pageIdx(n.time);
-            if (notePage != curPage) return false;  // different sweep
+            if (n.type == EditorNoteType::Hold && n.scanHoldSweeps > 0) {
+                const int endPage = pageIdx(n.endTime);
+                if (curPage < notePage || curPage > endPage) return false;
+            } else {
+                if (notePage != curPage) return false;
+            }
 
             const float pageStart = (float)notePage * T_sweep;
             const float pageEnd   = pageStart + T_sweep;
@@ -2138,30 +2673,71 @@ void SongEditor::renderSceneView(ImDrawList* dl, ImVec2 origin, ImVec2 size,
                     break;
                 }
                 case EditorNoteType::Hold: {
-                    float ey = scanToLocal(note.scanX, note.scanEndY).y;
-                    dl->AddRectFilled(ImVec2(nx - 6.f * scale, std::min(ny, ey)),
-                                      ImVec2(nx + 6.f * scale, std::max(ny, ey)),
-                                      colDim, 2.f);
+                    float hw = 6.f * scale;
+                    if (note.scanHoldSweeps == 0) {
+                        // Single-sweep hold: simple rectangle
+                        float ey = scanToLocal(note.scanX, note.scanEndY).y;
+                        dl->AddRectFilled(ImVec2(nx - hw, std::min(ny, ey)),
+                                          ImVec2(nx + hw, std::max(ny, ey)),
+                                          colDim, 2.f);
+                        dl->AddCircleFilled(ImVec2(nx, ey), 6.f * scale, col);
+                    } else {
+                        // Multi-sweep hold: zigzag body segments
+                        // Sweep 0: from start Y to the first turn boundary
+                        bool sweepUp = scanLineGoingUp(note.time);
+                        float segStartY = ny;
+                        float turnY;
+                        for (int s = 0; s <= note.scanHoldSweeps; ++s) {
+                            if (s < note.scanHoldSweeps) {
+                                // Full sweep segment to the turn boundary
+                                turnY = scanToLocal(0.f, sweepUp ? 0.f : 1.f).y;
+                            } else {
+                                // Final sweep segment to the end Y
+                                turnY = scanToLocal(note.scanX, note.scanEndY).y;
+                            }
+                            dl->AddRectFilled(
+                                ImVec2(nx - hw, std::min(segStartY, turnY)),
+                                ImVec2(nx + hw, std::max(segStartY, turnY)),
+                                colDim, 2.f);
+                            // Draw a small turn indicator at the boundary
+                            if (s < note.scanHoldSweeps) {
+                                dl->AddCircleFilled(ImVec2(nx, turnY), 3.f, col);
+                            }
+                            segStartY = turnY;
+                            sweepUp = !sweepUp;
+                        }
+                        // Tail cap at final end Y
+                        float ey = scanToLocal(note.scanX, note.scanEndY).y;
+                        dl->AddCircleFilled(ImVec2(nx, ey), 6.f * scale, col);
+                    }
+                    // Head marker
                     dl->AddCircleFilled(ImVec2(nx, ny), 10.f * scale, col);
                     dl->AddCircle(ImVec2(nx, ny), 11.f * scale, colOut, 0, 1.5f);
-                    dl->AddCircleFilled(ImVec2(nx, ey), 6.f * scale, col);
                     break;
                 }
                 case EditorNoteType::Slide: {
-                    drawSmoothPath(note.scanPath, colDim, 4.f);
+                    // Draw straight lines between control points
+                    if (note.scanPath.size() >= 2) {
+                        ImVec2 prev = scanToLocal(note.scanPath[0].first,
+                                                  note.scanPath[0].second);
+                        for (size_t pi = 1; pi < note.scanPath.size(); ++pi) {
+                            ImVec2 cur = scanToLocal(note.scanPath[pi].first,
+                                                     note.scanPath[pi].second);
+                            dl->AddLine(prev, cur, colDim, 4.f);
+                            prev = cur;
+                        }
+                    }
+                    // Head marker
                     dl->AddCircleFilled(ImVec2(nx, ny), 8.f * scale, col);
-                    // Sample-point markers along the path (raw control-point idx;
-                    // close enough given the path is densely sampled already).
-                    if (!note.scanPath.empty() && note.endTime > note.time) {
-                        float total = note.endTime - note.time;
+                    dl->AddCircle(ImVec2(nx, ny), 9.f * scale, colOut, 0, 1.5f);
+                    // Sample/node markers at each control point after the head
+                    if (note.scanPath.size() >= 2) {
                         ImU32 markerCol = withAlpha(IM_COL32(255,255,255,230), alpha);
-                        for (float sp : note.samplePoints) {
-                            float u = std::clamp(sp / std::max(0.0001f, total), 0.f, 1.f);
-                            size_t idx = (size_t)(u * (note.scanPath.size() - 1));
-                            if (idx >= note.scanPath.size()) idx = note.scanPath.size() - 1;
-                            ImVec2 p = scanToLocal(note.scanPath[idx].first,
-                                                   note.scanPath[idx].second);
-                            dl->AddCircleFilled(p, 4.f, markerCol);
+                        for (size_t pi = 1; pi < note.scanPath.size(); ++pi) {
+                            ImVec2 p = scanToLocal(note.scanPath[pi].first,
+                                                   note.scanPath[pi].second);
+                            dl->AddCircleFilled(p, 6.f * scale, markerCol);
+                            dl->AddCircle(p, 7.f * scale, colOut, 0, 1.f);
                         }
                     }
                     break;
@@ -2173,22 +2749,25 @@ void SongEditor::renderSceneView(ImDrawList* dl, ImVec2 origin, ImVec2 size,
         if (m_scanHoldAwaitEnd) {
             ImVec2 start = scanToLocal(m_scanHoldStartX, m_scanHoldStartY);
             float sx = start.x, sy = start.y;
-            ImVec2 mp = ImGui::GetMousePos();
-            float ey = std::clamp(mp.y, origin.y, pMax.y);
-            // Clamp end to the turn-cap Y (where scan line will be at turn time)
-            float capFrac = m_scanHoldGoingUp ? 0.f : 1.f;
-            float capY    = scanToLocal(0.f, capFrac).y;
-            if (m_scanHoldGoingUp) ey = std::max(ey, capY);
-            else                    ey = std::min(ey, capY);
-            // Direction valid?
-            bool dirOk = m_scanHoldGoingUp ? (ey <= sy) : (ey >= sy);
+            ImVec2 curMp = ImGui::GetMousePos();
+            float ey = std::clamp(curMp.y, origin.y, pMax.y);
+
+            // Determine the final sweep direction
+            bool finalUp = m_scanHoldGoingUp;
+            for (int i = 0; i < m_scanHoldExtraSweeps; ++i) finalUp = !finalUp;
+
+            // Clamp end within the final sweep's range
+            if (finalUp) ey = std::max(ey, origin.y);
+            else          ey = std::min(ey, pMax.y);
+
+            bool dirOk = true;
+            if (m_scanHoldExtraSweeps == 0)
+                dirOk = m_scanHoldGoingUp ? (ey <= sy) : (ey >= sy);
+
             ImU32 col  = dirOk ? IM_COL32(80, 220, 100, 200)
                                : IM_COL32(220, 80, 80, 200);
 
-            // Ghost scan line at cursor Y — a horizontal semi-transparent
-            // sweep line showing where the scan line WILL be when this hold
-            // ends. Gives the author a predictive visual anchor for aligning
-            // the tail against audio cues.
+            // Ghost scan line at cursor Y
             ImU32 ghostCol = dirOk ? IM_COL32(80, 220, 140, 90)
                                    : IM_COL32(220, 80, 80, 90);
             dl->AddLine(ImVec2(origin.x + 10.f, ey),
@@ -2197,10 +2776,43 @@ void SongEditor::renderSceneView(ImDrawList* dl, ImVec2 origin, ImVec2 size,
                         ImVec2(pMax.x - 10.f, ey),
                         IM_COL32(255, 255, 255, 30), 8.f);
 
-            // Hold body preview + head marker.
-            dl->AddRectFilled(ImVec2(sx - 6.f, std::min(sy, ey)),
-                              ImVec2(sx + 6.f, std::max(sy, ey)),
-                              col, 2.f);
+            // Hold body preview — zigzag for multi-sweep
+            float hw = 6.f;
+            if (m_scanHoldExtraSweeps == 0) {
+                dl->AddRectFilled(ImVec2(sx - hw, std::min(sy, ey)),
+                                  ImVec2(sx + hw, std::max(sy, ey)),
+                                  col, 2.f);
+            } else {
+                bool sweepUp = m_scanHoldGoingUp;
+                float segStartY = sy;
+                for (int s = 0; s <= m_scanHoldExtraSweeps; ++s) {
+                    float segEndY;
+                    if (s < m_scanHoldExtraSweeps) {
+                        segEndY = scanToLocal(0.f, sweepUp ? 0.f : 1.f).y;
+                    } else {
+                        segEndY = ey;
+                    }
+                    dl->AddRectFilled(
+                        ImVec2(sx - hw, std::min(segStartY, segEndY)),
+                        ImVec2(sx + hw, std::max(segStartY, segEndY)),
+                        col, 2.f);
+                    if (s < m_scanHoldExtraSweeps)
+                        dl->AddCircleFilled(ImVec2(sx, segEndY), 3.f,
+                                            IM_COL32(255, 255, 255, 180));
+                    segStartY = segEndY;
+                    sweepUp = !sweepUp;
+                }
+            }
+
+            // Sweep count indicator
+            if (m_scanHoldExtraSweeps > 0) {
+                char buf[32];
+                snprintf(buf, sizeof(buf), "+%d sweeps", m_scanHoldExtraSweeps);
+                dl->AddText(ImVec2(sx + 12.f, sy - 14.f),
+                            IM_COL32(200, 255, 200, 220), buf);
+            }
+
+            // Head marker
             dl->AddCircleFilled(ImVec2(sx, sy), 10.f, col);
 
             // Projected end-time text near the cursor. Uses the same
@@ -2215,7 +2827,7 @@ void SongEditor::renderSceneView(ImDrawList* dl, ImVec2 origin, ImVec2 size,
             float secs = endTime - (float)mins * 60.f;
             snprintf(etaBuf, sizeof(etaBuf), "ETA: %d:%06.3f", mins, secs);
             ImVec2 tsz = ImGui::CalcTextSize(etaBuf);
-            ImVec2 txtPos(std::clamp(mp.x + 14.f,
+            ImVec2 txtPos(std::clamp(curMp.x + 14.f,
                                      origin.x + 4.f,
                                      pMax.x - tsz.x - 4.f),
                           std::clamp(ey - tsz.y - 4.f,
@@ -2229,13 +2841,27 @@ void SongEditor::renderSceneView(ImDrawList* dl, ImVec2 origin, ImVec2 size,
         }
 
         // ── In-progress slide preview ──────────────────────────────────────
-        if (m_scanSlideDragging && m_scanSlideDraft.scanPath.size() >= 2) {
-            for (size_t i = 1; i < m_scanSlideDraft.scanPath.size(); ++i) {
-                ImVec2 a = scanToLocal(m_scanSlideDraft.scanPath[i - 1].first,
-                                       m_scanSlideDraft.scanPath[i - 1].second);
-                ImVec2 b = scanToLocal(m_scanSlideDraft.scanPath[i].first,
-                                       m_scanSlideDraft.scanPath[i].second);
+        if (m_scanSlideDragging && !m_scanSlideDraft.scanPath.empty()) {
+            const auto& draftPath = m_scanSlideDraft.scanPath;
+            // Draw straight lines between placed control points
+            for (size_t i = 1; i < draftPath.size(); ++i) {
+                ImVec2 a = scanToLocal(draftPath[i - 1].first, draftPath[i - 1].second);
+                ImVec2 b = scanToLocal(draftPath[i].first, draftPath[i].second);
                 dl->AddLine(a, b, IM_COL32(220, 130, 255, 230), 4.f);
+            }
+            // Draw a preview line from last point to current mouse position
+            ImVec2 last = scanToLocal(draftPath.back().first, draftPath.back().second);
+            ImVec2 mousePos = ImGui::GetMousePos();
+            float cmx = std::clamp(mousePos.x, origin.x, pMax.x);
+            float cmy = std::clamp(mousePos.y, origin.y, pMax.y);
+            dl->AddLine(last, ImVec2(cmx, cmy), IM_COL32(220, 130, 255, 100), 2.f);
+            // Head marker
+            ImVec2 head = scanToLocal(draftPath[0].first, draftPath[0].second);
+            dl->AddCircleFilled(head, 8.f, IM_COL32(220, 130, 255, 230));
+            // Node markers at placed control points
+            for (size_t i = 1; i < draftPath.size(); ++i) {
+                ImVec2 p = scanToLocal(draftPath[i].first, draftPath[i].second);
+                dl->AddCircleFilled(p, 6.f, IM_COL32(255, 255, 255, 220));
             }
         }
 
@@ -2358,37 +2984,149 @@ float SongEditor::scanLinePeriod() const {
     return 240.0f / bpm; // seconds per sweep = (60/bpm) * 4 beats
 }
 
+void SongEditor::rebuildScanPhaseTable() {
+    m_scanPhaseTable.clear();
+    m_scanPhaseDirty = false;
+    auto& evts = const_cast<SongEditor*>(this)->scanSpeed();
+    if (evts.empty()) return;
+
+    double basePeriod = (double)scanLinePeriod();
+    if (basePeriod <= 1e-6) return;
+
+    // Sort events
+    std::sort(evts.begin(), evts.end(),
+              [](const ScanSpeedEvent& a, const ScanSpeedEvent& b) {
+                  return a.startTime < b.startTime; });
+
+    // Collect boundary times
+    std::vector<double> boundaries;
+    boundaries.push_back(0.0);
+    for (auto& e : evts) {
+        boundaries.push_back(e.startTime);
+        boundaries.push_back(e.startTime + e.duration);
+    }
+    boundaries.push_back(600.0); // 10-minute ceiling
+    std::sort(boundaries.begin(), boundaries.end());
+    boundaries.erase(std::unique(boundaries.begin(), boundaries.end(),
+        [](double a, double b) { return std::abs(a - b) < 1e-9; }), boundaries.end());
+
+    // Sample speed at time t (segment-based interpolation)
+    auto sampleSpeed = [&](double t) -> double {
+        if (evts.empty() || t < evts.front().startTime) return 1.0;
+        size_t idx = 0;
+        for (size_t i = 1; i < evts.size(); ++i)
+            if (evts[i].startTime <= t) idx = i;
+        const auto& cur = evts[idx];
+        double prev = (idx == 0) ? 1.0 : (double)evts[idx - 1].targetSpeed;
+        double segEnd = cur.startTime + cur.duration;
+        if (cur.duration <= 1e-6 || t >= segEnd) return (double)cur.targetSpeed;
+        float u = static_cast<float>((t - cur.startTime) / cur.duration);
+        float e = applyDiskEasing(std::clamp(u, 0.f, 1.f), cur.easing);
+        return prev + e * ((double)cur.targetSpeed - prev);
+    };
+
+    // Build table with Simpson's rule integration
+    double accPhase = 0.0;
+    m_scanPhaseTable.push_back({0.0, 0.0, sampleSpeed(0.0)});
+    for (size_t bi = 1; bi < boundaries.size(); ++bi) {
+        double t0 = boundaries[bi - 1], t1 = boundaries[bi];
+        if (t1 <= t0) continue;
+        constexpr int N = 16;
+        double dt = (t1 - t0) / N;
+        double integral = 0.0;
+        for (int k = 0; k <= N; ++k) {
+            double tk = t0 + k * dt;
+            double w = (k == 0 || k == N) ? 1.0 : (k % 2 == 1) ? 4.0 : 2.0;
+            integral += w * sampleSpeed(tk);
+        }
+        integral *= dt / 3.0;
+        accPhase += integral / basePeriod;
+        m_scanPhaseTable.push_back({t1, accPhase, sampleSpeed(t1)});
+    }
+}
+
+double SongEditor::interpolateScanPhase(double t) const {
+    double basePeriod = (double)scanLinePeriod();
+    if (m_scanPhaseTable.empty()) return (t < 0 ? 0 : t) / basePeriod;
+    if (t <= m_scanPhaseTable.front().time) return m_scanPhaseTable.front().phase;
+    if (t >= m_scanPhaseTable.back().time) {
+        const auto& last = m_scanPhaseTable.back();
+        return last.phase + last.speed * (t - last.time) / basePeriod;
+    }
+    // Binary search
+    size_t lo = 0, hi = m_scanPhaseTable.size() - 1;
+    while (lo + 1 < hi) {
+        size_t mid = (lo + hi) / 2;
+        if (m_scanPhaseTable[mid].time <= t) lo = mid; else hi = mid;
+    }
+    const auto& a = m_scanPhaseTable[lo];
+    const auto& b = m_scanPhaseTable[hi];
+    double segDt = b.time - a.time;
+    if (segDt < 1e-9) return a.phase;
+    double frac = (t - a.time) / segDt;
+    return a.phase + frac * (b.phase - a.phase);
+}
+
 float SongEditor::scanLineFrac(float t) const {
-    const double T = (double)scanLinePeriod();
-    if (T <= 1e-6) return 1.f;
-    const double tt    = (t < 0.f) ? 0.0 : (double)t;
-    const double phase = std::fmod(tt, 2.0 * T);         // full up+down cycle
-    if (phase < T) return (float)(1.0 - phase / T);      // sweep up: 1 → 0
-    return (float)((phase - T) / T);                     // sweep down: 0 → 1
+    if (m_scanPhaseTable.empty()) {
+        const double T = (double)scanLinePeriod();
+        if (T <= 1e-6) return 1.f;
+        const double tt    = (t < 0.f) ? 0.0 : (double)t;
+        const double phase = std::fmod(tt, 2.0 * T);
+        if (phase < T) return (float)(1.0 - phase / T);
+        return (float)((phase - T) / T);
+    }
+    double phase = interpolateScanPhase(t < 0.f ? 0.0 : (double)t);
+    double cyc = std::fmod(phase, 2.0);
+    if (cyc < 0.0) cyc += 2.0;
+    if (cyc < 1.0) return static_cast<float>(1.0 - cyc);
+    return static_cast<float>(cyc - 1.0);
 }
 
 bool SongEditor::scanLineGoingUp(float t) const {
-    const double T = (double)scanLinePeriod();
-    if (T <= 1e-6) return true;
-    const double tt    = (t < 0.f) ? 0.0 : (double)t;
-    const double phase = std::fmod(tt, 2.0 * T);
-    return phase < T;
+    double phase;
+    if (m_scanPhaseTable.empty()) {
+        const double T = (double)scanLinePeriod();
+        if (T <= 1e-6) return true;
+        const double tt = (t < 0.f) ? 0.0 : (double)t;
+        phase = std::fmod(tt, 2.0 * T) / T;
+    } else {
+        phase = interpolateScanPhase(t < 0.f ? 0.0 : (double)t);
+    }
+    double cyc = std::fmod(phase, 2.0);
+    if (cyc < 0.0) cyc += 2.0;
+    return cyc < 1.0;
 }
 
 float SongEditor::scanLineNextTurn(float t) const {
-    const double T = (double)scanLinePeriod();
-    if (T <= 1e-6) return t;
-    const double tt = (t < 0.f) ? 0.0 : (double)t;
-    // Exact integer sweep index ahead of tt. Using floor on tt/T, then the
-    // next boundary is (idx+1)*T — always an integer multiple of T.
-    const double idx = std::floor(tt / T);
-    return (float)((idx + 1.0) * T);
+    // Find the next time where scan-line phase hits an integer.
+    double basePeriod = (double)scanLinePeriod();
+    if (basePeriod <= 1e-6) return t;
+    double curPhase = interpolateScanPhase(t < 0.f ? 0.0 : (double)t);
+    double nextInt = std::floor(curPhase) + 1.0;
+
+    if (m_scanPhaseTable.empty()) {
+        // Constant speed: time = phase * basePeriod
+        return (float)(nextInt * basePeriod);
+    }
+    // Binary search the phase table for the time where phase == nextInt
+    for (size_t i = 1; i < m_scanPhaseTable.size(); ++i) {
+        if (m_scanPhaseTable[i].phase >= nextInt) {
+            const auto& a = m_scanPhaseTable[i - 1];
+            const auto& b = m_scanPhaseTable[i];
+            double dp = b.phase - a.phase;
+            if (dp < 1e-9) return (float)b.time;
+            double frac = (nextInt - a.phase) / dp;
+            return (float)(a.time + frac * (b.time - a.time));
+        }
+    }
+    // Extrapolate
+    const auto& last = m_scanPhaseTable.back();
+    double remain = nextInt - last.phase;
+    return (float)(last.time + remain * basePeriod / std::max(0.01, last.speed));
 }
 
 float SongEditor::scanLineTimeForFrac(float t, float frac) const {
-    // Earliest time >= t at which the scan line reaches `frac`, bounded by
-    // the current sweep (next turn). If the frac isn't reachable in the
-    // current sweep direction, returns the turn time.
     const double T = (double)scanLinePeriod();
     if (T <= 1e-6) return t;
     const float turn    = scanLineNextTurn(t);
@@ -2399,6 +3137,7 @@ float SongEditor::scanLineTimeForFrac(float t, float frac) const {
     if (up && frac > curFrac)  return turn;
     if (!up && frac < curFrac) return turn;
 
+    // Approximate: assume local speed ≈ constant over this small interval
     const double dFrac = std::abs((double)frac - (double)curFrac);
     const double dt    = dFrac * T;
     return (float)std::min((double)t + dt, (double)turn);
@@ -2441,129 +3180,163 @@ void SongEditor::handleScanLineInput(ImVec2 origin, ImVec2 size, float curTime,
     if (!hovered || !inRect) return;
 
     // ── Hold await-end state ────────────────────────────────────────────────
+    // Mouse wheel extends the hold across scan-line direction changes.
+    // The wheel direction that adds a sweep alternates: if the current
+    // final sweep goes up, scroll up to extend; then scroll down for the
+    // next sweep, etc. Wrong-direction scroll does nothing.
     if (m_scanHoldAwaitEnd) {
         // Cancel on RMB or ESC.
         if (rmbClick || ImGui::IsKeyPressed(ImGuiKey_Escape)) {
             m_scanHoldAwaitEnd = false;
             return;
         }
-        // Direction check from start to cursor.
-        float sy  = origin.y + m_scanHoldStartY * size.y;
-        bool dirOk = m_scanHoldGoingUp ? (mp.y <= sy) : (mp.y >= sy);
-        if (!dirOk) {
+
+        // Determine the direction of the final (current) sweep
+        // Sweep 0 = initial sweep direction; each extra sweep flips direction.
+        bool finalSweepUp = m_scanHoldGoingUp;
+        for (int i = 0; i < m_scanHoldExtraSweeps; ++i)
+            finalSweepUp = !finalSweepUp;
+
+        // Mouse wheel to add/remove extra sweeps
+        float wheel = ImGui::GetIO().MouseWheel;
+        if (std::abs(wheel) > 0.1f) {
+            // The direction needed to ADD a sweep = the direction of the
+            // NEXT sweep (opposite of the current final sweep).
+            bool nextSweepUp = !finalSweepUp;
+            bool scrollUp    = wheel > 0.f;
+            if (scrollUp == nextSweepUp) {
+                // Correct direction → add one more sweep
+                m_scanHoldExtraSweeps++;
+                finalSweepUp = !finalSweepUp;
+            } else if (m_scanHoldExtraSweeps > 0) {
+                // Opposite direction → remove last sweep (undo)
+                m_scanHoldExtraSweeps--;
+                finalSweepUp = !finalSweepUp;
+            }
+        }
+
+        // Compute the time window for the final sweep.
+        // Walk through turn points: turn[0] = first turn after start,
+        // turn[i] = i-th turn after start.
+        float finalSweepStart = m_scanHoldStartT;
+        float finalSweepEnd   = m_scanHoldTurnCap;
+        for (int i = 0; i < m_scanHoldExtraSweeps; ++i) {
+            finalSweepStart = finalSweepEnd;
+            finalSweepEnd   = scanLineNextTurn(finalSweepStart + 0.001f);
+        }
+
+        // Direction check: cursor must be in the correct direction within
+        // the final sweep. For extra sweeps, the user clicks anywhere in
+        // the scene Y range — the endpoint's Y is derived from the cursor.
+        float sy;
+        if (m_scanHoldExtraSweeps == 0) {
+            sy = origin.y + m_scanHoldStartY * size.y;
+        } else {
+            // For multi-sweep, the starting Y of the final sweep is at the
+            // turn boundary (0 or 1 depending on direction).
+            float turnFrac = finalSweepUp ? 1.f : 0.f;
+            sy = origin.y + turnFrac * size.y;
+        }
+        bool dirOk = finalSweepUp ? (mp.y <= sy + 2.f) : (mp.y >= sy - 2.f);
+        if (!dirOk && m_scanHoldExtraSweeps == 0) {
             ImGui::SetMouseCursor(ImGuiMouseCursor_NotAllowed);
             return;
         }
         ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+
         if (lmbClick) {
-            // Commit hold. Clamp end Y to [0,1] and cap at turn-Y.
+            // Commit hold
             ImVec2 mpClamped(std::clamp(mp.x, origin.x, pMax.x),
                              std::clamp(mp.y, origin.y, pMax.y));
             float endFrac = localToScan(mpClamped).y;
-            // Cap at the frac the scan line will reach at the turn (which is
-            // 0 if going up, 1 if going down).
-            if (m_scanHoldGoingUp) endFrac = std::max(endFrac, 0.f);
-            else                    endFrac = std::min(endFrac, 1.f);
+            if (finalSweepUp) endFrac = std::max(endFrac, 0.f);
+            else               endFrac = std::min(endFrac, 1.f);
 
-            float endTime = scanLineTimeForFrac(m_scanHoldStartT, endFrac);
-            endTime       = std::min(endTime, m_scanHoldTurnCap);
+            float endTime = scanLineTimeForFrac(finalSweepStart, endFrac);
+            endTime       = std::min(endTime, finalSweepEnd);
 
             EditorNote n{};
-            n.type     = EditorNoteType::Hold;
-            n.time     = m_scanHoldStartT;
-            n.endTime  = endTime;
-            n.scanX    = m_scanHoldStartX;
-            n.scanY    = m_scanHoldStartY;
-            n.scanEndY = endFrac;
+            n.type            = EditorNoteType::Hold;
+            n.time            = m_scanHoldStartT;
+            n.endTime         = endTime;
+            n.scanX           = m_scanHoldStartX;
+            n.scanY           = m_scanHoldStartY;
+            n.scanEndY        = endFrac;
+            n.scanHoldSweeps  = m_scanHoldExtraSweeps;
             notes().push_back(n);
             m_scanHoldAwaitEnd = false;
         }
         return;
     }
 
-    // ── Slide drag state ────────────────────────────────────────────────────
+    // ── Slide authoring state ──────────────────────────────────────────────
+    // LMB on scan line starts the slide. While LMB is held, RMB clicks
+    // place control points (sample/tick nodes). The path is straight lines
+    // between consecutive nodes (Cytus-style). Release LMB commits.
+    // Each control point after the head is automatically a sample point.
     if (m_scanSlideDragging) {
+        // Cancel on ESC
+        if (ImGui::IsKeyPressed(ImGuiKey_Escape)) {
+            m_scanSlideDragging = false;
+            m_scanSlideDraft    = {};
+            return;
+        }
+
         if (!lmbDown) {
-            // Commit on release if we have enough points.
+            // Commit on LMB release if we have at least 2 points (head + 1 node).
             if (m_scanSlideDraft.scanPath.size() >= 2) {
-                // Derive endTime from last path point's Y.
-                float endFrac = m_scanSlideDraft.scanPath.back().second;
-                float endTime = scanLineTimeForFrac(m_scanSlideDraft.time, endFrac);
+                auto& draft = m_scanSlideDraft;
+                float endFrac = draft.scanPath.back().second;
+                float endTime = scanLineTimeForFrac(draft.time, endFrac);
                 endTime       = std::min(endTime, m_scanSlideTurnCap);
-                m_scanSlideDraft.endTime = endTime;
-                notes().push_back(m_scanSlideDraft);
+                draft.endTime = endTime;
+
+                // Auto-derive sample points from each control point after the head.
+                // Each sample point's time offset = how far along the scan sweep
+                // that control point's Y position is.
+                draft.samplePoints.clear();
+                float total = std::max(0.0001f, draft.endTime - draft.time);
+                for (size_t pi = 1; pi < draft.scanPath.size(); ++pi) {
+                    float ptFrac = draft.scanPath[pi].second;
+                    float ptTime = scanLineTimeForFrac(draft.time, ptFrac);
+                    ptTime       = std::min(ptTime, m_scanSlideTurnCap);
+                    float offset = std::clamp(ptTime - draft.time, 0.f, total);
+                    draft.samplePoints.push_back(offset);
+                }
+                std::sort(draft.samplePoints.begin(), draft.samplePoints.end());
+
+                notes().push_back(draft);
             }
             m_scanSlideDragging = false;
             m_scanSlideDraft    = {};
             return;
         }
 
-        // Record current mouse position if it moved.
-        float mx = std::clamp(mp.x, origin.x, pMax.x);
-        float my = std::clamp(mp.y, origin.y, pMax.y);
+        // RMB click while LMB held → place a new control point / sample node
+        if (rmbClick) {
+            float mx = std::clamp(mp.x, origin.x, pMax.x);
+            float my = std::clamp(mp.y, origin.y, pMax.y);
 
-        // Direction gate with a pixel-space deadzone to tolerate hand
-        // jitter and high-polling-rate mice. Only a reversal that exceeds
-        // SLIDE_REVERSE_EPSILON AND goes the wrong way invalidates the
-        // draft — tiny wobbles stay in the path.
-        constexpr float SLIDE_REVERSE_EPSILON = 3.0f; // pixels
-        const float dy      = my - m_scanSlideLastY;
-        const bool  wrongUp = m_scanSlideGoingUp ? (dy > 0.f) : (dy < 0.f);
-        if (std::abs(dy) > SLIDE_REVERSE_EPSILON && wrongUp) {
-            // Reversal exceeds deadzone → cancel the entire draft per spec.
-            m_scanSlideDragging = false;
-            m_scanSlideDraft    = {};
-            ImGui::SetMouseCursor(ImGuiMouseCursor_NotAllowed);
-            return;
-        }
+            // Direction enforcement: control point must continue in the
+            // same direction as the scan line sweep (no crossing the turn).
+            float sy = origin.y + m_scanSlideDraft.scanPath.back().second * size.y;
+            bool dirOk = m_scanSlideGoingUp ? (my <= sy + 1.f) : (my >= sy - 1.f);
+            if (!dirOk) {
+                ImGui::SetMouseCursor(ImGuiMouseCursor_NotAllowed);
+                return;
+            }
 
-        // Clamp so the path doesn't pass the turn-around row.
-        if (m_scanSlideGoingUp) my = std::max(my, origin.y);
-        else                     my = std::min(my, pMax.y);
+            // Clamp so the path doesn't pass the turn-around row.
+            if (m_scanSlideGoingUp) my = std::max(my, origin.y);
+            else                     my = std::min(my, pMax.y);
 
-        ImVec2 n = localToScan(ImVec2(mx, my));
-        float nx = n.x, ny = n.y;
-        auto& path = m_scanSlideDraft.scanPath;
-        // Only push a new point if it differs enough from the last one.
-        if (path.empty() ||
-            std::abs(path.back().first - nx)  > 0.003f ||
-            std::abs(path.back().second - ny) > 0.003f) {
-            path.emplace_back(nx, ny);
+            ImVec2 n = localToScan(ImVec2(mx, my));
+            m_scanSlideDraft.scanPath.emplace_back(n.x, n.y);
             m_scanSlideLastY = my;
         }
+
         ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
         return;
-    }
-
-    // ── Slide tool: off-line click on an existing slide path adds a
-    // sample point to that slide (per spec: "they can click to add sample
-    // point after the slide existing").
-    if (m_noteTool == NoteTool::Slide && !onLine && lmbClick) {
-        for (auto& n : notes()) {
-            if (n.type != EditorNoteType::Slide) continue;
-            if (n.scanPath.size() < 2) continue;
-            for (size_t i = 1; i < n.scanPath.size(); ++i) {
-                ImVec2 a = scanToLocal(n.scanPath[i - 1].first,
-                                       n.scanPath[i - 1].second);
-                ImVec2 b = scanToLocal(n.scanPath[i].first,
-                                       n.scanPath[i].second);
-                float ABx = b.x - a.x, ABy = b.y - a.y;
-                float APx = mp.x - a.x, APy = mp.y - a.y;
-                float len2 = ABx * ABx + ABy * ABy;
-                float u    = len2 > 1e-4f ? (APx * ABx + APy * ABy) / len2 : 0.f;
-                u = std::clamp(u, 0.f, 1.f);
-                float cx = a.x + u * ABx, cy = a.y + u * ABy;
-                float dx = mp.x - cx,     dy = mp.y - cy;
-                if (dx * dx + dy * dy < 64.f) {
-                    float segU  = ((float)(i - 1) + u) /
-                                  (float)(n.scanPath.size() - 1);
-                    float total = std::max(0.0001f, n.endTime - n.time);
-                    n.samplePoints.push_back(std::clamp(segU * total, 0.f, total));
-                    std::sort(n.samplePoints.begin(), n.samplePoints.end());
-                    return;
-                }
-            }
-        }
     }
 
     // ── Idle: show cursor state + handle fresh clicks ──────────────────────
@@ -2600,12 +3373,13 @@ void SongEditor::handleScanLineInput(ImVec2 origin, ImVec2 size, float curTime,
             break;
         }
         case NoteTool::Hold: {
-            m_scanHoldAwaitEnd = true;
-            m_scanHoldStartX   = mxN;
-            m_scanHoldStartY   = myN;
-            m_scanHoldStartT   = curTime;
-            m_scanHoldTurnCap  = scanLineNextTurn(curTime);
-            m_scanHoldGoingUp  = scanLineGoingUp(curTime);
+            m_scanHoldAwaitEnd    = true;
+            m_scanHoldStartX      = mxN;
+            m_scanHoldStartY      = myN;
+            m_scanHoldStartT      = curTime;
+            m_scanHoldTurnCap     = scanLineNextTurn(curTime);
+            m_scanHoldGoingUp     = scanLineGoingUp(curTime);
+            m_scanHoldExtraSweeps = 0;
             break;
         }
         case NoteTool::Slide: {
@@ -2618,9 +3392,6 @@ void SongEditor::handleScanLineInput(ImVec2 origin, ImVec2 size, float curTime,
             m_scanSlideDraft.time       = curTime;
             m_scanSlideDraft.scanX      = mxN;
             m_scanSlideDraft.scanY      = myN;
-            // Pre-allocate a contiguous buffer so the fast drag-to-record
-            // loop never triggers a std::vector reallocation mid-stroke.
-            m_scanSlideDraft.scanPath.reserve(512);
             m_scanSlideDraft.scanPath.emplace_back(mxN, myN);
             break;
         }
@@ -3133,9 +3904,10 @@ ChartData SongEditor::buildChartFromNotes() const {
                 hd.laneX    = (float)en.track;
                 hd.duration = en.endTime - en.time;
                 hd.laneSpan = span;
-                hd.scanX    = en.scanX;
-                hd.scanY    = en.scanY;
-                hd.scanEndY = en.scanEndY;
+                hd.scanX           = en.scanX;
+                hd.scanY           = en.scanY;
+                hd.scanEndY        = en.scanEndY;
+                hd.scanHoldSweeps  = en.scanHoldSweeps;
 
                 if (!en.waypoints.empty()) {
                     // New multi-waypoint path
@@ -3195,6 +3967,14 @@ ChartData SongEditor::buildChartFromNotes() const {
     // Sort by time
     std::sort(chart.notes.begin(), chart.notes.end(),
               [](const NoteEvent& a, const NoteEvent& b) { return a.time < b.time; });
+
+    // Disk animation (circle mode). Safe to emit for any mode — the
+    // runtime simply ignores it when the renderer isn't LanotaRenderer.
+    chart.diskAnimation.rotations = diskRot();
+    chart.diskAnimation.moves     = diskMove();
+    chart.diskAnimation.scales    = diskScale();
+
+    chart.scanSpeedEvents = scanSpeed();
 
     return chart;
 }
@@ -3345,20 +4125,23 @@ void SongEditor::exportAllCharts() {
             // know about it can simply ignore the extra key.
             {
                 float sx = 0.f, sy = 0.f, sey = -1.f;
+                int holdSweepsVal = 0;
                 const std::vector<std::pair<float,float>>* spath = nullptr;
                 if (auto* tap = std::get_if<TapData>(&n.data)) {
                     sx = tap->scanX; sy = tap->scanY;
                     if (!tap->scanPath.empty()) spath = &tap->scanPath;
                 } else if (auto* hold = std::get_if<HoldData>(&n.data)) {
                     sx = hold->scanX; sy = hold->scanY; sey = hold->scanEndY;
+                    holdSweepsVal = hold->scanHoldSweeps;
                 } else if (auto* flick = std::get_if<FlickData>(&n.data)) {
                     sx = flick->scanX; sy = flick->scanY;
                 }
                 bool hasScan = (sx != 0.f || sy != 0.f || sey >= 0.f ||
-                                (spath && !spath->empty()));
+                                holdSweepsVal > 0 || (spath && !spath->empty()));
                 if (hasScan) {
                     f << ", \"scan\": {\"x\": " << sx << ", \"y\": " << sy;
                     if (sey >= 0.f) f << ", \"endY\": " << sey;
+                    if (holdSweepsVal > 0) f << ", \"sweeps\": " << holdSweepsVal;
                     if (spath && !spath->empty()) {
                         f << ", \"path\": [";
                         for (size_t pi = 0; pi < spath->size(); ++pi) {
@@ -3376,7 +4159,82 @@ void SongEditor::exportAllCharts() {
             if (i + 1 < chart.notes.size()) f << ",";
             f << "\n";
         }
-        f << "  ]\n}\n";
+        f << "  ]";
+
+        // ── Disk animation (circle mode) ─────────────────────────────
+        // Only emit when any keyframe exists; keeps other modes' files clean.
+        const auto& da = chart.diskAnimation;
+        if (!da.rotations.empty() || !da.moves.empty() || !da.scales.empty()) {
+            auto easingName = [](DiskEasing e) {
+                switch (e) {
+                    case DiskEasing::Linear:     return "linear";
+                    case DiskEasing::QuadInOut:  return "quadInOut";
+                    case DiskEasing::CubicInOut: return "cubicInOut";
+                    case DiskEasing::SineInOut:
+                    default:                     return "sineInOut";
+                }
+            };
+            f << ",\n \"diskAnimation\": {\n";
+            // rotations
+            f << "   \"rotations\": [";
+            for (size_t ri = 0; ri < da.rotations.size(); ++ri) {
+                const auto& r = da.rotations[ri];
+                if (ri) f << ", ";
+                f << "{\"startTime\": " << r.startTime
+                  << ", \"duration\": " << r.duration
+                  << ", \"target\": "   << r.targetAngle
+                  << ", \"easing\": \"" << easingName(r.easing) << "\"}";
+            }
+            f << "],\n";
+            // moves
+            f << "   \"moves\": [";
+            for (size_t mi = 0; mi < da.moves.size(); ++mi) {
+                const auto& m = da.moves[mi];
+                if (mi) f << ", ";
+                f << "{\"startTime\": " << m.startTime
+                  << ", \"duration\": " << m.duration
+                  << ", \"target\": ["  << m.target.x << ", " << m.target.y << "]"
+                  << ", \"easing\": \"" << easingName(m.easing) << "\"}";
+            }
+            f << "],\n";
+            // scales
+            f << "   \"scales\": [";
+            for (size_t si = 0; si < da.scales.size(); ++si) {
+                const auto& s = da.scales[si];
+                if (si) f << ", ";
+                f << "{\"startTime\": " << s.startTime
+                  << ", \"duration\": " << s.duration
+                  << ", \"target\": "   << s.targetScale
+                  << ", \"easing\": \"" << easingName(s.easing) << "\"}";
+            }
+            f << "]\n";
+            f << " }";
+        }
+
+        // ── Scan-line speed events ───────────────────────────────────────
+        if (!chart.scanSpeedEvents.empty()) {
+            auto easingName2 = [](DiskEasing e) {
+                switch (e) {
+                    case DiskEasing::Linear:     return "linear";
+                    case DiskEasing::QuadInOut:  return "quadInOut";
+                    case DiskEasing::CubicInOut: return "cubicInOut";
+                    case DiskEasing::SineInOut:
+                    default:                     return "sineInOut";
+                }
+            };
+            f << ",\n \"scanSpeedEvents\": [";
+            for (size_t si = 0; si < chart.scanSpeedEvents.size(); ++si) {
+                const auto& s = chart.scanSpeedEvents[si];
+                if (si) f << ", ";
+                f << "{\"startTime\": " << s.startTime
+                  << ", \"duration\": " << s.duration
+                  << ", \"targetSpeed\": " << s.targetSpeed
+                  << ", \"easing\": \"" << easingName2(s.easing) << "\"}";
+            }
+            f << "]";
+        }
+
+        f << "\n}\n";
         f.close();
 
         // Set the chart path on SongInfo
@@ -3668,6 +4526,19 @@ void SongEditor::handleNotePlacement(ImVec2 origin, ImVec2 size, float startTime
     float snappedTime = snapToMarker(rawTime);
     int   track = trackFromY(mouseY, regionTop, trackH, trackCount);
 
+    // Reject placement when the target lane is disabled by a disk move
+    // keyframe at the click's time.  Only meaningful in Circle mode —
+    // laneMaskAt returns all-enabled for everything else.
+    if (m_song && m_song->gameMode.type == GameModeType::Circle) {
+        if (!isLaneEnabledAt(track, snappedTime)) {
+            if (io.MouseClicked[0] || io.MouseClicked[1]) {
+                m_statusMsg   = "Lane disabled at this time (disk moved off playable area).";
+                m_statusTimer = 3.f;
+            }
+            return;
+        }
+    }
+
     // 3D sky: only Click and Hold
     NoteTool effectiveTool = m_noteTool;
     if (is3DSky && effectiveTool == NoteTool::Slide)
@@ -3883,6 +4754,20 @@ void SongEditor::renderNotes(ImDrawList* dl, ImVec2 origin, ImVec2 size,
 
         float centerY = regionTop + (note.track + 0.5f) * trackH;
         float halfH   = trackH * 0.35f;
+
+        // Circle mode: mark notes that live inside a disabled-lane segment
+        // with a thick red outline so the author knows to move them.  The
+        // note is still drawn (not deleted) so data isn't lost.
+        bool inDisabledRegion = false;
+        if (gm.type == GameModeType::Circle) {
+            if (!isLaneEnabledAt(note.track, note.time))
+                inDisabledRegion = true;
+        }
+        if (inDisabledRegion) {
+            dl->AddRect(ImVec2(noteX - halfH - 3, centerY - halfH - 3),
+                        ImVec2(noteX + halfH + 3, centerY + halfH + 3),
+                        IM_COL32(255, 60, 60, 240), 3.f, 0, 3.f);
+        }
 
         // Hit-test for selection. For a multi-waypoint Hold the bar crosses
         // multiple track rows, so the Y range spans every waypoint's lane.
@@ -4174,4 +5059,70 @@ void SongEditor::renderNotes(ImDrawList* dl, ImVec2 origin, ImVec2 size,
                         IM_COL32(255, 220, 80, 255), tag);
         }
     }
+}
+
+// ── Disk animation lane-mask helpers (Circle mode) ───────────────────────────
+//
+// When a move keyframe drifts the disk off the playable region, some angular
+// lanes become unreachable.  The editor queries `laneMaskAt(time)` to gray
+// out those lanes on the timeline and to reject new note placement on them.
+//
+// The mask is a 32-bit bitfield (one bit per lane).  We rebuild a piecewise-
+// constant timeline lazily — any keyframe edit sets m_laneMaskDirty, and the
+// next renderChartTimeline call recomputes it.  Sampling is done by walking
+// the union of keyframe start/end times; between samples we assume the mask
+// is constant (keyframes are piecewise-easy but the reachability boundary
+// is monotonic within a segment, so sampling the endpoints catches when a
+// lane crosses the boundary with good enough fidelity for editor visuals).
+
+void SongEditor::rebuildLaneMaskTimeline() {
+    m_laneMaskTimeline.clear();
+    m_laneMaskDirty = false;
+    if (!m_song) return;
+    const GameModeConfig& gm = m_song->gameMode;
+    if (gm.type != GameModeType::Circle) return;
+
+    // Collect all interesting sample times: 0, every keyframe start, every
+    // keyframe end (start + duration).  Sort + unique.  Between adjacent
+    // samples the mask is treated as constant (start-of-interval value).
+    std::vector<double> samples;
+    samples.push_back(0.0);
+    auto addTimes = [&](auto& list) {
+        for (auto& e : list) {
+            samples.push_back(e.startTime);
+            samples.push_back(e.startTime + e.duration + 1e-4);
+        }
+    };
+    addTimes(diskRot());
+    addTimes(diskMove());
+    addTimes(diskScale());
+    std::sort(samples.begin(), samples.end());
+    samples.erase(std::unique(samples.begin(), samples.end()), samples.end());
+
+    int tc = gm.trackCount;
+    for (double t : samples) {
+        glm::vec2 c    = sampleDiskCenter  (t, diskMove());
+        float     s    = sampleDiskScale   (t, diskScale());
+        float     r    = sampleDiskRotation(t, diskRot());
+        uint32_t  mask = laneMaskForTransform(tc, c, s, r);
+        if (m_laneMaskTimeline.empty() || m_laneMaskTimeline.back().mask != mask)
+            m_laneMaskTimeline.push_back({t, mask});
+    }
+    if (m_laneMaskTimeline.empty())
+        m_laneMaskTimeline.push_back({0.0, laneMaskForTransform(tc, {0.f,0.f}, 1.f, 0.f)});
+}
+
+uint32_t SongEditor::laneMaskAt(double songTime) const {
+    if (m_laneMaskTimeline.empty()) return 0xFFFFFFFFu;
+    if (songTime <= m_laneMaskTimeline.front().startTime)
+        return m_laneMaskTimeline.front().mask;
+    for (size_t i = 1; i < m_laneMaskTimeline.size(); ++i)
+        if (m_laneMaskTimeline[i].startTime > songTime)
+            return m_laneMaskTimeline[i - 1].mask;
+    return m_laneMaskTimeline.back().mask;
+}
+
+bool SongEditor::isLaneEnabledAt(int lane, double songTime) const {
+    if (lane < 0 || lane >= 32) return true;
+    return (laneMaskAt(songTime) & (1u << lane)) != 0;
 }

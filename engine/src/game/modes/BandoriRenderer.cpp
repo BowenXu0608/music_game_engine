@@ -41,11 +41,13 @@ void BandoriRenderer::onInit(Renderer& renderer, const ChartData& chart,
     // Also check lane count from chart data (in case notes use higher lanes)
     for (auto& n : m_notes) {
         int lane = -1;
-        if (auto* tap = std::get_if<TapData>(&n.data))        lane = (int)tap->laneX;
-        else if (auto* hold = std::get_if<HoldData>(&n.data)) lane = (int)hold->laneX;
-        else if (auto* flick = std::get_if<FlickData>(&n.data)) lane = (int)flick->laneX;
+        if (auto* tap = std::get_if<TapData>(&n.data))        lane = static_cast<int>(std::lround(tap->laneX));
+        else if (auto* hold = std::get_if<HoldData>(&n.data)) lane = static_cast<int>(std::lround(hold->laneX));
+        else if (auto* flick = std::get_if<FlickData>(&n.data)) lane = static_cast<int>(std::lround(flick->laneX));
         if (lane >= m_laneCount) m_laneCount = lane + 1;
     }
+
+    m_judgmentDisplays.resize(m_laneCount);
 
     onResize(renderer.width(), renderer.height());
 }
@@ -272,6 +274,7 @@ void BandoriRenderer::onRender(Renderer& renderer) {
         glm::vec4 color = {1.f, 0.8f, 0.2f, 1.f};
         if (note.type == NoteType::Hold)  color = {0.2f, 0.8f, 1.f, 1.f};
         if (note.type == NoteType::Flick) color = {1.f, 0.3f, 0.3f, 1.f};
+        if (note.type == NoteType::Drag)  color = {0.6f, 1.f, 0.4f, 0.85f};
 
         // Order: NL, NR, FR, FL — matches drawQuad's BL,BR,TR,TL winding so the
         // existing index pattern (0,1,2, 2,3,0) tessellates correctly.
@@ -286,7 +289,7 @@ void BandoriRenderer::onRender(Renderer& renderer) {
 }
 
 void BandoriRenderer::showJudgment(int lane, Judgment judgment) {
-    if (lane < 0 || lane >= m_laneCount) return;
+    if (lane < 0 || lane >= static_cast<int>(m_judgmentDisplays.size())) return;
 
     m_judgmentDisplays[lane].spawn(judgment, {0.f, 0.f});
 
@@ -303,8 +306,8 @@ void BandoriRenderer::showJudgment(int lane, Judgment judgment) {
         if (note.type == NoteType::Hold) continue;
         if (m_hitNotes.count(note.id)) continue;
         int noteLane = -1;
-        if (auto* tap = std::get_if<TapData>(&note.data))        noteLane = (int)tap->laneX;
-        else if (auto* flick = std::get_if<FlickData>(&note.data)) noteLane = (int)flick->laneX;
+        if (auto* tap = std::get_if<TapData>(&note.data))        noteLane = static_cast<int>(std::lround(tap->laneX));
+        else if (auto* flick = std::get_if<FlickData>(&note.data)) noteLane = static_cast<int>(std::lround(flick->laneX));
         if (noteLane != lane) continue;
         float d = std::abs((float)(note.time - m_songTime));
         if (d > 0.15f) continue;

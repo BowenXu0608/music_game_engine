@@ -44,44 +44,53 @@ public:
     // and find the best matching note in any ring.
     void showJudgment(int lane, Judgment judgment) override;
 
-    // A chart-provided keyframe: at songTime==time the disk should be at targetAngle (radians).
-    struct RotationEvent {
-        double time;
-        float  targetAngle;
-    };
+    // Segment-based disk animation keyframes live in ChartData::diskAnimation
+    // and are imported into the local m_rotationEvents / m_moveEvents /
+    // m_scaleEvents lists in onInit.  Type aliases keep the old local names
+    // working.
+    using RotationEvent = DiskRotationEvent;
+    using MoveEvent     = DiskMoveEvent;
+    using ScaleEvent    = DiskScaleEvent;
+    using EasingType    = DiskEasing;
 
-    // Easing applied over the segment FROM this event TO the next one.
-    enum class EasingType { Linear, SineInOut, QuadInOut, CubicInOut };
+    // Sample the disk transform at a given song time using the current
+    // chart keyframes.  Editor uses this (via computeEnabledLanesAt) to
+    // determine which lanes are reachable at any point in the timeline,
+    // without running gameplay.
+    uint32_t computeEnabledLanesAt(double songTime) const;
 
-    // Chart-provided disk center keyframe.
-    struct DiskMoveEvent {
-        double     time;
-        glm::vec2  target;   // world-space XY the disk center should be at
-        EasingType easing;   // how to interpolate from here to the next event
-    };
+    // Re-seed disk animation keyframes from a (possibly edited) chart.
+    // Used by the editor when the user adds/moves/resizes keyframes so
+    // the live preview follows the edits without a full scene reload.
+    void reloadDiskAnimation(const DiskAnimation& anim);
 
 private:
     struct Ring {
-        float  radius;              // world-space radius at Z=0 hit plane
-        float  rotationSpeed;       // radians/sec — used only when rotationEvents is empty
-        float  currentAngle;        // updated each frame; read by onRender
+        float  baseRadius;          // authored world-space radius (before disk scale)
+        float  radius;              // baseRadius * m_diskScale; read by onRender/picking
+        float  rotationSpeed;       // radians/sec — unused when disk-level rotation drives m_diskRotation
+        float  currentAngle;        // mirrors m_diskRotation so downstream code can stay uniform
         std::vector<NoteEvent>       notes;
-        std::vector<RotationEvent>   rotationEvents; // sorted by time; may be empty
     };
 
-    // Returns the interpolated disk angle (radians) for songTime given a sorted
-    // list of rotation keyframes.  Falls back to fallbackAngle when list is empty.
+    // Returns the interpolated disk angle (radians) for songTime given a
+    // sorted list of segment-based rotation keyframes.  Holds at 0 before
+    // the first event and at the last target after the last event.
     static float getCurrentRotation(double songTime,
-                                    const std::vector<RotationEvent>& events,
-                                    float fallbackAngle);
+                                    const std::vector<RotationEvent>& events);
 
     // Maps t∈[0,1] through the chosen easing curve.
     static float applyEasing(float t, EasingType easing);
 
-    // Returns the interpolated disk center (world XY) for songTime.
-    // Clamps before first / after last event; returns {0,0} when list is empty.
+    // Returns the interpolated disk center (world XY) for songTime.  Holds
+    // at {0,0} before the first event and at the last target after the last.
     static glm::vec2 getDiskCenter(double songTime,
-                                   const std::vector<DiskMoveEvent>& events);
+                                   const std::vector<MoveEvent>& events);
+
+    // Returns the interpolated disk scale for songTime.  Holds at 1.0
+    // before the first event and at the last target after the last.
+    static float getDiskScale(double songTime,
+                              const std::vector<ScaleEvent>& events);
 
     // Rebuilds m_perspVP from the current m_diskCenter.
     // Called by onResize and whenever m_diskCenter changes in onUpdate.
@@ -112,11 +121,15 @@ private:
     uint32_t  m_width = 0, m_height = 0;
     double    m_songTime = 0.0;
     glm::vec2 m_diskCenter{0.f, 0.f};  // current world-space XY of disk center
+    float     m_diskScale    = 1.f;    // current uniform scale applied to radii
+    float     m_diskRotation = 0.f;    // current whole-disk rotation (radians)
 
-    std::vector<Ring>          m_rings;
-    std::vector<DiskMoveEvent> m_moveEvents; // sorted by time; may be empty
-    std::unordered_set<uint32_t> m_hitNotes; // consumed notes (skipped in onRender)
-    int                          m_trackCount = 7; // for keyboard lane → angle mapping
+    std::vector<Ring>              m_rings;
+    std::vector<RotationEvent>     m_rotationEvents; // sorted by startTime; may be empty
+    std::vector<MoveEvent>         m_moveEvents;     // sorted by startTime; may be empty
+    std::vector<ScaleEvent>        m_scaleEvents;    // sorted by startTime; may be empty
+    std::unordered_set<uint32_t>   m_hitNotes;       // consumed notes (skipped in onRender)
+    int                            m_trackCount = 7; // for keyboard lane → angle mapping
 
     // Hold context — populated in onInit from the original chart notes so the
     // cross-lane hold body can be drawn even when the main note loop has

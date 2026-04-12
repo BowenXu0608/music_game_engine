@@ -56,6 +56,7 @@ struct EditorNote {
     float scanX    = 0.f;
     float scanY    = 0.f;
     float scanEndY = -1.f;  // hold only; -1 = unused
+    int   scanHoldSweeps = 0; // extra sweeps the hold crosses (0 = single sweep)
     std::vector<std::pair<float,float>> scanPath; // slide drag path
 
     int effectiveEndTrack() const {
@@ -153,6 +154,57 @@ private:
 
     // Default laneSpan for newly placed notes (Circle mode). 1, 2, or 3 lanes.
     int       m_defaultLaneSpan = 1;
+
+    // ── Circle-mode disk animation authoring ─────────────────────────────
+    // Per-difficulty keyframe lists, matching the m_diffNotes convention.
+    // Copied into ChartData::diskAnimation on export, and read back on load
+    // via importDiskAnimationFromChart() when a chart is opened.
+    std::unordered_map<int, std::vector<DiskRotationEvent>> m_diffDiskRot;
+    std::unordered_map<int, std::vector<DiskMoveEvent>>     m_diffDiskMove;
+    std::unordered_map<int, std::vector<DiskScaleEvent>>    m_diffDiskScale;
+
+    std::vector<DiskRotationEvent>& diskRot()       { return m_diffDiskRot  [(int)m_currentDifficulty]; }
+    std::vector<DiskMoveEvent>&     diskMove()      { return m_diffDiskMove [(int)m_currentDifficulty]; }
+    std::vector<DiskScaleEvent>&    diskScale()     { return m_diffDiskScale[(int)m_currentDifficulty]; }
+    const std::vector<DiskRotationEvent>& diskRot() const {
+        return const_cast<SongEditor*>(this)->m_diffDiskRot  [(int)m_currentDifficulty];
+    }
+    const std::vector<DiskMoveEvent>&     diskMove()  const {
+        return const_cast<SongEditor*>(this)->m_diffDiskMove [(int)m_currentDifficulty];
+    }
+    const std::vector<DiskScaleEvent>&    diskScale() const {
+        return const_cast<SongEditor*>(this)->m_diffDiskScale[(int)m_currentDifficulty];
+    }
+
+    // Per-difficulty scan-line speed events (Cytus mode only).
+    std::unordered_map<int, std::vector<ScanSpeedEvent>> m_diffScanSpeed;
+    std::vector<ScanSpeedEvent>& scanSpeed() { return m_diffScanSpeed[(int)m_currentDifficulty]; }
+    const std::vector<ScanSpeedEvent>& scanSpeed() const {
+        return const_cast<SongEditor*>(this)->m_diffScanSpeed[(int)m_currentDifficulty];
+    }
+    int m_selectedScanSpeedKf = -1;
+
+    // Phase table for variable-speed scan line (rebuilt when speed events change).
+    struct ScanPhaseEntry { double time, phase, speed; };
+    std::vector<ScanPhaseEntry> m_scanPhaseTable;
+    bool m_scanPhaseDirty = true;
+    void rebuildScanPhaseTable();
+    double interpolateScanPhase(double t) const;
+
+    // Which disk-FX track the config panel is currently editing.
+    enum class DiskKfTrack { Rotation, Scale, Move };
+    DiskKfTrack m_diskKfTrack   = DiskKfTrack::Rotation;
+    int         m_selectedDiskKf = -1; // index into the current track's list; -1 = none
+
+    // Lane-enable mask timeline: piecewise-constant, one entry per sample.
+    // Rebuilt whenever a disk keyframe is edited. Each entry's mask applies
+    // from its startTime until the next entry's startTime.
+    struct LaneMaskSample { double startTime; uint32_t mask; };
+    std::vector<LaneMaskSample> m_laneMaskTimeline;
+    bool m_laneMaskDirty = true;
+    void rebuildLaneMaskTimeline();
+    uint32_t laneMaskAt(double songTime) const;
+    bool     isLaneEnabledAt(int lane, double songTime) const;
     // Index into notes() of the currently selected note (-1 = none). Set by
     // left-clicking a note in the timeline; opens the Note Properties popup.
     int       m_selectedNoteIdx = -1;
@@ -170,12 +222,13 @@ private:
     // ── Scan Line authoring state ────────────────────────────────────────────
     // Hold tool: two-click flow. First click captures start, second click
     // commits end. m_scanHoldAwaitEnd gates the flow.
-    bool  m_scanHoldAwaitEnd = false;
-    float m_scanHoldStartX   = 0.f;  // normalized [0..1]
-    float m_scanHoldStartY   = 0.f;
-    float m_scanHoldStartT   = 0.f;  // head time in seconds
-    float m_scanHoldTurnCap  = 0.f;  // time of next scan-line turn after start
-    bool  m_scanHoldGoingUp  = false;
+    bool  m_scanHoldAwaitEnd   = false;
+    float m_scanHoldStartX     = 0.f;  // normalized [0..1]
+    float m_scanHoldStartY     = 0.f;
+    float m_scanHoldStartT     = 0.f;  // head time in seconds
+    float m_scanHoldTurnCap    = 0.f;  // time of next scan-line turn after start
+    bool  m_scanHoldGoingUp    = false;
+    int   m_scanHoldExtraSweeps = 0;   // extra sweeps added via mouse wheel
 
     // Slide tool: drag-to-record with monotonic-direction gate.
     bool       m_scanSlideDragging = false;

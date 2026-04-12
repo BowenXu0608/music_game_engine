@@ -36,7 +36,7 @@ public:
 
     void setMode(GameModeRenderer* renderer, const ChartData& chart,
                  const GameModeConfig* config = nullptr);
-    void loadAudio(const std::string& path);
+    bool loadAudio(const std::string& path);
     void switchLayer(EditorLayer layer) { m_currentLayer = layer; }
 
     void launchGameplay(const SongInfo& song, Difficulty difficulty,

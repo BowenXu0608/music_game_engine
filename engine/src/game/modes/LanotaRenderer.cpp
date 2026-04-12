@@ -75,12 +75,25 @@ void LanotaRenderer::onInit(Renderer& renderer, const ChartData& chart,
 
     for (auto& [idx, notes] : ringNotes) {
         Ring ring{};
-        ring.radius        = BASE_RADIUS + idx * RING_SPACING;
+        ring.baseRadius    = BASE_RADIUS + idx * RING_SPACING;
+        ring.radius        = ring.baseRadius;
         ring.rotationSpeed = 0.4f + idx * 0.15f;
         ring.currentAngle  = 0.f;
         ring.notes         = notes;
         m_rings.push_back(std::move(ring));
     }
+
+    reloadDiskAnimation(chart.diskAnimation);
+}
+
+void LanotaRenderer::reloadDiskAnimation(const DiskAnimation& anim) {
+    m_rotationEvents = anim.rotations;
+    m_moveEvents     = anim.moves;
+    m_scaleEvents    = anim.scales;
+    auto byStart = [](const auto& a, const auto& b) { return a.startTime < b.startTime; };
+    std::sort(m_rotationEvents.begin(), m_rotationEvents.end(), byStart);
+    std::sort(m_moveEvents    .begin(), m_moveEvents    .end(), byStart);
+    std::sort(m_scaleEvents   .begin(), m_scaleEvents   .end(), byStart);
 }
 
 void LanotaRenderer::onResize(uint32_t w, uint32_t h) {
@@ -135,57 +148,75 @@ float LanotaRenderer::applyEasing(float t, EasingType easing) {
 }
 
 // -----------------------------------------------------------------------------
-// Disk center interpolation
+// Segment-based keyframe interpolation
 // -----------------------------------------------------------------------------
+// Each event describes a change that starts at `startTime` and completes
+// `duration` seconds later.  Between the end of one event and the start of
+// the next, the value holds.  Before the first event, the value is the base.
+//
+//     base ──┐            ┌─ e0.target ──┐           ┌─ e1.target ──────
+//            │  (ease)    │   (hold)     │  (ease)   │
+//            └────────────┘              └───────────┘
+//            e0.start   e0.start+dur   e1.start   e1.start+dur
+//
+// The three helpers below share this structure; each specialises the
+// interpolation for its value type (scalar, vec2, angle).
+
 glm::vec2 LanotaRenderer::getDiskCenter(double songTime,
-                                        const std::vector<DiskMoveEvent>& events) {
-    if (events.empty())                        return {0.f, 0.f};
-    if (songTime <= events.front().time)       return events.front().target;
-    if (songTime >= events.back().time)        return events.back().target;
+                                        const std::vector<MoveEvent>& events) {
+    const glm::vec2 base{0.f, 0.f};
+    if (events.empty() || songTime < events.front().startTime) return base;
 
-    // Find segment: last event with time <= songTime
     auto it = std::upper_bound(events.begin(), events.end(), songTime,
-        [](double t, const DiskMoveEvent& e){ return t < e.time; });
-    const DiskMoveEvent& next = *it;
-    const DiskMoveEvent& cur  = *std::prev(it);
+        [](double t, const MoveEvent& e){ return t < e.startTime; });
+    const MoveEvent& cur = *std::prev(it);
+    glm::vec2 prev = (std::prev(it) == events.begin())
+        ? base : std::prev(it, 2)->target;
 
-    float t = static_cast<float>((songTime - cur.time) / (next.time - cur.time));
-    float e = applyEasing(t, cur.easing);   // cur defines the easing for this segment
-    return cur.target + e * (next.target - cur.target);
+    double segEnd = cur.startTime + cur.duration;
+    if (cur.duration <= 1e-6 || songTime >= segEnd) return cur.target;
+    float t = static_cast<float>((songTime - cur.startTime) / cur.duration);
+    float e = applyEasing(std::clamp(t, 0.f, 1.f), cur.easing);
+    return prev + e * (cur.target - prev);
 }
 
-// -----------------------------------------------------------------------------
-// Disk rotation interpolation
-// -----------------------------------------------------------------------------
-// events must be sorted by time (guaranteed by onInit).
-// Before the first keyframe  → hold the first angle.
-// Between two keyframes      → linear interpolation.
-// After the last keyframe    → hold the last angle.
-// Empty list                 → return fallbackAngle unchanged (caller accumulates dt).
 float LanotaRenderer::getCurrentRotation(double songTime,
-                                         const std::vector<RotationEvent>& events,
-                                         float fallbackAngle) {
-    if (events.empty()) return fallbackAngle;
+                                         const std::vector<RotationEvent>& events) {
+    const float base = 0.f;
+    if (events.empty() || songTime < events.front().startTime) return base;
 
-    // Before first event: clamp to first keyframe angle
-    if (songTime <= events.front().time) return events.front().targetAngle;
-
-    // After last event: hold final angle
-    if (songTime >= events.back().time)  return events.back().targetAngle;
-
-    // Find the segment: last event with time <= songTime
-    // Upper-bound gives the first event strictly greater than songTime.
     auto it = std::upper_bound(events.begin(), events.end(), songTime,
-        [](double t, const RotationEvent& e){ return t < e.time; });
-    const RotationEvent& next = *it;
-    const RotationEvent& cur  = *std::prev(it);
+        [](double t, const RotationEvent& e){ return t < e.startTime; });
+    const RotationEvent& cur = *std::prev(it);
+    float prev = (std::prev(it) == events.begin())
+        ? base : std::prev(it, 2)->targetAngle;
 
-    double segLen = next.time - cur.time;
-    float  t      = static_cast<float>((songTime - cur.time) / segLen); // [0, 1]
-    return cur.targetAngle + t * (next.targetAngle - cur.targetAngle);
+    double segEnd = cur.startTime + cur.duration;
+    if (cur.duration <= 1e-6 || songTime >= segEnd) return cur.targetAngle;
+    float t = static_cast<float>((songTime - cur.startTime) / cur.duration);
+    float e = applyEasing(std::clamp(t, 0.f, 1.f), cur.easing);
+    return prev + e * (cur.targetAngle - prev);
 }
 
-void LanotaRenderer::onUpdate(float dt, double songTime) {
+float LanotaRenderer::getDiskScale(double songTime,
+                                   const std::vector<ScaleEvent>& events) {
+    const float base = 1.f;
+    if (events.empty() || songTime < events.front().startTime) return base;
+
+    auto it = std::upper_bound(events.begin(), events.end(), songTime,
+        [](double t, const ScaleEvent& e){ return t < e.startTime; });
+    const ScaleEvent& cur = *std::prev(it);
+    float prev = (std::prev(it) == events.begin())
+        ? base : std::prev(it, 2)->targetScale;
+
+    double segEnd = cur.startTime + cur.duration;
+    if (cur.duration <= 1e-6 || songTime >= segEnd) return cur.targetScale;
+    float t = static_cast<float>((songTime - cur.startTime) / cur.duration);
+    float e = applyEasing(std::clamp(t, 0.f, 1.f), cur.easing);
+    return prev + e * (cur.targetScale - prev);
+}
+
+void LanotaRenderer::onUpdate(float /*dt*/, double songTime) {
     double maxTime = 0.0;
     for (auto& ring : m_rings)
         for (auto& n : ring.notes)
@@ -193,19 +224,18 @@ void LanotaRenderer::onUpdate(float dt, double songTime) {
     double loopDuration = maxTime + 1.0;
     m_songTime = loopDuration > 0.0 ? fmod(songTime, loopDuration) : songTime;
 
-    for (auto& ring : m_rings) {
-        // Disk rotation is disabled by default so notes travel straight out
-        // along a fixed radial line. Chart-authored rotationEvents still
-        // override the disk pose if present; in that case notes inherit the
-        // disk's current angle (rd->angle + ring.currentAngle in onRender).
-        if (ring.rotationEvents.empty()) {
-            ring.currentAngle = 0.f;
-        } else {
-            ring.currentAngle = getCurrentRotation(m_songTime,
-                                                   ring.rotationEvents,
-                                                   ring.currentAngle);
-        }
-    }
+    // Whole-disk rotation drives every ring uniformly so downstream code
+    // (onRender, picking) keeps its `ring.currentAngle` reads and doesn't
+    // need any per-ring branching.
+    m_diskRotation = getCurrentRotation(m_songTime, m_rotationEvents);
+    for (auto& ring : m_rings)
+        ring.currentAngle = m_diskRotation;
+
+    // Uniform disk scale: base radii are stored at init time; rescale each
+    // frame so notes, dividers, and picks all see the same live value.
+    m_diskScale = getDiskScale(m_songTime, m_scaleEvents);
+    for (auto& ring : m_rings)
+        ring.radius = ring.baseRadius * m_diskScale;
 
     // Update disk center from movement events and rebuild the perspective VP.
     // rebuildPerspVP() is cheap (one lookAt + one matrix multiply) so calling
@@ -241,7 +271,7 @@ void LanotaRenderer::onRender(Renderer& renderer) {
     // radially outward from this disk toward each ring's hit circle.
     {
         std::vector<glm::vec2> inner;
-        buildRingPolyline(INNER_RADIUS, inner);
+        buildRingPolyline((INNER_RADIUS * m_diskScale), inner);
         renderer.lines().drawPolyline(inner, 2.f, {0.35f, 0.55f, 0.9f, 0.6f}, true);
     }
 
@@ -254,7 +284,7 @@ void LanotaRenderer::onRender(Renderer& renderer) {
         for (auto& r : m_rings) outermost = std::max(outermost, r.radius);
         // Keep the divider's inner/outer endpoints strictly between the two
         // disks: a hair outside the inner disk and a hair inside the outer.
-        const float dividerInner = INNER_RADIUS + 0.01f;
+        const float dividerInner = (INNER_RADIUS * m_diskScale) + 0.01f;
         const float dividerOuter = outermost   - 0.01f;
 
         // Dividers are drawn at lane *boundaries*, half a lane offset from
@@ -325,7 +355,7 @@ void LanotaRenderer::onRender(Renderer& renderer) {
             // APPROACH_SECS the note spawns on the small inner disk, and at
             // timeDiff == 0 it reaches the large hit ring at ring.radius.
             float travelT    = std::clamp(timeDiff / APPROACH_SECS, 0.f, 1.f);
-            float noteRadius = ring.radius - travelT * (ring.radius - INNER_RADIUS);
+            float noteRadius = ring.radius - travelT * (ring.radius - (INNER_RADIUS * m_diskScale));
             float noteZ      = 0.f;
 
             // Centre clip-space test to cull notes behind the camera.
@@ -354,7 +384,7 @@ void LanotaRenderer::onRender(Renderer& renderer) {
             // two same-time notes sit in neighboring lanes. `span` and
             // `laneAngular` are already computed above.
             float angularHalf = 0.5f * span * laneAngular * 0.96f;
-            const float radialHalf = NOTE_WORLD_R * 0.55f;      // thickness across the ring
+            const float radialHalf = (NOTE_WORLD_R * m_diskScale) * 0.55f;      // thickness across the ring
             float       innerR     = noteRadius - radialHalf;
             float       outerR     = noteRadius + radialHalf;
 
@@ -502,7 +532,7 @@ void LanotaRenderer::drawHoldBodies(Renderer& renderer) {
 
             float timeDiff = static_cast<float>(absT - m_songTime);
             float travelT  = std::clamp(timeDiff / APPROACH_SECS, 0.f, 1.f);
-            float radius   = hitRadius - travelT * (hitRadius - INNER_RADIUS);
+            float radius   = hitRadius - travelT * (hitRadius - (INNER_RADIUS * m_diskScale));
 
             float lane  = evalHoldLaneAt(h, tOff);
             float angle = laneToAngle(lane) + m_rings.front().currentAngle
@@ -512,7 +542,7 @@ void LanotaRenderer::drawHoldBodies(Renderer& renderer) {
             float aL = angle - hA;
             float aR = angle + hA;
             // Inner/outer edge of the arc tile
-            float radialHalf = NOTE_WORLD_R * 0.55f;
+            float radialHalf = (NOTE_WORLD_R * m_diskScale) * 0.55f;
             float rIn  = radius - radialHalf;
             float rOut = radius + radialHalf;
 
@@ -567,13 +597,13 @@ void LanotaRenderer::drawHoldBodies(Renderer& renderer) {
 
             float timeDiff = static_cast<float>(absT - m_songTime);
             float travelT  = std::clamp(timeDiff / APPROACH_SECS, 0.f, 1.f);
-            float radius   = hitRadius - travelT * (hitRadius - INNER_RADIUS);
+            float radius   = hitRadius - travelT * (hitRadius - (INNER_RADIUS * m_diskScale));
 
             float lane  = evalHoldLaneAt(h, tOff);
             float angle = laneToAngle(lane) + m_rings.front().currentAngle
                         - static_cast<float>(span - 1) * 0.5f * laneAngular;
             float ca = cosf(angle), sa = sinf(angle);
-            float r  = NOTE_WORLD_R * 0.4f;
+            float r  = (NOTE_WORLD_R * m_diskScale) * 0.4f;
             glm::vec3 wA{ca * (radius - r), sa * (radius - r), 0.f};
             glm::vec3 wB{ca * (radius + r), sa * (radius + r), 0.f};
             glm::vec2 perp{-sa * r, ca * r};
@@ -617,7 +647,7 @@ bool LanotaRenderer::projectNoteScreen(uint32_t noteId, glm::vec2& outScreen) co
                            - static_cast<float>(span - 1) * 0.5f * laneAngular;
             float timeDiff = static_cast<float>(note.time - m_songTime);
             float travelT    = std::clamp(timeDiff / APPROACH_SECS, 0.f, 1.f);
-            float noteRadius = ring.radius - travelT * (ring.radius - INNER_RADIUS);
+            float noteRadius = ring.radius - travelT * (ring.radius - (INNER_RADIUS * m_diskScale));
             glm::vec3 world{cosf(angle) * noteRadius,
                             sinf(angle) * noteRadius,
                             0.f};
@@ -656,7 +686,7 @@ LanotaRenderer::pickNoteAt(glm::vec2 screenPx, double songTime, float pixelTol) 
             float angle      = rd->angle + ring.currentAngle
                              - static_cast<float>(span - 1) * 0.5f * laneAngular;
             float travelT    = std::clamp(timeDiff / APPROACH_SECS, 0.f, 1.f);
-            float noteRadius = ring.radius - travelT * (ring.radius - INNER_RADIUS);
+            float noteRadius = ring.radius - travelT * (ring.radius - (INNER_RADIUS * m_diskScale));
             glm::vec3 world{cosf(angle) * noteRadius,
                             sinf(angle) * noteRadius,
                             0.f};
@@ -774,11 +804,57 @@ void LanotaRenderer::showJudgment(int lane, Judgment judgment) {
     // Use the first ring's angle offset so it matches the hold body drawn path.
     float ringAngleOffset = m_rings.empty() ? 0.f : m_rings.front().currentAngle;
     float angle = targetAngle + ringAngleOffset;
-    glm::vec3 world{cosf(angle) * INNER_RADIUS,
-                    sinf(angle) * INNER_RADIUS,
+    glm::vec3 world{cosf(angle) * (INNER_RADIUS * m_diskScale),
+                    sinf(angle) * (INNER_RADIUS * m_diskScale),
                     0.f};
     glm::vec4 clip = m_perspVP * glm::vec4(world, 1.f);
     if (clip.w <= 0.f) return;
     glm::vec2 screen = w2s(world, m_perspVP, sw, sh);
     m_renderer->particles().emitBurst(screen, pColor, pCount, 200.f, 8.f, 0.5f);
+}
+
+// -----------------------------------------------------------------------------
+// Lane reachability at a given song time
+// -----------------------------------------------------------------------------
+// Returns a bitmask (bit i = 1 ↔ lane i reachable).  A lane is reachable
+// when its projected outer-ring hit point (at m_rings.front().baseRadius,
+// scaled by the sampled disk scale, rotated by the sampled disk rotation,
+// centred at the sampled disk center) falls inside the viewport inset by
+// a 5% margin on each side.  Used by the editor to gray out unreachable
+// lanes on the note-placement timeline without running gameplay.
+uint32_t LanotaRenderer::computeEnabledLanesAt(double songTime) const {
+    if (m_trackCount <= 0 || m_rings.empty() || m_width == 0 || m_height == 0)
+        return 0xFFFFFFFFu;
+
+    const float sw = static_cast<float>(m_width);
+    const float sh = static_cast<float>(m_height);
+    const float marginX = sw * 0.05f;
+    const float marginY = sh * 0.05f;
+
+    // Sample the same transforms the runtime uses.
+    const float     scale  = getDiskScale   (songTime, m_scaleEvents);
+    const float     rot    = getCurrentRotation(songTime, m_rotationEvents);
+    const glm::vec2 center = getDiskCenter  (songTime, m_moveEvents);
+
+    // Rebuild the perspective VP around the sampled disk center without
+    // touching mutable state — this is a const query.
+    float aspect = static_cast<float>(m_width) / static_cast<float>(m_height);
+    Camera persp = Camera::makePerspective(FOV_Y_DEG, aspect, 0.1f, 200.f);
+    persp.lookAt({center.x, center.y, 4.f}, {center.x, center.y, 0.f});
+    glm::mat4 vp = persp.viewProjection();
+
+    const float outerR = m_rings.front().baseRadius * scale;
+
+    uint32_t mask = 0;
+    for (int lane = 0; lane < m_trackCount && lane < 32; ++lane) {
+        float a = PI * 0.5f - (static_cast<float>(lane) / m_trackCount) * TWO_PI + rot;
+        glm::vec3 world{std::cos(a) * outerR, std::sin(a) * outerR, 0.f};
+        glm::vec4 clip = vp * glm::vec4(world, 1.f);
+        if (clip.w <= 0.f) continue;
+        glm::vec2 sp = w2s(world, vp, sw, sh);
+        if (sp.x < marginX || sp.x > sw - marginX) continue;
+        if (sp.y < marginY || sp.y > sh - marginY) continue;
+        mask |= (1u << lane);
+    }
+    return mask;
 }

@@ -18,7 +18,7 @@ public:
     void run();
 
     void setMode(GameModeRenderer* renderer, const ChartData& chart);
-    void loadAudio(const std::string& path);
+    bool loadAudio(const std::string& path);
 
 private:
     class Impl;

@@ -3,6 +3,20 @@
 #include <cmath>
 #include <glm/glm.hpp>
 
+namespace {
+constexpr float kPi    = 3.14159265358979f;
+constexpr float kTwoPi = 6.28318530717959f;
+}
+
+int HitDetector::angleToLane(float angle) const {
+    // Reverse of LanotaRenderer: angle = PI/2 - (lane/trackCount) * 2PI
+    float raw = (kPi * 0.5f - angle) / kTwoPi * m_trackCount;
+    int lane = static_cast<int>(std::round(raw));
+    // Wrap into [0, trackCount)
+    lane = ((lane % m_trackCount) + m_trackCount) % m_trackCount;
+    return lane;
+}
+
 void HitDetector::init(const ChartData& chart) {
     m_activeNotes = chart.notes;
     std::sort(m_activeNotes.begin(), m_activeNotes.end(),
@@ -15,15 +29,16 @@ std::vector<MissedNote> HitDetector::update(double songTime) {
     std::vector<MissedNote> missed;
 
     auto it = std::remove_if(m_activeNotes.begin(), m_activeNotes.end(),
-        [songTime, &missed](const NoteEvent& note) {
+        [this, songTime, &missed](const NoteEvent& note) {
             if (note.time < songTime - 0.1) {
                 MissedNote m;
                 m.noteId = note.id;
                 m.noteType = note.type;
                 m.lane = -1;
-                if (auto* tap = std::get_if<TapData>(&note.data))        m.lane = (int)tap->laneX;
-                else if (auto* hold = std::get_if<HoldData>(&note.data)) m.lane = (int)hold->laneX;
-                else if (auto* flick = std::get_if<FlickData>(&note.data)) m.lane = (int)flick->laneX;
+                if (auto* tap = std::get_if<TapData>(&note.data))          m.lane = static_cast<int>(std::lround(tap->laneX));
+                else if (auto* hold = std::get_if<HoldData>(&note.data))   m.lane = static_cast<int>(std::lround(hold->laneX));
+                else if (auto* flick = std::get_if<FlickData>(&note.data)) m.lane = static_cast<int>(std::lround(flick->laneX));
+                else if (auto* ring = std::get_if<LanotaRingData>(&note.data)) m.lane = angleToLane(ring->angle);
                 missed.push_back(m);
                 return true;
             }
@@ -40,11 +55,13 @@ std::optional<HitResult> HitDetector::checkHit(int lane, double songTime) {
         if (std::abs(timingDelta) <= 0.1f) {
             int noteLane = -1;
             if (std::holds_alternative<TapData>(it->data)) {
-                noteLane = static_cast<int>(std::get<TapData>(it->data).laneX);
+                noteLane = static_cast<int>(std::lround(std::get<TapData>(it->data).laneX));
             } else if (std::holds_alternative<HoldData>(it->data)) {
-                noteLane = static_cast<int>(std::get<HoldData>(it->data).laneX);
+                noteLane = static_cast<int>(std::lround(std::get<HoldData>(it->data).laneX));
             } else if (std::holds_alternative<FlickData>(it->data)) {
-                noteLane = static_cast<int>(std::get<FlickData>(it->data).laneX);
+                noteLane = static_cast<int>(std::lround(std::get<FlickData>(it->data).laneX));
+            } else if (std::holds_alternative<LanotaRingData>(it->data)) {
+                noteLane = angleToLane(std::get<LanotaRingData>(it->data).angle);
             }
 
             if (noteLane == lane) {
@@ -55,6 +72,23 @@ std::optional<HitResult> HitDetector::checkHit(int lane, double songTime) {
         }
     }
     return std::nullopt;
+}
+
+std::vector<HitResult> HitDetector::consumeDrags(int lane, double songTime) {
+    std::vector<HitResult> results;
+    // Wider window than checkHit: ±0.15s so drags feel forgiving
+    for (auto it = m_activeNotes.begin(); it != m_activeNotes.end(); ) {
+        if (it->type != NoteType::Drag) { ++it; continue; }
+        float timingDelta = static_cast<float>(it->time - songTime);
+        if (std::abs(timingDelta) > 0.15f) { ++it; continue; }
+        int noteLane = -1;
+        if (std::holds_alternative<TapData>(it->data))
+            noteLane = static_cast<int>(std::lround(std::get<TapData>(it->data).laneX));
+        if (noteLane != lane) { ++it; continue; }
+        results.push_back({it->id, timingDelta, it->type});
+        it = m_activeNotes.erase(it);
+    }
+    return results;
 }
 
 std::optional<HitResult> HitDetector::consumeNoteById(uint32_t noteId, double songTime) {
@@ -128,7 +162,7 @@ std::optional<uint32_t> HitDetector::beginHold(int lane, double songTime) {
 
         if (std::holds_alternative<HoldData>(it->data)) {
             const auto& hd = std::get<HoldData>(it->data);
-            int noteLane = static_cast<int>(hd.laneX);
+            int noteLane = static_cast<int>(std::lround(hd.laneX));
             if (noteLane == lane) {
                 ActiveHold hold{};
                 hold.noteId        = it->id;
@@ -142,35 +176,51 @@ std::optional<uint32_t> HitDetector::beginHold(int lane, double songTime) {
                 hold.sampleOffsets.reserve(hd.samplePoints.size());
                 for (const auto& sp : hd.samplePoints) hold.sampleOffsets.push_back(sp.tOffset);
                 std::sort(hold.sampleOffsets.begin(), hold.sampleOffsets.end());
-                m_activeHolds[it->id] = std::move(hold);
-                return it->id;
+                uint32_t id = it->id;
+                m_activeHolds[id] = std::move(hold);
+                m_activeNotes.erase(it);
+                return id;
             }
         }
     }
     return std::nullopt;
 }
 
-std::optional<uint32_t> HitDetector::beginHoldById(uint32_t noteId, double songTime) {
+std::optional<HitResult> HitDetector::beginHoldById(uint32_t noteId, double songTime) {
     for (auto it = m_activeNotes.begin(); it != m_activeNotes.end(); ++it) {
         if (it->id != noteId) continue;
-        if (!std::holds_alternative<HoldData>(it->data)) return std::nullopt;
         float timingDelta = static_cast<float>(it->time - songTime);
         if (std::abs(timingDelta) > 0.15f) return std::nullopt;
-        const auto& hd = std::get<HoldData>(it->data);
+
         ActiveHold hold{};
         hold.noteId        = it->id;
         hold.startTime     = songTime;
         hold.noteStartTime = it->time;
-        hold.noteDuration  = hd.duration;
         hold.noteType      = it->type;
-        hold.lane          = static_cast<int>(hd.laneX);
-        hold.currentLane   = hold.lane;
-        hold.holdData      = hd;
-        hold.sampleOffsets.reserve(hd.samplePoints.size());
-        for (const auto& sp : hd.samplePoints) hold.sampleOffsets.push_back(sp.tOffset);
-        std::sort(hold.sampleOffsets.begin(), hold.sampleOffsets.end());
+
+        if (std::holds_alternative<HoldData>(it->data)) {
+            const auto& hd = std::get<HoldData>(it->data);
+            hold.noteDuration  = hd.duration;
+            hold.lane          = static_cast<int>(std::lround(hd.laneX));
+            hold.currentLane   = hold.lane;
+            hold.holdData      = hd;
+            hold.sampleOffsets.reserve(hd.samplePoints.size());
+            for (const auto& sp : hd.samplePoints) hold.sampleOffsets.push_back(sp.tOffset);
+            std::sort(hold.sampleOffsets.begin(), hold.sampleOffsets.end());
+        } else if (std::holds_alternative<TapData>(it->data) && it->type == NoteType::Slide) {
+            // Slides use TapData with a duration field
+            const auto& td = std::get<TapData>(it->data);
+            hold.noteDuration = td.duration;
+            hold.lane         = static_cast<int>(std::lround(td.laneX));
+            hold.currentLane  = hold.lane;
+        } else {
+            return std::nullopt;
+        }
+
+        HitResult result{it->id, timingDelta, it->type};
         m_activeHolds[it->id] = std::move(hold);
-        return it->id;
+        m_activeNotes.erase(it);
+        return result;
     }
     return std::nullopt;
 }
@@ -195,8 +245,10 @@ std::optional<uint32_t> HitDetector::beginHoldPosition(glm::vec2 screenPos,
                 hold.noteStartTime = it->time;
                 hold.noteDuration  = arc.duration;
                 hold.noteType      = it->type;
-                m_activeHolds[it->id] = std::move(hold);
-                return it->id;
+                uint32_t id = it->id;
+                m_activeHolds[id] = std::move(hold);
+                m_activeNotes.erase(it);
+                return id;
             }
         }
     }
@@ -297,4 +349,9 @@ float HitDetector::getSlideAccuracy(uint32_t noteId) const {
     // Placeholder: return a fixed good accuracy until arc evaluation is wired in
     // TODO: compare samples against evaluated arc positions
     return 0.05f;
+}
+
+const HitDetector::ActiveHold* HitDetector::getActiveHold(uint32_t noteId) const {
+    auto it = m_activeHolds.find(noteId);
+    return (it != m_activeHolds.end()) ? &it->second : nullptr;
 }

@@ -15,6 +15,9 @@
 #include <glm/glm.hpp>
 #include <filesystem>
 #ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
 #include <windows.h>
 #include <ole2.h>
 #pragma comment(lib, "ole32.lib")
@@ -207,10 +210,14 @@ void Engine::update(float dt) {
         if (songT >= 0.0) {
             // Lead-in finished — start audio now
             if (!m_pendingAudioPath.empty()) {
-                loadAudio(m_pendingAudioPath);
+                if (loadAudio(m_pendingAudioPath)) {
+                    m_audioStarted = true;
+                }
                 m_pendingAudioPath.clear();
+            } else {
+                // No audio file — proceed without audio sync
+                m_audioStarted = true;
             }
-            m_audioStarted = true;
         }
     } else {
         double dspPos = m_audio.positionSeconds();
@@ -266,6 +273,31 @@ void Engine::update(float dt) {
             for (auto it = m_activeTouches.begin(); it != m_activeTouches.end(); ) {
                 if (it->second == id) it = m_activeTouches.erase(it);
                 else                  ++it;
+            }
+        }
+
+        // Scan-line slide sample ticks — compare touch position against
+        // expected path position and score Perfect/Miss.
+        if (auto* cyt = dynamic_cast<CytusRenderer*>(m_activeMode.get())) {
+            auto slideTicks = cyt->consumeSlideTicks(songT);
+            for (auto& st : slideTicks) {
+                // Find which touch is tracking this slide's hold
+                glm::vec2 expected{st.expectedX, st.expectedY};
+                bool hit = false;
+                for (auto& [touchId, noteId] : m_activeTouches) {
+                    if (noteId != st.noteId) continue;
+                    // Check last known slide position from HitDetector
+                    auto holdIt = m_hitDetector.getActiveHold(st.noteId);
+                    if (holdIt && !holdIt->positionSamples.empty()) {
+                        glm::vec2 touchPos = holdIt->positionSamples.back();
+                        float dist = glm::length(touchPos - expected);
+                        hit = dist < ScreenMetrics::dp(64.f); // generous radius
+                    }
+                    break;
+                }
+                Judgment j = hit ? Judgment::Perfect : Judgment::Miss;
+                m_judgment.recordJudgment(j);
+                m_score.onJudgment(j);
             }
         }
 
@@ -400,14 +432,15 @@ void Engine::clearBackgroundTexture() {
     }
 }
 
-void Engine::loadAudio(const std::string& path) {
+bool Engine::loadAudio(const std::string& path) {
     std::cout << "[Engine] Loading audio: " << path << "\n";
     if (!m_audio.load(path)) {
         std::cout << "[Engine] FAILED to load audio: " << path << "\n";
-        return;
+        return false;
     }
     m_audio.play();
     std::cout << "[Engine] Audio playing\n";
+    return true;
 }
 
 void Engine::setMode(GameModeRenderer* renderer, const ChartData& chart,
@@ -417,6 +450,7 @@ void Engine::setMode(GameModeRenderer* renderer, const ChartData& chart,
     m_activeMode.reset(renderer);
     m_activeMode->onInit(m_renderer, chart, config);
     m_hitDetector.init(chart);
+    if (config) m_hitDetector.setTrackCount(config->trackCount);
     m_judgment.reset();
     m_score.reset();
     m_activeTouches.clear();
@@ -846,22 +880,36 @@ void Engine::handleGestureLaneBased(const GestureEvent& evt, double songTime) {
         case GestureType::Tap: {
             auto hit = m_hitDetector.checkHit(lane, songTime);
             if (hit) dispatchHitResult(*hit, lane);
+            // Consume any drag notes at this lane (auto-hit on touch)
+            for (auto& dh : m_hitDetector.consumeDrags(lane, songTime))
+                dispatchHitResult(dh, lane);
             break;
         }
         case GestureType::Flick: {
             auto hit = m_hitDetector.checkHit(lane, songTime);
-            if (hit && hit->noteType == NoteType::Flick) {
-                float speed = glm::length(evt.velocity);
-                float dirAcc = speed > 0.f ? std::abs(evt.velocity.x) / speed : 0.f;
-                auto judgment = m_judgment.judgeFlick(hit->timingDelta, dirAcc);
-                m_judgment.recordJudgment(judgment);
-                m_score.onJudgment(judgment);
+            if (hit) {
+                if (hit->noteType == NoteType::Flick) {
+                    float speed = glm::length(evt.velocity);
+                    float dirAcc = speed > 0.f ? std::abs(evt.velocity.x) / speed : 0.f;
+                    auto judgment = m_judgment.judgeFlick(hit->timingDelta, dirAcc);
+                    m_judgment.recordJudgment(judgment);
+                    m_score.onJudgment(judgment);
+                    if (m_activeMode) m_activeMode->showJudgment(lane, judgment);
+                } else {
+                    // Flick gesture on a non-flick note — treat as plain tap
+                    dispatchHitResult(*hit, lane);
+                }
             }
             break;
         }
         case GestureType::HoldBegin: {
             auto noteId = m_hitDetector.beginHold(lane, songTime);
-            if (noteId) m_activeTouches[evt.touchId] = *noteId;
+            if (noteId) {
+                m_activeTouches[evt.touchId] = *noteId;
+                // Dispatch head judgment for the hold start
+                HitResult headHit{*noteId, 0.f, NoteType::Hold};
+                dispatchHitResult(headHit, lane);
+            }
             break;
         }
         // A held finger that starts moving turns into a Slide. For cross-lane
@@ -872,6 +920,9 @@ void Engine::handleGestureLaneBased(const GestureEvent& evt, double songTime) {
             auto it = m_activeTouches.find(evt.touchId);
             if (it != m_activeTouches.end())
                 m_hitDetector.updateHoldLane(it->second, lane);
+            // Drag notes auto-hit when a sliding finger passes through
+            for (auto& dh : m_hitDetector.consumeDrags(lane, songTime))
+                dispatchHitResult(dh, lane);
             break;
         }
         case GestureType::HoldEnd:
@@ -996,8 +1047,11 @@ void Engine::handleGestureCircle(LanotaRenderer& lan,
         case GestureType::HoldBegin: {
             auto pick = lan.pickNoteAt(evt.pos, songTime, pickPx);
             if (!pick) break;
-            auto noteId = m_hitDetector.beginHoldById(pick->noteId, songTime);
-            if (noteId) m_activeTouches[evt.touchId] = *noteId;
+            auto hit = m_hitDetector.beginHoldById(pick->noteId, songTime);
+            if (hit) {
+                m_activeTouches[evt.touchId] = hit->noteId;
+                judgeAndFeedback(*hit, m_judgment.judge(hit->timingDelta));
+            }
             break;
         }
         case GestureType::HoldEnd: {
@@ -1063,17 +1117,20 @@ void Engine::handleGestureScanLine(CytusRenderer& cyt,
             // Both Hold and Slide begin as a held touch — beginHoldById
             // handles either NoteType as long as HitDetector has it as a
             // duration-bearing note.
-            auto noteId = m_hitDetector.beginHoldById(pick->noteId, songTime);
-            if (noteId) m_activeTouches[evt.touchId] = *noteId;
+            auto hit = m_hitDetector.beginHoldById(pick->noteId, songTime);
+            if (hit) {
+                m_activeTouches[evt.touchId] = hit->noteId;
+                judgeAndFeedback(*hit, m_judgment.judge(hit->timingDelta));
+            }
             break;
         }
         case GestureType::SlideBegin:
-        case GestureType::SlideMove:
-            // Scan-line slides trace a free path; HitDetector's lane-based
-            // sample-tick machinery doesn't apply. Head was consumed on the
-            // initial HoldBegin (tap); final judgment happens on release.
-            // Mid-flight slide scoring is a documented follow-up.
+        case GestureType::SlideMove: {
+            auto it = m_activeTouches.find(evt.touchId);
+            if (it != m_activeTouches.end())
+                m_hitDetector.updateSlide(it->second, evt.pos, songTime);
             break;
+        }
         case GestureType::SlideEnd:
         case GestureType::HoldEnd: {
             auto it = m_activeTouches.find(evt.touchId);
