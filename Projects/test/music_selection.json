@@ -102,9 +102,9 @@
           "achievement": "",
           "artist": "me",
           "audioFile": "assets/audio/M800001Ms8Wg3B9QbY.mp3",
-          "chartEasy": "assets/charts/Ba_easy.json",
-          "chartHard": "assets/charts/Ba_hard.json",
-          "chartMedium": "assets/charts/Ba_medium.json",
+          "chartEasy": "",
+          "chartHard": "assets/charts/Ba_scan_hard.json",
+          "chartMedium": "",
           "coverImage": "assets/textures/_cgi-bin_mmwebwx-bin_webwxgetmsgimg__&MsgID=7729328432611575821&skey=@crypt_fe033b05_37901c151e3a0950a9b03cdfef2f6453&mmweb_appid=wx_webfilehelper.jpg",
           "gameMode": {
             "apImage": "",

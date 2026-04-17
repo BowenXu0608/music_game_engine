@@ -1,9 +1,13 @@
 #include "ProjectHub.h"
 #include "engine/Engine.h"
 #include <imgui.h>
+#include <algorithm>
+#include <chrono>
 #include <fstream>
 #include <filesystem>
 #include <nlohmann/json.hpp>
+#include <set>
+#include <string>
 #include <cctype>
 #include <cstdlib>
 #ifdef _WIN32
@@ -27,6 +31,126 @@ static std::string sanitizeName(const char* src) {
     }
     return out;
 }
+
+// ── packaging helpers ───────────────────────────────────────────────────────
+//
+// The editor keeps per-song charts for every game mode that the author ever
+// touched (circle, drop2d, drop3d, scan, ...). When we actually package a
+// game the user only wants the currently-selected mode to ship — prior modes
+// become dead weight in the APK. We solve this without disturbing the live
+// project by copying the project into a staging folder and pruning the
+// unused charts there, then pointing the build script at the staging copy.
+
+namespace {
+
+// Collect the set of chart basenames referenced by music_selection.json for
+// every song. These are the files we must keep in the package. Also emits
+// the set of song names that appeared, which lets the prune step know which
+// files are "per-song" (vs. demos / shared charts that we never touch).
+void collectKeepSet(const fs::path& stagingRoot,
+                    std::set<std::string>& keepOut,
+                    std::set<std::string>& songNamesOut) {
+    fs::path msPath = stagingRoot / "music_selection.json";
+    if (!fs::exists(msPath)) return;
+    try {
+        std::ifstream f(msPath);
+        auto j = nlohmann::json::parse(f);
+        if (!j.contains("sets")) return;
+        for (const auto& st : j["sets"]) {
+            if (!st.contains("songs")) continue;
+            for (const auto& song : st["songs"]) {
+                if (song.contains("name") && song["name"].is_string())
+                    songNamesOut.insert(song["name"].get<std::string>());
+                for (const char* key : {"chartEasy", "chartMedium", "chartHard"}) {
+                    if (!song.contains(key) || !song[key].is_string()) continue;
+                    std::string p = song[key].get<std::string>();
+                    if (p.empty()) continue;
+                    std::replace(p.begin(), p.end(), '\\', '/');
+                    auto slash = p.rfind('/');
+                    keepOut.insert(slash == std::string::npos ? p : p.substr(slash + 1));
+                }
+            }
+        }
+    } catch (...) {
+        // music_selection.json missing or malformed → nothing to prune.
+    }
+}
+
+// Walk `<stagingRoot>/assets/charts/` and delete every `<song>_*.json` that
+// isn't referenced by music_selection.json. Files whose name doesn't start
+// with any known song prefix are left alone (covers demo.json and any
+// charts the author added outside the mode-keyed naming scheme).
+void prunePackagedCharts(const fs::path& stagingRoot) {
+    std::set<std::string> keepNames;
+    std::set<std::string> songNames;
+    collectKeepSet(stagingRoot, keepNames, songNames);
+    if (songNames.empty()) return;
+
+    fs::path chartsDir = stagingRoot / "assets" / "charts";
+    if (!fs::exists(chartsDir)) return;
+
+    for (const auto& entry : fs::directory_iterator(chartsDir)) {
+        if (!entry.is_regular_file()) continue;
+        if (entry.path().extension() != ".json") continue;
+        std::string fname = entry.path().filename().string();
+
+        bool belongsToSong = false;
+        for (const auto& sn : songNames) {
+            if (fname.size() > sn.size() + 1 &&
+                fname.compare(0, sn.size(), sn) == 0 &&
+                fname[sn.size()] == '_') {
+                belongsToSong = true;
+                break;
+            }
+        }
+        if (!belongsToSong) continue;          // not a per-song chart — keep
+        if (keepNames.count(fname)) continue;  // currently-active mode — keep
+
+        std::error_code ec;
+        fs::remove(entry.path(), ec);
+    }
+}
+
+// Build a staging copy of the project containing only the files the APK
+// build needs, with obsolete mode charts pruned. Returns the staging path,
+// or an empty path on failure (in which case the caller should fall back to
+// the original project path).
+fs::path stageProjectForPackaging(const fs::path& projectRoot,
+                                  const std::string& safeName) {
+    auto now = std::chrono::system_clock::now().time_since_epoch();
+    auto ts  = std::chrono::duration_cast<std::chrono::milliseconds>(now).count();
+    fs::path staging = fs::temp_directory_path() /
+                       (safeName + "_apk_stage_" + std::to_string(ts));
+    std::error_code ec;
+    fs::remove_all(staging, ec);
+    fs::create_directories(staging, ec);
+    if (ec) return {};
+
+    // Mirror what build_apk.bat pulls in: top-level JSONs + assets/.
+    constexpr const char* topFiles[] = {
+        "project.json", "start_screen.json", "music_selection.json",
+    };
+    for (const char* name : topFiles) {
+        fs::path src = projectRoot / name;
+        if (fs::exists(src))
+            fs::copy_file(src, staging / name, fs::copy_options::overwrite_existing, ec);
+    }
+    fs::path assetsSrc = projectRoot / "assets";
+    if (fs::exists(assetsSrc)) {
+        fs::copy(assetsSrc, staging / "assets",
+                 fs::copy_options::recursive |
+                 fs::copy_options::overwrite_existing, ec);
+    }
+    if (ec) {
+        fs::remove_all(staging, ec);
+        return {};
+    }
+
+    prunePackagedCharts(staging);
+    return staging;
+}
+
+} // namespace
 
 // ── scan ─────────────────────────────────────────────────────────────────────
 
@@ -280,6 +404,13 @@ void ProjectHub::startApkBuild(const ProjectInfo& proj) {
     fs::path script = fs::absolute("../../tools/build_apk.bat");
     if (!fs::exists(script)) script = fs::absolute("tools/build_apk.bat");
 
+    // Stage a pruned copy of the project so the APK only ships each song's
+    // currently-selected game mode. Falls back to the live project path if
+    // staging fails (e.g. temp dir unwritable).
+    fs::path staging = stageProjectForPackaging(fs::path(proj.path), safeName);
+    std::string buildPath = staging.empty() ? proj.path : staging.string();
+    m_apkStagingPath = staging.string();
+
     m_apkProjectName = proj.name;
     m_apkOutputPath  = outputApk.string();
     m_apkLogPath     = logPath.string();
@@ -287,13 +418,12 @@ void ProjectHub::startApkBuild(const ProjectInfo& proj) {
     m_showApkDialog  = true;
     m_apkExitCode    = 0;
 
-    std::string projectPath = proj.path;
-    std::string scriptStr   = script.string();
-    std::string outStr      = outputApk.string();
-    std::string logStr      = logPath.string();
+    std::string scriptStr = script.string();
+    std::string outStr    = outputApk.string();
+    std::string logStr    = logPath.string();
 
-    m_apkFuture = std::async(std::launch::async, [scriptStr, projectPath, outStr, logStr]() -> int {
-        std::string cmd = "\"\"" + scriptStr + "\" \"" + projectPath +
+    m_apkFuture = std::async(std::launch::async, [scriptStr, buildPath, outStr, logStr]() -> int {
+        std::string cmd = "\"\"" + scriptStr + "\" \"" + buildPath +
                           "\" \"" + outStr + "\" > \"" + logStr + "\" 2>&1\"";
         return std::system(cmd.c_str());
     });
@@ -306,6 +436,14 @@ void ProjectHub::renderApkDialog() {
         m_apkFuture.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
         m_apkExitCode = m_apkFuture.get();
         m_apkRunning  = false;
+
+        // Drop the pruned staging copy — it has served its purpose whether
+        // the build succeeded or failed.
+        if (!m_apkStagingPath.empty()) {
+            std::error_code ec;
+            fs::remove_all(m_apkStagingPath, ec);
+            m_apkStagingPath.clear();
+        }
     }
 
     ImVec2 center{ImGui::GetIO().DisplaySize.x * 0.5f,

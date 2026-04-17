@@ -115,5 +115,6 @@ private:
     std::string      m_apkProjectName;
     std::string      m_apkOutputPath;
     std::string      m_apkLogPath;
+    std::string      m_apkStagingPath;   // pruned project copy used for packaging
     std::future<int> m_apkFuture;
 };

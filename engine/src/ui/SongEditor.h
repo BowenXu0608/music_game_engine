@@ -5,6 +5,7 @@
 #include "engine/AudioEngine.h"
 #include "engine/AudioAnalyzer.h"
 #include "game/chart/ChartTypes.h"
+#include "game/chart/ScanPageUtils.h"
 #include "renderer/vulkan/TextureManager.h"
 #include <vulkan/vulkan.h>
 #include <GLFW/glfw3.h>
@@ -219,6 +220,42 @@ private:
     void rebuildScanPhaseTable();
     double interpolateScanPhase(double t) const;
 
+    // ── Scan-line page-based editor model ──────────────────────────────────
+    // A "page" is one sweep of the scan line. The scene window shows exactly
+    // one page at a time with Prev/Next navigation. Pages default to
+    // 240/BPM seconds (one bar @ 4/4); m_diffScanPages holds sparse per-page
+    // speed overrides. m_scanPageTable is rebuilt lazily from timingPoints +
+    // overrides + song end time.
+    std::unordered_map<int, std::vector<ScanPageOverride>> m_diffScanPages;
+    std::vector<ScanPageOverride>& scanPages() {
+        return m_diffScanPages[(int)m_currentDifficulty];
+    }
+    const std::vector<ScanPageOverride>& scanPages() const {
+        return const_cast<SongEditor*>(this)->m_diffScanPages[(int)m_currentDifficulty];
+    }
+
+    int                        m_scanCurrentPage    = 0;
+    std::vector<ScanPageInfo>  m_scanPageTable;
+    bool                       m_scanPageTableDirty = true;
+    void  rebuildScanPageTable();
+    int    scanPageForTime(double t) const;
+    double scanPageYToTime(int pageIdx, float y01) const;
+    float  scanPageTimeToY(int pageIdx, double t) const;
+
+    // Cross-page slide draft: parallel to m_scanSlideDraft.scanPath, one
+    // page-index per node. Populated while m_scanSlideDragging is true.
+    std::vector<int>           m_scanSlidePathPages;
+
+    // Pending-navigation state for cross-page holds: while m_scanHoldAwaitEnd
+    // is true and the user clicks Prev/Next, we remember the start page to
+    // compute the final scanHoldSweeps count.
+    int                        m_scanHoldStartPage  = 0;
+
+    // Edge-driven auto page turning during hold/slide authoring. Armed when
+    // the cursor first enters an edge zone; re-armed when it leaves. Prevents
+    // rapid-fire flipping on a stationary cursor.
+    bool                       m_scanPageEdgeArmed  = false;
+
     // Which disk-FX track the config panel is currently editing.
     enum class DiskKfTrack { Rotation, Scale, Move };
     DiskKfTrack m_diskKfTrack   = DiskKfTrack::Rotation;
@@ -248,22 +285,19 @@ private:
     int       m_holdLastTrack   = -1;      // last track sampled while dragging
 
     // ── Scan Line authoring state ────────────────────────────────────────────
-    // Hold tool: two-click flow. First click captures start, second click
-    // commits end. m_scanHoldAwaitEnd gates the flow.
-    bool  m_scanHoldAwaitEnd   = false;
-    float m_scanHoldStartX     = 0.f;  // normalized [0..1]
-    float m_scanHoldStartY     = 0.f;
-    float m_scanHoldStartT     = 0.f;  // head time in seconds
-    float m_scanHoldTurnCap    = 0.f;  // time of next scan-line turn after start
-    bool  m_scanHoldGoingUp    = false;
-    int   m_scanHoldExtraSweeps = 0;   // extra sweeps added via mouse wheel
+    // Hold tool: click-start captures head, mouse-wheel / Prev-Next navigation
+    // extends the span in page units, second click commits end.
+    bool  m_scanHoldAwaitEnd    = false;
+    float m_scanHoldStartX      = 0.f;  // normalized [0..1]
+    float m_scanHoldStartY      = 0.f;
+    float m_scanHoldStartT      = 0.f;  // head time in seconds
+    bool  m_scanHoldGoingUp     = false; // cached page.goingUp at start
+    int   m_scanHoldExtraSweeps = 0;    // extra pages crossed
 
-    // Slide tool: drag-to-record with monotonic-direction gate.
+    // Slide tool: drag-to-record with per-page monotonicity.
     bool       m_scanSlideDragging = false;
     EditorNote m_scanSlideDraft{};
     bool       m_scanSlideGoingUp  = false;
-    float      m_scanSlideLastY    = 0.f;
-    float      m_scanSlideTurnCap  = 0.f;
 
     // ── Arc editing state (Arcaea 3D mode) ──────────────────────────────────
     bool       m_arcPlacing     = false;  // click-to-place in progress
@@ -315,8 +349,14 @@ private:
     float scanLineTimeForFrac(float t, float frac) const;
 
     void renderScanLineToolbar();
-    void handleScanLineInput(ImVec2 origin, ImVec2 size, float curTime,
-                             bool hovered, Engine* engine);
+    // Page-based scan-line authoring. Called from renderSceneView's ScanLine
+    // branch. Replaces the older full-song single-scan-line handler.
+    void renderScanPageNav(ImVec2 origin, float width, class Engine* engine);
+    void handleScanLinePageInput(ImVec2 origin, ImVec2 size, float curTime,
+                                 bool hovered, Engine* engine);
+    // Find the nearest AI-detected beat marker to `time`; return that marker
+    // if within `tolerance` seconds, else return `time` unchanged.
+    float snapToScanMarker(float time, float tolerance) const;
 
     // ── Beat analysis ────────────────────────────────────────────────────────
     AudioAnalyzer m_analyzer;

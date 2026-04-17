@@ -712,3 +712,136 @@ The 3D Drop pipeline is now complete and matches the Arcaea reference end-to-end
 - Bright notes render in their real colors (no rim-glow blowout)
 - Hit particles fire in world space at the note's actual intersection with the judgment plane
 - No chart looping
+
+
+## 2026-04-17 (late) — Scan Line editor redesign: paginated view + AI markers
+
+Replaced the full-song single-scan-line authoring flow with a paginated editor. The old UX required seeking to the right moment and clicking within a 10px band of the animated scan line — tedious. The new model is simpler to reason about and much faster to chart.
+
+### Page model
+
+A "page" = one sweep of the scan line (top->bottom OR bottom->top). Default duration = `240/BPM` = one bar @ 4/4. Each page can have a `speed` multiplier (default 1.0); page duration = `(240/BPM) / speed`. Pages alternate direction: page 0 bottom->top, page 1 top->bottom, ...
+
+Data lives in `ChartData::scanPageOverrides`, a sparse vector of `{pageIndex, speed}`. `ScanPageUtils.h` has two shared helpers:
+- `buildScanPageTable(timingPoints, overrides, songEnd)` walks the timeline and emits `ScanPageInfo` entries. BPM changes that fall mid-page truncate the current page (`partialTail=true`) so the scan line stays continuous across BPM boundaries.
+- `expandScanPagesToSpeedEvents(pageTable, overrides)` emits one zero-duration `ScanSpeedEvent` per overridden page boundary. `CytusRenderer::buildPhaseTable` already handles `duration=0` as a step change (verified in code before wiring), so the runtime is unchanged.
+
+On save, overrides are authoritative: if `scanPages` is present, `scanSpeedEvents` is regenerated from it at load and any on-disk speed events are discarded. Legacy charts with only `scanSpeedEvents` still work.
+
+### Scene view
+
+`SongEditor::renderSceneView`'s ScanLine branch now reserves a ~36px header strip for navigation (Prev/Next buttons + page label + per-page speed `InputFloat` + `Place All`) and renders the body rect as a single page:
+
+- 4-beat grid, page-direction arrow (^/v) at the end edge
+- Scan line drawn only when `curTime` is within this page's window
+- Notes with `time ∈ page range` plotted at `(scanX, scanPageTimeToY(page, time))`
+- Holds/slides overlapping the page draw body segments clipped to `[pageStart, pageEnd]`; `▲`/`▼` triangles at the start/end edge mark cross-page portions
+- In-progress hold preview / slide preview redrawn per-page
+
+### Input flow
+
+`handleScanLinePageInput` (replaces the old `handleScanLineInput`):
+- Tap/Flick: click anywhere in the body, time = `scanPageYToTime(pageIdx, y)`, X free.
+- Hold: click-anywhere starts, mouse-wheel extends in **page units** (was "extra sweeps" — now synonymous), Prev/Next navigation auto-expands span, click on target page commits. Stored as `scanHoldSweeps = currentPage - startPage`.
+- Slide: LMB start, RMB adds node (each node stores its `pageIndex` in a parallel `m_scanSlidePathPages` vector), Prev/Next allowed between nodes. On release, each node's absolute time is `scanPageYToTime(pageIdx, y)`. `samplePoints` are time deltas from the head.
+
+Clicks snap to the nearest AI beat marker within `min(0.06s, 0.15 * page.duration)`; `Alt` disables snap. `PageUp`/`PageDown` keyboard navigation.
+
+### AI beat markers integrated
+
+The editor's existing `AudioAnalyzer` pipeline (`tools/analyze_audio.py` via Madmom) fills `m_diffMarkers[currentDiff]`. Scan Line mode now consumes them:
+1. **Render ticks** — faint dashed orange horizontal lines on each page at `y = scanPageTimeToY(page, markerTime)`. Same color as 2D-mode timeline markers.
+2. **Snap-to-marker** — Tap/Flick/Hold start and Hold end all run through `snapToScanMarker(time, tol)` unless Alt is held.
+3. **Place All** — button on the nav strip that iterates `markers()` and emits Taps with alternating X ∈ {0.5, 0.25, 0.75} to avoid a straight vertical column. De-dupes against existing notes within 10ms.
+
+Also: if the chart has no user-authored timing points but `m_bpmChanges` was populated by analysis, `rebuildScanPageTable` uses the AI tempo map for page durations.
+
+### Files touched
+
+- `engine/src/game/chart/ChartTypes.h` — `ScanPageOverride`, `ChartData::scanPageOverrides`
+- `engine/src/game/chart/ScanPageUtils.h` (new) — shared page-table builder + speed-event expander
+- `engine/src/game/chart/ChartLoader.cpp` — parse `scanPages` JSON, rebuild `scanSpeedEvents` on load
+- `engine/src/ui/SongEditor.h` — per-difficulty `m_diffScanPages`, `m_scanPageTable`, helpers
+- `engine/src/ui/SongEditor.cpp` — `rebuildScanPageTable`, `scanPageForTime/YToTime/TimeToY`, `snapToScanMarker`, `renderScanPageNav`, `handleScanLinePageInput`; rewrote the Scan Line branch of `renderSceneView`; added `scanPages` save path with legacy fallback; deleted the old `handleScanLineInput`
+- `docs/sys6_game_modes.md`, `docs/sys7_editor.md` — updated
+
+No runtime changes to `CytusRenderer`. Verified in Debug + Release.
+
+## 2026-04-17 (even later) — Scan Line editor UX polish pass
+
+Iterated on the paginated Scan Line editor after a user pass surfaced four rough edges:
+
+### "I can't see the Analyze / Marker buttons in this mode"
+
+Those buttons live in `renderNoteToolbar`, which is only rendered inside the timeline panel. Scan-line mode skips the timeline panel entirely, so the user never saw them. Fix: in the scene-embedded toolbar row (next to Tap/Flick/Hold/Slide) add a `[Select]` pointer-tool button, then the full `[Analyze Beats]` + `[Clear Markers]` block. The callback is the same one the 2D toolbar uses — marker populate, dominant BPM, dynamic BPM map — plus `m_scanPageTableDirty = true` so page durations re-derive from the detected tempo.
+
+### "Page speed should match BPM after analysis"
+
+Reason to touch this: before the fix, analyzing the audio populated `m_bpmChanges` / `m_dominantBpm` but never re-ran `rebuildScanPageTable`. So the editor kept the old fallback 120 BPM until something else invalidated the table. Fix: set `m_scanPageTableDirty = true` in both Analyze Beats callbacks (scan-line toolbar + 2D toolbar). Next frame, `renderSceneView`'s ScanLine branch calls `rebuildScanPageTable()`, which now also consults `m_bpmChanges` when there are no user-authored timing points.
+
+### "When I move the cursor I should see the scan line move AND the page change"
+
+Two pieces to this:
+
+1. *Cursor-follow scan line.* In `renderSceneView`'s ScanLine branch, when the mouse is inside the page body, draw an amber line at the cursor Y plus a floating `t=M:SS.sss` label showing the projected song time. Separate from the blue playback scan line (which tracks `curTime`).
+2. *Auto page turn on cursor motion.* The earlier version only fired during hold/slide authoring. Relaxed to always work on cursor motion into an edge — dropped the `inFlight` gate, added a start-edge case (previous page), but gated the whole thing behind `!playing` so the scan-line auto-advance owns the page during playback.
+
+### "Why is page 1 showing at t=5.61s?"
+
+Root cause: the in-scene auto-advance only ran when `engine->audio().isPlaying()`. Once playback paused or stopped, `curTime` could still be several seconds into the song, but the page stayed wherever the user last left it. Fix:
+
+- Dropped the `isPlaying` gate. Auto-advance now fires whenever `curTime` is outside the current page's range — covers playback, scrubbing, and manual time edits uniformly.
+- To prevent Prev/Next/jump/edge-flip from fighting the auto-sync, each of those now also assigns `m_sceneTime = pageTable[target].startTime` (and stops the audio when appropriate). So navigating to page N leaves `curTime == pageStart(N)` on the next frame, and auto-sync stays put.
+- Edge-flip is explicitly disabled while playing (`engine->audio().isPlaying() == true`) to avoid fighting the playback-driven advance.
+
+### Files touched
+
+- `engine/src/ui/SongEditor.cpp` — scan-line toolbar row: added Select/Analyze/Clear buttons; renderSceneView ScanLine branch: cursor-follow scan line + `curTime`-synced auto-advance; handleScanLinePageInput: edge auto-flip generalized + playback-guarded; renderScanPageNav: Prev/Next seek `m_sceneTime`; both Analyze Beats callbacks set `m_scanPageTableDirty`
+- `engine/src/ui/SongEditor.h` — `m_scanPageEdgeArmed` flag; `handleScanLinePageInput` param `engine` now named (was `/*engine*/`)
+- `docs/sys7_editor.md`, `docs/sys6_game_modes.md` — updated Scan Line sections
+
+No runtime changes. Clean build in Debug + Release.
+
+## 2026-04-17 (late) — Beat marker persistence + APK packaging prune
+
+Two small-but-load-bearing changes to how projects survive the round-trip through disk and through the APK packager.
+
+### Markers round-trip with the chart
+
+Before today, every `exportAllCharts()` wrote notes only. Beat markers — whether AI-detected by `AudioAnalyzer` or hand-placed — lived in `m_diffMarkers` and evaporated on reload. Authors had to re-run Analyze Beats every time they reopened a song, every mode.
+
+Fix: added `ChartData::markers` (a `std::vector<float>`) and threaded it through the three layers that already handle note persistence.
+
+- `ChartTypes.h` — new `markers` field on `ChartData`.
+- `SongEditor::buildChartFromNotes` — populates `chart.markers = markers()` for the current difficulty.
+- `SongEditor::exportAllCharts` — emits a `"markers": [t0, t1, ...]` JSON array; the outer loop now exports any difficulty whose notes OR markers are non-empty (previously it skipped note-less difficulties, which would have dropped marker-only authoring work).
+- `ChartLoader::loadUnified` — parses the `"markers"` array into `ChartData::markers` using the same literal-scan pattern as `scanPages`.
+- `SongEditor::loadChartFile` — hydrates `m_diffMarkers[(int)diff]` from `chart.markers` so the ticks appear immediately on reopen.
+
+Applies to every game mode (2D/3D DropNotes, Circle, ScanLine) since they all share the same chart file format.
+
+### APK packaging only ships the selected mode per song
+
+The editor's per-(mode, difficulty) file layout from 2026-04-12 means a song the author has touched in four modes has eight to twelve chart files on disk. Useful in the editor, wasteful in the APK. User asked: at package time, each song should keep only the charts for its *currently-selected* mode; the live editor project must not be mutated.
+
+Solution: stage a pruned copy before handing off to `build_apk.bat`.
+
+- `engine/src/ui/ProjectHub.cpp` gained three helpers in an anonymous namespace:
+  - `collectKeepSet(stagingRoot, keepOut, songNamesOut)` — parses `music_selection.json`, walks `sets[].songs[]`, and collects (song name, chart basenames) pairs from `chartEasy/chartMedium/chartHard`.
+  - `prunePackagedCharts(stagingRoot)` — deletes every `assets/charts/<song>_*.json` whose basename isn't in the keep set. Files not prefixed with any known song name (demo charts, shared charts) are left alone.
+  - `stageProjectForPackaging(projectRoot, safeName)` — creates `%TEMP%/<safeName>_apk_stage_<ts>/`, selectively copies `project.json`, `start_screen.json`, `music_selection.json`, and `assets/` (mirroring what `build_apk.bat` pulls in), then calls the prune.
+- `ProjectHub::startApkBuild` now calls `stageProjectForPackaging` and passes the staging path to `build_apk.bat` (falling back to the live path if staging fails). Stored in new member `m_apkStagingPath`.
+- `ProjectHub::renderApkDialog` removes the staging dir via `fs::remove_all` when the async build future resolves — success or failure.
+- `build_apk.bat` was **not** modified; the prune is invisible to the shell script.
+
+### Files touched
+
+- `engine/src/game/chart/ChartTypes.h` — `ChartData::markers`
+- `engine/src/game/chart/ChartLoader.cpp` — parse `"markers"` array in `loadUnified`
+- `engine/src/ui/SongEditor.cpp` — populate `chart.markers` in `buildChartFromNotes`, emit in `exportAllCharts`, loop now covers marker-only difficulties, hydrate in `loadChartFile`
+- `engine/src/ui/ProjectHub.h` — `m_apkStagingPath` member
+- `engine/src/ui/ProjectHub.cpp` — staging + prune helpers, wired into `startApkBuild` + `renderApkDialog`
+- `docs/sys7_editor.md` — Beat marker persistence section
+- `docs/sys8_android.md` — Packaging-time chart prune section + APK Contents annotation
+
+Clean Debug build.

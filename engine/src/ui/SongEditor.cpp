@@ -371,8 +371,13 @@ void SongEditor::loadChartFile(Difficulty diff, const std::string& chartRel) {
             m_diffDiskMove [(int)diff] = chart.diskAnimation.moves;
             m_diffDiskScale[(int)diff] = chart.diskAnimation.scales;
             m_diffScanSpeed[(int)diff] = chart.scanSpeedEvents;
+            m_diffScanPages[(int)diff] = chart.scanPageOverrides;
+            // Beat markers (saved per chart file for every mode).
+            if (!chart.markers.empty())
+                m_diffMarkers[(int)diff] = chart.markers;
             m_laneMaskDirty = true;
             m_scanPhaseDirty = true;
+            m_scanPageTableDirty = true;
 
             std::cout << "[SongEditor] Loaded " << edNotes.size() << " notes from " << chartRel << "\n";
         } catch (...) {
@@ -392,10 +397,13 @@ void SongEditor::reloadChartsForCurrentMode() {
     m_diffDiskMove.clear();
     m_diffDiskScale.clear();
     m_diffScanSpeed.clear();
+    m_diffScanPages.clear();
     m_bpmChanges.clear();
     m_dominantBpm = 0.f;
     m_laneMaskDirty = true;
     m_scanPhaseDirty = true;
+    m_scanPageTableDirty = true;
+    m_scanCurrentPage = 0;
 
     const char* diffSuffix[] = {"easy", "medium", "hard"};
     Difficulty  diffs[]      = {Difficulty::Easy, Difficulty::Medium, Difficulty::Hard};
@@ -617,6 +625,65 @@ void SongEditor::render(Engine* engine) {
                 toolBtn("Flick", NoteTool::Flick);
                 toolBtn("Hold",  NoteTool::Hold);
                 toolBtn("Slide", NoteTool::Slide);
+
+                // Marker (pointer) tool: click to select existing notes.
+                {
+                    bool on = (m_noteTool == NoteTool::None);
+                    if (on) {
+                        ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.55f, 0.45f, 0.25f, 1.f));
+                        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.65f, 0.55f, 0.30f, 1.f));
+                        ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(0.45f, 0.35f, 0.20f, 1.f));
+                    }
+                    if (ImGui::Button("Select", ImVec2(58, 0))) {
+                        m_noteTool = NoteTool::None;
+                        m_scanHoldAwaitEnd  = false;
+                        m_scanSlideDragging = false;
+                    }
+                    if (on) ImGui::PopStyleColor(3);
+                    ImGui::SameLine();
+                }
+
+                // Beat-analysis block (mirrors renderNoteToolbar's version).
+                ImGui::SameLine(0.f, 20.f);
+                if (m_analyzer.isRunning()) {
+                    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.3f, 0.3f, 0.3f, 1.f));
+                    ImGui::Button("Analyzing...", ImVec2(100, 0));
+                    ImGui::PopStyleColor();
+                } else {
+                    ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.15f, 0.5f, 0.2f, 1.f));
+                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.2f,  0.6f, 0.25f, 1.f));
+                    ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(0.1f,  0.4f, 0.15f, 1.f));
+                    if (ImGui::Button("Analyze Beats", ImVec2(110, 0))) {
+                        if (m_song && !m_song->audioFile.empty()) {
+                            std::string fullAudioPath = m_projectPath + "/" + m_song->audioFile;
+                            try { fullAudioPath = fs::canonical(fullAudioPath).string(); } catch (...) {}
+                            m_analyzer.setCallback([this](AudioAnalysisResult result) {
+                                if (result.success) {
+                                    m_diffMarkers[(int)Difficulty::Easy]   = std::move(result.easyMarkers);
+                                    m_diffMarkers[(int)Difficulty::Medium] = std::move(result.mediumMarkers);
+                                    m_diffMarkers[(int)Difficulty::Hard]   = std::move(result.hardMarkers);
+                                    m_bpmChanges   = std::move(result.bpmChanges);
+                                    m_dominantBpm  = result.bpm;
+                                    m_scanPageTableDirty = true;  // re-derive page durations from detected BPM
+                                    std::string bpmInfo = "BPM: " + std::to_string((int)result.bpm);
+                                    if (m_bpmChanges.size() > 1)
+                                        bpmInfo += " (dynamic: " + std::to_string(m_bpmChanges.size()) + " sections)";
+                                    m_statusMsg   = "Beats analyzed! " + bpmInfo;
+                                    m_statusTimer = 5.f;
+                                } else {
+                                    m_analysisErrorMsg  = result.errorMessage;
+                                    m_showAnalysisError = true;
+                                }
+                            });
+                            m_analyzer.startAnalysis(fullAudioPath);
+                        }
+                    }
+                    ImGui::PopStyleColor(3);
+                }
+                ImGui::SameLine();
+                if (ImGui::Button("Clear Markers", ImVec2(110, 0))) {
+                    markers().clear();
+                }
                 ImGui::NewLine();
             }
 
@@ -3030,383 +3097,435 @@ void SongEditor::renderSceneView(ImDrawList* dl, ImVec2 origin, ImVec2 size,
                     IM_COL32(200, 200, 200, 180), "Circle Mode");
 
     } else {
-        // ── Scan Line mode ──────────────────────────────────────────────────
-        // BPM-driven scan line (1 bar per sweep, dominant BPM, 120 fallback).
-        // Coordinate helpers — every conversion between the normalized
-        // scan-space stored on EditorNote and the ImGui local rect must go
-        // through these so resizing the scene stays proportional.
-        auto scanToLocal = [&](float nx, float ny) -> ImVec2 {
-            return ImVec2(origin.x + nx * size.x, origin.y + ny * size.y);
-        };
-        float frac    = scanLineFrac(curTime);
-        bool  goingUp = scanLineGoingUp(curTime);
-        float scanY   = scanToLocal(0.f, frac).y;
+        // ── Scan Line mode (paginated) ──────────────────────────────────────
+        // A "page" = one sweep of the scan line. The scene shows exactly one
+        // page at a time with a header strip for navigation + per-page speed.
+        // Page 0 sweeps bottom→top (scan line at y=1 at startTime, y=0 at end).
+        if (m_scanPageTableDirty) rebuildScanPageTable();
 
-        // Scan line (glow + core)
-        dl->AddLine(ImVec2(origin.x + 10, scanY), ImVec2(pMax.x - 10, scanY),
-                    IM_COL32(0, 200, 255, 60), 6.f);
-        dl->AddLine(ImVec2(origin.x + 10, scanY), ImVec2(pMax.x - 10, scanY),
-                    IM_COL32(255, 255, 255, 220), 2.f);
+        if (m_scanPageTable.empty()) {
+            dl->AddRectFilled(origin, pMax, IM_COL32(14, 14, 20, 255));
+            dl->AddText(ImVec2(origin.x + 12, origin.y + 12),
+                        IM_COL32(200, 200, 200, 200),
+                        "Scan Line Mode — load audio to generate pages.");
+        } else {
+            if (m_scanCurrentPage < 0) m_scanCurrentPage = 0;
+            if (m_scanCurrentPage >= (int)m_scanPageTable.size())
+                m_scanCurrentPage = (int)m_scanPageTable.size() - 1;
 
-        // Direction arrow at right edge
-        {
-            float ax = pMax.x - 18.f;
-            float ay = scanY;
-            if (goingUp) {
-                dl->AddTriangleFilled(ImVec2(ax, ay - 10), ImVec2(ax - 7, ay + 2),
-                                      ImVec2(ax + 7, ay + 2),
-                                      IM_COL32(255, 255, 255, 200));
-            } else {
-                dl->AddTriangleFilled(ImVec2(ax, ay + 10), ImVec2(ax - 7, ay - 2),
-                                      ImVec2(ax + 7, ay - 2),
-                                      IM_COL32(255, 255, 255, 200));
-            }
-        }
-
-        // ── Cytus-style page visibility ───────────────────────────────────
-        // Each sweep (period T_sweep) is a "page". A note belongs to the
-        // page containing its head time, and is visible ONLY while the
-        // playhead is within that same page — no cross-turn overlap. Within
-        // a page the note scales/fades in as the scan line approaches it
-        // and stays visible until the end of the page (or the tail + small
-        // fade-out for notes that end near a turn).
-        constexpr float scanTailPad = 0.25f; // seconds after tail to fade out
-        const float T_sweep = scanLinePeriod();
-
-        auto pageIdx = [&](float t) -> int {
-            return T_sweep > 1e-4f ? (int)std::floor(t / T_sweep) : 0;
-        };
-        const int curPage = pageIdx(curTime);
-
-        auto computePageVis = [&](const EditorNote& n,
-                                  float& outAlpha, float& outScale) -> bool {
-            // Drop legacy/lane-authored notes with no scan position — they
-            // would otherwise all stack at exactly (0,0) (the top-left).
-            if (n.scanX < 0.001f && n.scanY < 0.001f &&
-                n.scanEndY < 0.f && n.scanPath.empty())
-                return false;
-
-            const int notePage = pageIdx(n.time);
-            if (n.type == EditorNoteType::Hold && n.scanHoldSweeps > 0) {
-                const int endPage = pageIdx(n.endTime);
-                if (curPage < notePage || curPage > endPage) return false;
-            } else {
-                if (notePage != curPage) return false;
+            // Auto-advance the page to match the current song time whenever
+            // curTime falls outside the active page's range. Covers playback,
+            // scrubbing, and any manual time edits. Manual Prev/Next/edge-
+            // flip navigation keeps its target by also seeking m_sceneTime
+            // below, so this sync doesn't snap back.
+            {
+                const auto& pCheck = m_scanPageTable[m_scanCurrentPage];
+                double pStart = pCheck.startTime;
+                double pEnd   = pCheck.startTime + pCheck.duration;
+                if ((double)curTime < pStart - 1e-4 ||
+                    (double)curTime > pEnd   + 1e-4)
+                {
+                    int autoP = scanPageForTime((double)curTime);
+                    if (autoP != m_scanCurrentPage) m_scanCurrentPage = autoP;
+                }
             }
 
-            const float pageStart = (float)notePage * T_sweep;
-            const float pageEnd   = pageStart + T_sweep;
-            const float tailTime  = (n.type == EditorNoteType::Hold ||
-                                     n.type == EditorNoteType::Slide)
-                                    ? std::max(n.endTime, n.time) : n.time;
+            const ScanPageInfo& page = m_scanPageTable[m_scanCurrentPage];
+            const float headerH  = 36.f;
+            const ImVec2 bodyOrigin(origin.x, origin.y + headerH);
+            const ImVec2 bodySize(size.x, std::max(10.f, size.y - headerH));
+            const ImVec2 bodyMax(bodyOrigin.x + bodySize.x,
+                                 bodyOrigin.y + bodySize.y);
 
-            // Approach phase: from pageStart up to note.time the note
-            // grows from a small seed to full size. Matches Cytus's
-            // "scan line approaches, note appears and scales up".
-            if (curTime <= n.time) {
-                float denom = std::max(0.0001f, n.time - pageStart);
-                float u = std::clamp((curTime - pageStart) / denom, 0.f, 1.f);
-                outScale = 0.30f + 0.70f * u;
-                outAlpha = 0.25f + 0.75f * u;
-                return true;
-            }
+            // Body background
+            dl->AddRectFilled(bodyOrigin, bodyMax, IM_COL32(12, 12, 18, 255));
 
-            // Post-hit phase: for Tap/Flick fade out quickly; for
-            // Hold/Slide stay full-visible until tailTime, then fade.
-            if (curTime <= tailTime) {
-                outScale = 1.f;
-                outAlpha = 1.f;
-                return true;
-            }
-            float tailDt = curTime - tailTime;
-            if (tailDt > scanTailPad || curTime > pageEnd) return false;
-            outScale = 1.f;
-            outAlpha = std::clamp(1.f - tailDt / scanTailPad, 0.f, 1.f);
-            return true;
-        };
+            // Navigation header (Prev/Next, label, speed input, Place All).
+            renderScanPageNav(origin, size.x, engine);
 
-        // ── Catmull-Rom tessellated slide path ─────────────────────────────
-        // Each (p[i], p[i+1]) segment is interpolated with (p[i-1], p[i+2])
-        // as tangent anchors; endpoints are duplicated. Produces a smooth
-        // curve that still passes through every authored control point.
-        auto drawSmoothPath = [&](const std::vector<std::pair<float,float>>& pts,
-                                  ImU32 col, float thickness) {
-            if (pts.size() < 2) return;
-            constexpr int SUBDIV = 12;
-            auto lerp = [](float a, float b, float t) { return a + (b - a) * t; };
-            auto cr = [&](float p0, float p1, float p2, float p3, float t) {
-                float t2 = t * t, t3 = t2 * t;
-                return 0.5f * ((2.f * p1) +
-                               (-p0 + p2) * t +
-                               (2.f*p0 - 5.f*p1 + 4.f*p2 - p3) * t2 +
-                               (-p0 + 3.f*p1 - 3.f*p2 + p3) * t3);
+            // Normalized→local converters for the body rect.
+            auto scanToLocal = [&](float nx, float ny) -> ImVec2 {
+                return ImVec2(bodyOrigin.x + nx * bodySize.x,
+                              bodyOrigin.y + ny * bodySize.y);
             };
-            ImVec2 prev = scanToLocal(pts.front().first, pts.front().second);
-            for (size_t i = 0; i + 1 < pts.size(); ++i) {
-                const auto& p1 = pts[i];
-                const auto& p2 = pts[i + 1];
-                const auto& p0 = (i == 0) ? p1 : pts[i - 1];
-                const auto& p3 = (i + 2 < pts.size()) ? pts[i + 2] : p2;
-                for (int s = 1; s <= SUBDIV; ++s) {
-                    float t = (float)s / (float)SUBDIV;
-                    float nx = cr(p0.first,  p1.first,  p2.first,  p3.first,  t);
-                    float ny = cr(p0.second, p1.second, p2.second, p3.second, t);
-                    ImVec2 cur = scanToLocal(nx, ny);
-                    dl->AddLine(prev, cur, col, thickness);
-                    prev = cur;
-                }
-                (void)lerp;
+
+            // Beat grid: 4 subdivisions
+            for (int k = 1; k <= 3; ++k) {
+                float y = bodyOrigin.y + (float)k / 4.f * bodySize.y;
+                dl->AddLine(ImVec2(bodyOrigin.x + 2, y),
+                            ImVec2(bodyMax.x    - 2, y),
+                            IM_COL32(60, 60, 80, 110), 1.f);
             }
-        };
 
-        auto withAlpha = [](ImU32 col, float a) -> ImU32 {
-            int aa = std::clamp((int)(((col >> IM_COL32_A_SHIFT) & 0xFF) * a), 0, 255);
-            return (col & ~IM_COL32_A_MASK) | ((ImU32)aa << IM_COL32_A_SHIFT);
-        };
-
-        for (const auto& note : curNotes) {
-            float alpha = 1.f, scale = 1.f;
-            if (!computePageVis(note, alpha, scale)) continue;
-
-            ImVec2 head = scanToLocal(note.scanX, note.scanY);
-            float nx = head.x, ny = head.y;
-            ImU32 col     = withAlpha(noteColor(note.type), alpha);
-            ImU32 colDim  = withAlpha(noteColorDim(note.type), alpha);
-            ImU32 colOut  = withAlpha(IM_COL32(255,255,255,160), alpha);
-
-            switch (note.type) {
-                case EditorNoteType::Tap:
-                    dl->AddCircleFilled(ImVec2(nx, ny), 10.f * scale, col);
-                    dl->AddCircle(ImVec2(nx, ny), 11.f * scale, colOut, 0, 1.5f);
-                    break;
-                case EditorNoteType::Flick: {
-                    bool up = scanLineGoingUp(note.time);
-                    float s = 12.f * scale;
-                    if (up) {
-                        dl->AddTriangleFilled(ImVec2(nx, ny - s),
-                                              ImVec2(nx - s * 0.85f, ny + s * 0.6f),
-                                              ImVec2(nx + s * 0.85f, ny + s * 0.6f), col);
-                    } else {
-                        dl->AddTriangleFilled(ImVec2(nx, ny + s),
-                                              ImVec2(nx - s * 0.85f, ny - s * 0.6f),
-                                              ImVec2(nx + s * 0.85f, ny - s * 0.6f), col);
-                    }
-                    break;
+            // Direction arrow indicator at the "end" edge of the page.
+            {
+                float ax = bodyMax.x - 18.f;
+                float endY = page.goingUp ? bodyOrigin.y + 14.f
+                                          : bodyMax.y    - 14.f;
+                ImU32 dcol = IM_COL32(255, 255, 255, 180);
+                if (page.goingUp) {
+                    dl->AddTriangleFilled(ImVec2(ax, endY - 6),
+                                          ImVec2(ax - 5, endY + 4),
+                                          ImVec2(ax + 5, endY + 4), dcol);
+                } else {
+                    dl->AddTriangleFilled(ImVec2(ax, endY + 6),
+                                          ImVec2(ax - 5, endY - 4),
+                                          ImVec2(ax + 5, endY - 4), dcol);
                 }
-                case EditorNoteType::Hold: {
-                    float hw = 6.f * scale;
-                    if (note.scanHoldSweeps == 0) {
-                        // Single-sweep hold: simple rectangle
-                        float ey = scanToLocal(note.scanX, note.scanEndY).y;
-                        dl->AddRectFilled(ImVec2(nx - hw, std::min(ny, ey)),
-                                          ImVec2(nx + hw, std::max(ny, ey)),
-                                          colDim, 2.f);
-                        dl->AddCircleFilled(ImVec2(nx, ey), 6.f * scale, col);
-                    } else {
-                        // Multi-sweep hold: zigzag body segments
-                        // Sweep 0: from start Y to the first turn boundary
-                        bool sweepUp = scanLineGoingUp(note.time);
-                        float segStartY = ny;
-                        float turnY;
-                        for (int s = 0; s <= note.scanHoldSweeps; ++s) {
-                            if (s < note.scanHoldSweeps) {
-                                // Full sweep segment to the turn boundary
-                                turnY = scanToLocal(0.f, sweepUp ? 0.f : 1.f).y;
+            }
+
+            // AI beat-recommendation ticks (dashed, orange).
+            {
+                const double pStart = page.startTime;
+                const double pEnd   = page.startTime + page.duration;
+                ImU32 mkCol = IM_COL32(255, 140, 60, 140);
+                for (float t : markers()) {
+                    if ((double)t < pStart || (double)t > pEnd) continue;
+                    float y01 = scanPageTimeToY(m_scanCurrentPage, (double)t);
+                    float y   = bodyOrigin.y + y01 * bodySize.y;
+                    float xS = bodyOrigin.x + 4.f;
+                    float xE = bodyMax.x    - 4.f;
+                    for (float x = xS; x < xE; x += 14.f) {
+                        float x2 = std::min(x + 8.f, xE);
+                        dl->AddLine(ImVec2(x, y), ImVec2(x2, y), mkCol, 1.f);
+                    }
+                }
+            }
+
+            // Scan line: playback position (only when song time is in this page).
+            {
+                const double pStart = page.startTime;
+                const double pEnd   = page.startTime + page.duration;
+                if ((double)curTime >= pStart && (double)curTime <= pEnd) {
+                    float y01   = scanPageTimeToY(m_scanCurrentPage,
+                                                  (double)curTime);
+                    float scanY = bodyOrigin.y + y01 * bodySize.y;
+                    dl->AddLine(ImVec2(bodyOrigin.x + 10, scanY),
+                                ImVec2(bodyMax.x    - 10, scanY),
+                                IM_COL32(0, 200, 255, 60), 6.f);
+                    dl->AddLine(ImVec2(bodyOrigin.x + 10, scanY),
+                                ImVec2(bodyMax.x    - 10, scanY),
+                                IM_COL32(255, 255, 255, 220), 2.f);
+                }
+            }
+
+            // Cursor-follow scan line: tracks the mouse Y when hovering the
+            // scene body. Gives the user a live preview of where a click
+            // would place a note in time, and pairs with the edge auto-flip.
+            {
+                ImVec2 mposPreview = ImGui::GetMousePos();
+                bool insideBody = (mposPreview.x >= bodyOrigin.x &&
+                                   mposPreview.x <= bodyMax.x &&
+                                   mposPreview.y >= bodyOrigin.y &&
+                                   mposPreview.y <= bodyMax.y);
+                if (insideBody) {
+                    float cy = mposPreview.y;
+                    dl->AddLine(ImVec2(bodyOrigin.x + 10, cy),
+                                ImVec2(bodyMax.x    - 10, cy),
+                                IM_COL32(255, 200, 80, 80), 5.f);
+                    dl->AddLine(ImVec2(bodyOrigin.x + 10, cy),
+                                ImVec2(bodyMax.x    - 10, cy),
+                                IM_COL32(255, 240, 180, 180), 1.5f);
+                    // Show the cursor's projected song time.
+                    float  y01    = std::clamp((cy - bodyOrigin.y) / std::max(1.f, bodySize.y), 0.f, 1.f);
+                    double tPrev  = scanPageYToTime(m_scanCurrentPage, y01);
+                    char tbuf[48];
+                    int mins = (int)(tPrev / 60.0);
+                    double secs = tPrev - mins * 60.0;
+                    snprintf(tbuf, sizeof(tbuf), "t=%d:%06.3f", mins, secs);
+                    ImVec2 tsz = ImGui::CalcTextSize(tbuf);
+                    ImVec2 tp(std::clamp(mposPreview.x + 12.f,
+                                         bodyOrigin.x + 4.f,
+                                         bodyMax.x - tsz.x - 4.f),
+                              std::clamp(cy - tsz.y - 4.f,
+                                         bodyOrigin.y + 4.f,
+                                         bodyMax.y - tsz.y - 4.f));
+                    dl->AddText(ImVec2(tp.x + 1, tp.y + 1),
+                                IM_COL32(0, 0, 0, 200), tbuf);
+                    dl->AddText(tp, IM_COL32(255, 230, 180, 240), tbuf);
+                }
+            }
+
+            // Helpers: page-edge Y values (body-local).
+            auto startEdgeY = [&]() { return page.goingUp ? bodyMax.y : bodyOrigin.y; };
+            auto endEdgeY   = [&]() { return page.goingUp ? bodyOrigin.y : bodyMax.y; };
+            // Draw a cross-page marker glyph. `fromPrev`=true draws at start edge
+            // (▲ pointing into time-forward direction); false draws at end edge.
+            auto drawCrossMarker = [&](float xN, bool fromPrev, ImU32 col) {
+                float cx = bodyOrigin.x + std::clamp(xN, 0.01f, 0.99f) * bodySize.x;
+                float cy = fromPrev ? startEdgeY() : endEdgeY();
+                // Triangle points in time-forward direction (start→end).
+                float step = (endEdgeY() - startEdgeY()) > 0 ? +8.f : -8.f;
+                if (!fromPrev) step = -step;
+                ImVec2 apex(cx, cy + step);
+                dl->AddTriangleFilled(apex,
+                                      ImVec2(cx - 7.f, cy),
+                                      ImVec2(cx + 7.f, cy),
+                                      col);
+            };
+
+            auto withAlpha = [](ImU32 col, float a) -> ImU32 {
+                int aa = std::clamp((int)(((col >> IM_COL32_A_SHIFT) & 0xFF) * a),
+                                    0, 255);
+                return (col & ~IM_COL32_A_MASK) | ((ImU32)aa << IM_COL32_A_SHIFT);
+            };
+
+            // ── Render notes overlapping this page ──────────────────────────
+            for (const auto& note : curNotes) {
+                // Skip legacy lane-only notes (no scan position).
+                if (note.scanX < 0.001f && note.scanY < 0.001f &&
+                    note.scanEndY < 0.f && note.scanPath.empty())
+                    continue;
+
+                const double pStart = page.startTime;
+                const double pEnd   = page.startTime + page.duration;
+
+                // Time range occupied by this note (endTime is 0 for taps/flicks).
+                double nStart = note.time;
+                double nEnd   = (note.endTime > note.time) ? note.endTime : nStart;
+
+                // Skip if the note doesn't intersect this page's time range.
+                if (nEnd < pStart || nStart > pEnd) continue;
+
+                ImU32 col    = noteColor(note.type);
+                ImU32 colDim = noteColorDim(note.type);
+                ImU32 colOut = IM_COL32(255, 255, 255, 160);
+
+                // Head position on the current page (if the head is on this page).
+                bool headOnPage = (nStart >= pStart && nStart <= pEnd);
+
+                switch (note.type) {
+                    case EditorNoteType::Tap:
+                        if (headOnPage) {
+                            float y01 = scanPageTimeToY(m_scanCurrentPage, nStart);
+                            ImVec2 h = scanToLocal(note.scanX, y01);
+                            dl->AddCircleFilled(h, 10.f, col);
+                            dl->AddCircle(h, 11.f, colOut, 0, 1.5f);
+                        }
+                        break;
+                    case EditorNoteType::Flick:
+                        if (headOnPage) {
+                            float y01 = scanPageTimeToY(m_scanCurrentPage, nStart);
+                            ImVec2 h = scanToLocal(note.scanX, y01);
+                            float s = 12.f;
+                            bool up = page.goingUp;
+                            if (up) {
+                                dl->AddTriangleFilled(
+                                    ImVec2(h.x, h.y - s),
+                                    ImVec2(h.x - s * 0.85f, h.y + s * 0.6f),
+                                    ImVec2(h.x + s * 0.85f, h.y + s * 0.6f), col);
                             } else {
-                                // Final sweep segment to the end Y
-                                turnY = scanToLocal(note.scanX, note.scanEndY).y;
+                                dl->AddTriangleFilled(
+                                    ImVec2(h.x, h.y + s),
+                                    ImVec2(h.x - s * 0.85f, h.y - s * 0.6f),
+                                    ImVec2(h.x + s * 0.85f, h.y - s * 0.6f), col);
                             }
+                        }
+                        break;
+                    case EditorNoteType::Hold: {
+                        // Clip body to this page's [pStart, pEnd] window.
+                        double bodyStart = std::max((double)nStart, pStart);
+                        double bodyEnd   = std::min((double)nEnd,   pEnd);
+                        if (bodyEnd > bodyStart) {
+                            float ya = scanPageTimeToY(m_scanCurrentPage, bodyStart);
+                            float yb = scanPageTimeToY(m_scanCurrentPage, bodyEnd);
+                            ImVec2 a = scanToLocal(note.scanX, ya);
+                            ImVec2 b = scanToLocal(note.scanX, yb);
+                            float hw = 6.f;
                             dl->AddRectFilled(
-                                ImVec2(nx - hw, std::min(segStartY, turnY)),
-                                ImVec2(nx + hw, std::max(segStartY, turnY)),
+                                ImVec2(a.x - hw, std::min(a.y, b.y)),
+                                ImVec2(a.x + hw, std::max(a.y, b.y)),
                                 colDim, 2.f);
-                            // Draw a small turn indicator at the boundary
-                            if (s < note.scanHoldSweeps) {
-                                dl->AddCircleFilled(ImVec2(nx, turnY), 3.f, col);
+                        }
+                        // Head marker (if on this page).
+                        if (headOnPage) {
+                            float y01 = scanPageTimeToY(m_scanCurrentPage, nStart);
+                            ImVec2 h = scanToLocal(note.scanX, y01);
+                            dl->AddCircleFilled(h, 10.f, col);
+                            dl->AddCircle(h, 11.f, colOut, 0, 1.5f);
+                        }
+                        // Tail cap (if on this page).
+                        if (nEnd >= pStart && nEnd <= pEnd) {
+                            float y01 = scanPageTimeToY(m_scanCurrentPage, nEnd);
+                            ImVec2 t = scanToLocal(note.scanX, y01);
+                            dl->AddCircleFilled(t, 6.f, col);
+                        }
+                        // Cross-page markers.
+                        if (nStart < pStart)
+                            drawCrossMarker(note.scanX, true,
+                                            IM_COL32(180, 220, 255, 220));
+                        if (nEnd > pEnd)
+                            drawCrossMarker(note.scanX, false,
+                                            IM_COL32(180, 220, 255, 220));
+                        break;
+                    }
+                    case EditorNoteType::Slide: {
+                        // Draw only the segments that intersect this page.
+                        const double slideDur = std::max(0.0, nEnd - nStart);
+                        if (note.scanPath.size() >= 2 && slideDur > 0.0) {
+                            const int N = (int)note.scanPath.size();
+                            for (int i = 0; i + 1 < N; ++i) {
+                                // Approximate each control-point's absolute time
+                                // as uniform along the path (matches authoring
+                                // when nodes were placed with monotonic time).
+                                double t0 = nStart + slideDur * ((double)i / (N - 1));
+                                double t1 = nStart + slideDur * ((double)(i + 1) / (N - 1));
+                                // Skip if the segment is entirely outside this page.
+                                if (t1 < pStart || t0 > pEnd) continue;
+                                ImVec2 a = scanToLocal(note.scanPath[i].first,
+                                                       note.scanPath[i].second);
+                                ImVec2 b = scanToLocal(note.scanPath[i + 1].first,
+                                                       note.scanPath[i + 1].second);
+                                dl->AddLine(a, b, colDim, 4.f);
                             }
-                            segStartY = turnY;
-                            sweepUp = !sweepUp;
+                            // Control-point markers for nodes on this page.
+                            for (int i = 0; i < N; ++i) {
+                                double ti = nStart +
+                                    slideDur * ((double)i / std::max(1, N - 1));
+                                if (ti < pStart || ti > pEnd) continue;
+                                ImVec2 p = scanToLocal(note.scanPath[i].first,
+                                                       note.scanPath[i].second);
+                                float r = (i == 0) ? 8.f : 6.f;
+                                ImU32 c = (i == 0) ? col
+                                                   : IM_COL32(255, 255, 255, 230);
+                                dl->AddCircleFilled(p, r, c);
+                                dl->AddCircle(p, r + 1.f, colOut, 0, 1.f);
+                            }
+                        } else if (headOnPage) {
+                            float y01 = scanPageTimeToY(m_scanCurrentPage, nStart);
+                            ImVec2 h = scanToLocal(note.scanX, y01);
+                            dl->AddCircleFilled(h, 8.f, col);
+                            dl->AddCircle(h, 9.f, colOut, 0, 1.5f);
                         }
-                        // Tail cap at final end Y
-                        float ey = scanToLocal(note.scanX, note.scanEndY).y;
-                        dl->AddCircleFilled(ImVec2(nx, ey), 6.f * scale, col);
+                        if (nStart < pStart)
+                            drawCrossMarker(note.scanX, true,
+                                            IM_COL32(220, 180, 255, 220));
+                        if (nEnd > pEnd)
+                            drawCrossMarker(note.scanX, false,
+                                            IM_COL32(220, 180, 255, 220));
+                        (void)withAlpha;
+                        break;
                     }
-                    // Head marker
-                    dl->AddCircleFilled(ImVec2(nx, ny), 10.f * scale, col);
-                    dl->AddCircle(ImVec2(nx, ny), 11.f * scale, colOut, 0, 1.5f);
-                    break;
-                }
-                case EditorNoteType::Slide: {
-                    // Draw straight lines between control points
-                    if (note.scanPath.size() >= 2) {
-                        ImVec2 prev = scanToLocal(note.scanPath[0].first,
-                                                  note.scanPath[0].second);
-                        for (size_t pi = 1; pi < note.scanPath.size(); ++pi) {
-                            ImVec2 cur = scanToLocal(note.scanPath[pi].first,
-                                                     note.scanPath[pi].second);
-                            dl->AddLine(prev, cur, colDim, 4.f);
-                            prev = cur;
-                        }
-                    }
-                    // Head marker
-                    dl->AddCircleFilled(ImVec2(nx, ny), 8.f * scale, col);
-                    dl->AddCircle(ImVec2(nx, ny), 9.f * scale, colOut, 0, 1.5f);
-                    // Sample/node markers at each control point after the head
-                    if (note.scanPath.size() >= 2) {
-                        ImU32 markerCol = withAlpha(IM_COL32(255,255,255,230), alpha);
-                        for (size_t pi = 1; pi < note.scanPath.size(); ++pi) {
-                            ImVec2 p = scanToLocal(note.scanPath[pi].first,
-                                                   note.scanPath[pi].second);
-                            dl->AddCircleFilled(p, 6.f * scale, markerCol);
-                            dl->AddCircle(p, 7.f * scale, colOut, 0, 1.f);
-                        }
-                    }
-                    break;
+                    case EditorNoteType::Arc:
+                    case EditorNoteType::ArcTap:
+                        break;
                 }
             }
-        }
 
-        // ── In-progress hold preview ───────────────────────────────────────
-        if (m_scanHoldAwaitEnd) {
-            ImVec2 start = scanToLocal(m_scanHoldStartX, m_scanHoldStartY);
-            float sx = start.x, sy = start.y;
-            ImVec2 curMp = ImGui::GetMousePos();
-            float ey = std::clamp(curMp.y, origin.y, pMax.y);
-
-            // Determine the final sweep direction
-            bool finalUp = m_scanHoldGoingUp;
-            for (int i = 0; i < m_scanHoldExtraSweeps; ++i) finalUp = !finalUp;
-
-            // Clamp end within the final sweep's range
-            if (finalUp) ey = std::max(ey, origin.y);
-            else          ey = std::min(ey, pMax.y);
-
-            bool dirOk = true;
-            if (m_scanHoldExtraSweeps == 0)
-                dirOk = m_scanHoldGoingUp ? (ey <= sy) : (ey >= sy);
-
-            ImU32 col  = dirOk ? IM_COL32(80, 220, 100, 200)
-                               : IM_COL32(220, 80, 80, 200);
-
-            // Ghost scan line at cursor Y
-            ImU32 ghostCol = dirOk ? IM_COL32(80, 220, 140, 90)
-                                   : IM_COL32(220, 80, 80, 90);
-            dl->AddLine(ImVec2(origin.x + 10.f, ey),
-                        ImVec2(pMax.x - 10.f, ey), ghostCol, 2.f);
-            dl->AddLine(ImVec2(origin.x + 10.f, ey),
-                        ImVec2(pMax.x - 10.f, ey),
-                        IM_COL32(255, 255, 255, 30), 8.f);
-
-            // Hold body preview — zigzag for multi-sweep
-            float hw = 6.f;
-            if (m_scanHoldExtraSweeps == 0) {
+            // ── In-progress hold preview ────────────────────────────────────
+            if (m_scanHoldAwaitEnd) {
+                const int startPage = m_scanHoldStartPage;
+                const int endPageGuess = std::max(m_scanCurrentPage,
+                    startPage + m_scanHoldExtraSweeps);
+                // Draw head marker if on this page.
+                if (startPage == m_scanCurrentPage) {
+                    ImVec2 sp = scanToLocal(m_scanHoldStartX, m_scanHoldStartY);
+                    dl->AddCircleFilled(sp, 10.f, IM_COL32(80, 220, 100, 220));
+                }
+                // Draw body segment from start (if on page) or from start edge,
+                // down/up to cursor or end edge.
+                ImVec2 mp = ImGui::GetMousePos();
+                float my = std::clamp(mp.y, bodyOrigin.y, bodyMax.y);
+                float sy = (startPage == m_scanCurrentPage)
+                           ? scanToLocal(m_scanHoldStartX, m_scanHoldStartY).y
+                           : startEdgeY();
+                float ey = (m_scanCurrentPage >= endPageGuess) ? my : endEdgeY();
+                float sx = scanToLocal(m_scanHoldStartX, 0.f).x;
+                const float hw = 6.f;
                 dl->AddRectFilled(ImVec2(sx - hw, std::min(sy, ey)),
                                   ImVec2(sx + hw, std::max(sy, ey)),
-                                  col, 2.f);
-            } else {
-                bool sweepUp = m_scanHoldGoingUp;
-                float segStartY = sy;
-                for (int s = 0; s <= m_scanHoldExtraSweeps; ++s) {
-                    float segEndY;
-                    if (s < m_scanHoldExtraSweeps) {
-                        segEndY = scanToLocal(0.f, sweepUp ? 0.f : 1.f).y;
-                    } else {
-                        segEndY = ey;
-                    }
-                    dl->AddRectFilled(
-                        ImVec2(sx - hw, std::min(segStartY, segEndY)),
-                        ImVec2(sx + hw, std::max(segStartY, segEndY)),
-                        col, 2.f);
-                    if (s < m_scanHoldExtraSweeps)
-                        dl->AddCircleFilled(ImVec2(sx, segEndY), 3.f,
-                                            IM_COL32(255, 255, 255, 180));
-                    segStartY = segEndY;
-                    sweepUp = !sweepUp;
+                                  IM_COL32(80, 220, 100, 180), 2.f);
+                // Ghost scan line at cursor Y (only on the end page)
+                if (m_scanCurrentPage >= endPageGuess) {
+                    dl->AddLine(ImVec2(bodyOrigin.x + 10, my),
+                                ImVec2(bodyMax.x - 10, my),
+                                IM_COL32(80, 220, 140, 100), 2.f);
+                }
+                // Cross-page markers for the span.
+                if (m_scanCurrentPage > startPage)
+                    drawCrossMarker(m_scanHoldStartX, true,
+                                    IM_COL32(80, 220, 140, 220));
+                if (m_scanCurrentPage < endPageGuess)
+                    drawCrossMarker(m_scanHoldStartX, false,
+                                    IM_COL32(80, 220, 140, 220));
+                // Extra-sweep badge
+                if (m_scanHoldExtraSweeps > 0) {
+                    char buf[48];
+                    snprintf(buf, sizeof(buf), "+%d pages", m_scanHoldExtraSweeps);
+                    dl->AddText(ImVec2(sx + 12.f, bodyOrigin.y + 6.f),
+                                IM_COL32(200, 255, 200, 230), buf);
                 }
             }
 
-            // Sweep count indicator
-            if (m_scanHoldExtraSweeps > 0) {
-                char buf[32];
-                snprintf(buf, sizeof(buf), "+%d sweeps", m_scanHoldExtraSweeps);
-                dl->AddText(ImVec2(sx + 12.f, sy - 14.f),
-                            IM_COL32(200, 255, 200, 220), buf);
+            // ── In-progress slide preview ───────────────────────────────────
+            if (m_scanSlideDragging && !m_scanSlideDraft.scanPath.empty()) {
+                const auto& draftPath  = m_scanSlideDraft.scanPath;
+                const auto& draftPages = m_scanSlidePathPages;
+                for (size_t i = 1; i < draftPath.size(); ++i) {
+                    int pi0 = (i - 1 < draftPages.size())
+                              ? draftPages[i - 1] : m_scanCurrentPage;
+                    int pi1 = (i < draftPages.size())
+                              ? draftPages[i] : m_scanCurrentPage;
+                    if (pi0 != m_scanCurrentPage && pi1 != m_scanCurrentPage) continue;
+                    ImVec2 a = scanToLocal(draftPath[i - 1].first,
+                                           draftPath[i - 1].second);
+                    ImVec2 b = scanToLocal(draftPath[i].first,
+                                           draftPath[i].second);
+                    dl->AddLine(a, b, IM_COL32(220, 130, 255, 230), 4.f);
+                }
+                // Node markers on the current page.
+                for (size_t i = 0; i < draftPath.size(); ++i) {
+                    int pi = (i < draftPages.size()) ? draftPages[i] : m_scanCurrentPage;
+                    if (pi != m_scanCurrentPage) continue;
+                    ImVec2 p = scanToLocal(draftPath[i].first, draftPath[i].second);
+                    float r = (i == 0) ? 8.f : 6.f;
+                    ImU32 c = (i == 0) ? IM_COL32(220, 130, 255, 230)
+                                       : IM_COL32(255, 255, 255, 220);
+                    dl->AddCircleFilled(p, r, c);
+                }
+                // Preview line to cursor on the current page.
+                if (!draftPages.empty() && draftPages.back() == m_scanCurrentPage) {
+                    ImVec2 last = scanToLocal(draftPath.back().first,
+                                              draftPath.back().second);
+                    ImVec2 mpos = ImGui::GetMousePos();
+                    float cmx = std::clamp(mpos.x, bodyOrigin.x, bodyMax.x);
+                    float cmy = std::clamp(mpos.y, bodyOrigin.y, bodyMax.y);
+                    dl->AddLine(last, ImVec2(cmx, cmy),
+                                IM_COL32(220, 130, 255, 100), 2.f);
+                }
+                // Cross-page markers when nodes span across this page.
+                if (!draftPages.empty()) {
+                    if (draftPages.front() < m_scanCurrentPage)
+                        drawCrossMarker(draftPath.front().first, true,
+                                        IM_COL32(220, 130, 255, 220));
+                    if (draftPages.back() > m_scanCurrentPage)
+                        drawCrossMarker(draftPath.back().first, false,
+                                        IM_COL32(220, 130, 255, 220));
+                }
             }
 
-            // Head marker
-            dl->AddCircleFilled(ImVec2(sx, sy), 10.f, col);
-
-            // Projected end-time text near the cursor. Uses the same
-            // normalization-safe inverse that the commit path will use so
-            // "ETA" and the committed end time always agree.
-            float endFrac = std::clamp((ey - origin.y) / std::max(1.f, size.y),
-                                       0.f, 1.f);
-            float endTime = scanLineTimeForFrac(m_scanHoldStartT, endFrac);
-            endTime       = std::min(endTime, m_scanHoldTurnCap);
-            char etaBuf[48];
-            int mins = (int)(endTime / 60.f);
-            float secs = endTime - (float)mins * 60.f;
-            snprintf(etaBuf, sizeof(etaBuf), "ETA: %d:%06.3f", mins, secs);
-            ImVec2 tsz = ImGui::CalcTextSize(etaBuf);
-            ImVec2 txtPos(std::clamp(curMp.x + 14.f,
-                                     origin.x + 4.f,
-                                     pMax.x - tsz.x - 4.f),
-                          std::clamp(ey - tsz.y - 4.f,
-                                     origin.y + 4.f,
-                                     pMax.y - tsz.y - 4.f));
-            // Text shadow for legibility over any background
-            dl->AddText(ImVec2(txtPos.x + 1, txtPos.y + 1),
-                        IM_COL32(0, 0, 0, 200), etaBuf);
-            dl->AddText(txtPos, dirOk ? IM_COL32(180, 255, 200, 255)
-                                      : IM_COL32(255, 180, 180, 255), etaBuf);
-        }
-
-        // ── In-progress slide preview ──────────────────────────────────────
-        if (m_scanSlideDragging && !m_scanSlideDraft.scanPath.empty()) {
-            const auto& draftPath = m_scanSlideDraft.scanPath;
-            // Draw straight lines between placed control points
-            for (size_t i = 1; i < draftPath.size(); ++i) {
-                ImVec2 a = scanToLocal(draftPath[i - 1].first, draftPath[i - 1].second);
-                ImVec2 b = scanToLocal(draftPath[i].first, draftPath[i].second);
-                dl->AddLine(a, b, IM_COL32(220, 130, 255, 230), 4.f);
+            // In-scene instructions (bottom-left of body).
+            const char* toolLabel = "None";
+            switch (m_noteTool) {
+                case NoteTool::Tap:   toolLabel = "Tap";   break;
+                case NoteTool::Flick: toolLabel = "Flick"; break;
+                case NoteTool::Hold:  toolLabel = "Hold";  break;
+                case NoteTool::Slide: toolLabel = "Slide"; break;
+                default:              toolLabel = "None";  break;
             }
-            // Draw a preview line from last point to current mouse position
-            ImVec2 last = scanToLocal(draftPath.back().first, draftPath.back().second);
-            ImVec2 mousePos = ImGui::GetMousePos();
-            float cmx = std::clamp(mousePos.x, origin.x, pMax.x);
-            float cmy = std::clamp(mousePos.y, origin.y, pMax.y);
-            dl->AddLine(last, ImVec2(cmx, cmy), IM_COL32(220, 130, 255, 100), 2.f);
-            // Head marker
-            ImVec2 head = scanToLocal(draftPath[0].first, draftPath[0].second);
-            dl->AddCircleFilled(head, 8.f, IM_COL32(220, 130, 255, 230));
-            // Node markers at placed control points
-            for (size_t i = 1; i < draftPath.size(); ++i) {
-                ImVec2 p = scanToLocal(draftPath[i].first, draftPath[i].second);
-                dl->AddCircleFilled(p, 6.f, IM_COL32(255, 255, 255, 220));
-            }
+            char hud[128];
+            snprintf(hud, sizeof(hud),
+                     "Tool: %s  %s  (Alt: no snap)",
+                     toolLabel, page.goingUp ? "^ up" : "v down");
+            dl->AddText(ImVec2(bodyOrigin.x + 8, bodyMax.y - 20.f),
+                        IM_COL32(200, 200, 200, 180), hud);
+
+            // Dispatch input for the body rect only.
+            bool hovered = ImGui::IsWindowHovered(
+                ImGuiHoveredFlags_AllowWhenBlockedByActiveItem);
+            handleScanLinePageInput(bodyOrigin, bodySize, curTime, hovered, engine);
         }
 
-        dl->AddText(ImVec2(origin.x + 8, origin.y + 6),
-                    IM_COL32(200, 200, 200, 180), "Scan Line Mode");
-
-        // In-scene tool toolbar + mini instructions
-        const char* toolLabel = "None";
-        switch (m_noteTool) {
-            case NoteTool::Tap:   toolLabel = "Tap";   break;
-            case NoteTool::Flick: toolLabel = "Flick"; break;
-            case NoteTool::Hold:  toolLabel = "Hold";  break;
-            case NoteTool::Slide: toolLabel = "Slide"; break;
-            default:              toolLabel = "None";  break;
-        }
-        char hud[96];
-        snprintf(hud, sizeof(hud), "Tool: %s   BPM: %.1f", toolLabel,
-                 m_dominantBpm > 0.f ? m_dominantBpm : 120.f);
-        dl->AddText(ImVec2(origin.x + 8, origin.y + 22),
-                    IM_COL32(200, 200, 200, 180), hud);
-
-        // Dispatch input (uses ImGui::IsWindowHovered from the SEScene child)
-        bool hovered = ImGui::IsWindowHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem);
-        handleScanLineInput(origin, size, curTime, hovered, engine);
     }
 
     // ── Simulate score & combo at curTime ──────────────────────────────────
@@ -3664,126 +3783,340 @@ float SongEditor::scanLineTimeForFrac(float t, float frac) const {
     return (float)std::min((double)t + dt, (double)turn);
 }
 
-// ── handleScanLineInput ─────────────────────────────────────────────────────
-// Called from the ScanLine branch of renderSceneView. Runs the state machine
-// for the current tool. All click placement requires the cursor to be within
-// a small vertical tolerance of the current scan line.
+// ── Scan-line page-table helpers ────────────────────────────────────────────
+// See ScanPageUtils.h for the shared builder. The editor caches the table in
+// m_scanPageTable and invalidates via m_scanPageTableDirty on every edit that
+// could affect page boundaries (BPM, overrides, song duration, difficulty).
 
-void SongEditor::handleScanLineInput(ImVec2 origin, ImVec2 size, float curTime,
-                                     bool hovered, Engine* /*engine*/) {
-    if (!m_song) return;
+void SongEditor::rebuildScanPageTable() {
+    m_scanPageTable.clear();
+    if (!m_song) { m_scanPageTableDirty = false; return; }
 
-    // ── Coordinate-space helpers ──────────────────────────────────────────
-    // Note data is stored in normalized scan space [0..1]²; the scene rect
-    // can be resized arbitrarily. Every conversion between ImGui local
-    // coordinates and stored note data must go through these.
+    // Collect timing points: user-authored takes precedence; otherwise fall
+    // back to AI-detected BPM changes when available (so a freshly analyzed
+    // song gets page boundaries automatically).
+    std::vector<TimingPoint> tps;
+    // TODO: when user-authored timing is exposed in the editor it will live
+    // in m_song or a sibling vector; for now we always reuse m_bpmChanges.
+    if (!m_bpmChanges.empty()) {
+        for (const auto& bc : m_bpmChanges) {
+            TimingPoint tp{};
+            tp.time = bc.time;
+            tp.bpm  = bc.bpm;
+            tp.meter = 4;
+            tps.push_back(tp);
+        }
+    }
+
+    double songEnd = m_waveformLoaded ? m_waveform.durationSeconds : 0.0;
+    // Extend to the last note if audio length is unknown or shorter.
+    for (const auto& en : notes()) {
+        double t = (double)en.time;
+        if (en.endTime > en.time) t = (double)en.endTime;
+        if (t > songEnd) songEnd = t;
+    }
+    if (songEnd <= 0.0) songEnd = 180.0;  // safe default: 3 minutes
+    songEnd += 2.0;                       // trailing tail
+
+    float fallbackBpm = m_dominantBpm > 0.f ? m_dominantBpm : 120.f;
+    m_scanPageTable = buildScanPageTable(tps, scanPages(), songEnd, fallbackBpm);
+
+    // Regenerate runtime-facing speed events from overrides so legacy
+    // consumers (m_scanPhaseTable, CytusRenderer) reflect edits immediately.
+    auto regenerated = expandScanPagesToSpeedEvents(m_scanPageTable, scanPages());
+    if (!regenerated.empty() || !scanPages().empty()) {
+        scanSpeed() = regenerated;
+        m_scanPhaseDirty = true;
+    }
+
+    if (m_scanCurrentPage >= (int)m_scanPageTable.size())
+        m_scanCurrentPage = std::max(0, (int)m_scanPageTable.size() - 1);
+
+    m_scanPageTableDirty = false;
+}
+
+int SongEditor::scanPageForTime(double t) const {
+    if (m_scanPageTable.empty()) return 0;
+    // Binary search for last page with startTime <= t.
+    int lo = 0, hi = (int)m_scanPageTable.size() - 1;
+    if (t <= m_scanPageTable.front().startTime) return 0;
+    if (t >= m_scanPageTable.back().startTime)  return hi;
+    while (lo + 1 < hi) {
+        int mid = (lo + hi) / 2;
+        if (m_scanPageTable[mid].startTime <= t) lo = mid;
+        else                                      hi = mid;
+    }
+    return lo;
+}
+
+double SongEditor::scanPageYToTime(int pageIdx, float y01) const {
+    if (pageIdx < 0 || pageIdx >= (int)m_scanPageTable.size()) return 0.0;
+    const auto& p = m_scanPageTable[pageIdx];
+    y01 = std::clamp(y01, 0.f, 1.f);
+    // goingUp: scan line starts at bottom (y=1 at startTime) and rises to top
+    // (y=0 at startTime+duration). goingDown: inverse.
+    if (p.goingUp) return p.startTime + (1.0 - (double)y01) * p.duration;
+    return p.startTime + (double)y01 * p.duration;
+}
+
+float SongEditor::scanPageTimeToY(int pageIdx, double t) const {
+    if (pageIdx < 0 || pageIdx >= (int)m_scanPageTable.size()) return 0.f;
+    const auto& p = m_scanPageTable[pageIdx];
+    if (p.duration <= 1e-6) return 0.f;
+    double u = (t - p.startTime) / p.duration;
+    u = std::clamp(u, 0.0, 1.0);
+    return p.goingUp ? (float)(1.0 - u) : (float)u;
+}
+
+float SongEditor::snapToScanMarker(float time, float tolerance) const {
+    const auto& mk = markers();
+    if (mk.empty() || tolerance <= 0.f) return time;
+    float best      = time;
+    float bestDelta = tolerance;
+    for (float t : mk) {
+        float d = std::abs(t - time);
+        if (d <= bestDelta) { bestDelta = d; best = t; }
+    }
+    return best;
+}
+
+// ── renderScanPageNav ───────────────────────────────────────────────────────
+// Top-strip navigation controls for the paginated Scan Line scene: Prev/Next
+// buttons, page label, per-page speed InputFloat, and Place All (AI markers).
+
+void SongEditor::renderScanPageNav(ImVec2 origin, float width, Engine* engine) {
+    if (m_scanPageTable.empty()) return;
+    const int nPages = (int)m_scanPageTable.size();
+    m_scanCurrentPage = std::clamp(m_scanCurrentPage, 0, nPages - 1);
+    ScanPageInfo& page = m_scanPageTable[m_scanCurrentPage];
+
+    ImGui::SetCursorScreenPos(ImVec2(origin.x + 6, origin.y + 6));
+    ImGui::PushID("ScanPageNav");
+
+    // Prev
+    {
+        ImGui::BeginDisabled(m_scanCurrentPage <= 0);
+        if (ImGui::ArrowButton("##prevPage", ImGuiDir_Left)) {
+            m_scanCurrentPage = std::max(0, m_scanCurrentPage - 1);
+            if (engine) engine->audio().stop();
+            m_sceneTime = (float)m_scanPageTable[m_scanCurrentPage].startTime;
+        }
+        ImGui::EndDisabled();
+    }
+    ImGui::SameLine();
+
+    // Page label
+    char buf[128];
+    snprintf(buf, sizeof(buf), "Page %d/%d  BPM %.1f  dt %.2fs %s",
+             m_scanCurrentPage + 1, nPages, page.bpm, page.duration,
+             page.partialTail ? "(partial)" : "");
+    ImGui::TextUnformatted(buf);
+    ImGui::SameLine();
+
+    // Next
+    {
+        ImGui::BeginDisabled(m_scanCurrentPage >= nPages - 1);
+        if (ImGui::ArrowButton("##nextPage", ImGuiDir_Right)) {
+            m_scanCurrentPage = std::min(nPages - 1, m_scanCurrentPage + 1);
+            if (engine) engine->audio().stop();
+            m_sceneTime = (float)m_scanPageTable[m_scanCurrentPage].startTime;
+        }
+        ImGui::EndDisabled();
+    }
+    ImGui::SameLine();
+
+    // Per-page speed input
+    {
+        float speed = page.speed;
+        ImGui::SetNextItemWidth(96.f);
+        if (ImGui::InputFloat("speed", &speed, 0.25f, 0.5f, "%.2fx")) {
+            speed = std::clamp(speed, 0.25f, 4.f);
+            // Update or remove the override
+            auto& ov = scanPages();
+            bool removed = false;
+            if (std::abs(speed - 1.f) < 1e-3f) {
+                for (auto it = ov.begin(); it != ov.end(); ) {
+                    if (it->pageIndex == m_scanCurrentPage) {
+                        it = ov.erase(it); removed = true;
+                    } else ++it;
+                }
+                if (!removed) { /* no-op */ }
+            } else {
+                bool found = false;
+                for (auto& o : ov)
+                    if (o.pageIndex == m_scanCurrentPage) {
+                        o.speed = speed; found = true; break;
+                    }
+                if (!found) ov.push_back({m_scanCurrentPage, speed});
+            }
+            m_scanPageTableDirty = true;
+        }
+    }
+    ImGui::SameLine();
+
+    // Place All (AI markers)
+    {
+        ImGui::BeginDisabled(markers().empty());
+        if (ImGui::Button("Place All")) {
+            int added = 0;
+            auto& ns = notes();
+            for (size_t i = 0; i < markers().size(); ++i) {
+                float t = markers()[i];
+                // De-dup: skip if an existing note already sits within 10ms of t.
+                bool dup = false;
+                for (const auto& n : ns) {
+                    if (std::abs(n.time - t) < 0.01f) { dup = true; break; }
+                }
+                if (dup) continue;
+                int pIdx = scanPageForTime((double)t);
+                if (pIdx < 0 || pIdx >= (int)m_scanPageTable.size()) continue;
+
+                EditorNote n{};
+                n.type  = EditorNoteType::Tap;
+                n.time  = t;
+                // Alternate X across {0.25, 0.5, 0.75} to avoid a straight column.
+                const float xs[3] = {0.5f, 0.25f, 0.75f};
+                n.scanX = xs[added % 3];
+                n.scanY = scanPageTimeToY(pIdx, (double)t);
+                ns.push_back(n);
+                ++added;
+            }
+            std::sort(ns.begin(), ns.end(),
+                      [](const EditorNote& a, const EditorNote& b) {
+                          return a.time < b.time;
+                      });
+        }
+        ImGui::EndDisabled();
+    }
+    // Direction pill
+    ImGui::SameLine();
+    ImGui::TextColored(ImVec4(0.7f, 0.9f, 1.0f, 1.0f),
+                       page.goingUp ? "^ up" : "v down");
+
+    ImGui::PopID();
+    (void)width;
+}
+
+// ── handleScanLinePageInput ─────────────────────────────────────────────────
+// Page-local input for the paginated Scan Line scene. Tools place notes
+// anywhere in the body rect (no scan-line proximity gate). Clicks snap to
+// AI beat markers unless Alt is held. Holds/slides may cross pages via
+// Prev/Next navigation while the tool is in its "await end" / "dragging"
+// state; the mouse wheel extends the hold span in page units.
+
+void SongEditor::handleScanLinePageInput(ImVec2 origin, ImVec2 size, float curTime,
+                                         bool hovered, Engine* engine) {
+    if (!m_song || m_scanPageTable.empty()) return;
+    if (m_scanCurrentPage < 0 ||
+        m_scanCurrentPage >= (int)m_scanPageTable.size()) return;
+    const ScanPageInfo& page = m_scanPageTable[m_scanCurrentPage];
+
     const float invW = 1.f / std::max(1.f, size.x);
     const float invH = 1.f / std::max(1.f, size.y);
-    auto localToScan = [&](ImVec2 p) -> ImVec2 {
+    auto localToNorm = [&](ImVec2 p) -> ImVec2 {
         return ImVec2((p.x - origin.x) * invW, (p.y - origin.y) * invH);
     };
-    auto scanToLocal = [&](float nx, float ny) -> ImVec2 {
-        return ImVec2(origin.x + nx * size.x, origin.y + ny * size.y);
-    };
 
-    ImVec2 mp       = ImGui::GetMousePos();
+    ImVec2 mp     = ImGui::GetMousePos();
     ImVec2 pMax(origin.x + size.x, origin.y + size.y);
-    bool   inRect   = (mp.x >= origin.x && mp.x <= pMax.x &&
-                       mp.y >= origin.y && mp.y <= pMax.y);
-    float  frac     = scanLineFrac(curTime);
-    float  scanY    = origin.y + frac * size.y;
-    bool   onLine   = hovered && inRect && std::abs(mp.y - scanY) < 10.f;
+    bool   inRect = (mp.x >= origin.x && mp.x <= pMax.x &&
+                     mp.y >= origin.y && mp.y <= pMax.y);
     bool   lmbClick = ImGui::IsMouseClicked(ImGuiMouseButton_Left);
     bool   lmbDown  = ImGui::IsMouseDown(ImGuiMouseButton_Left);
     bool   rmbClick = ImGui::IsMouseClicked(ImGuiMouseButton_Right);
+    bool   altHeld  = ImGui::GetIO().KeyAlt;
 
-    // Nothing to do if mouse isn't in the scene child.
-    if (!hovered || !inRect) return;
+    // Keyboard shortcuts for Prev/Next page (work even when not hovered).
+    if (ImGui::IsKeyPressed(ImGuiKey_PageDown))
+        m_scanCurrentPage = std::min((int)m_scanPageTable.size() - 1,
+                                     m_scanCurrentPage + 1);
+    if (ImGui::IsKeyPressed(ImGuiKey_PageUp))
+        m_scanCurrentPage = std::max(0, m_scanCurrentPage - 1);
+
+    // ── Auto page turning at the page edges ────────────────────────────────
+    // Cursor at the time-forward edge → next page. Cursor at the start edge →
+    // previous page. Gated on actual motion + a one-shot arm flag so a parked
+    // cursor doesn't flip repeatedly. Disabled during playback (the scan
+    // line's auto-advance owns the page there).
+    {
+        bool playing = (engine && engine->audio().isPlaying());
+        ImVec2 md = ImGui::GetIO().MouseDelta;
+        bool cursorMoving = (md.x * md.x + md.y * md.y) > 0.25f;
+        if (hovered && cursorMoving && !playing) {
+            constexpr float kEdge = 10.f;
+            bool atEnd = page.goingUp
+                ? (mp.y < origin.y + kEdge)
+                : (mp.y > pMax.y - kEdge);
+            bool atStart = page.goingUp
+                ? (mp.y > pMax.y - kEdge)
+                : (mp.y < origin.y + kEdge);
+            bool hasNext = m_scanCurrentPage + 1 < (int)m_scanPageTable.size();
+            bool hasPrev = m_scanCurrentPage > 0;
+            auto seekToPageStart = [&]() {
+                m_sceneTime = (float)m_scanPageTable[m_scanCurrentPage].startTime;
+            };
+            if (atEnd && hasNext && !m_scanPageEdgeArmed) {
+                m_scanCurrentPage++;
+                seekToPageStart();
+                m_scanPageEdgeArmed = true;
+            } else if (atStart && hasPrev && !m_scanPageEdgeArmed) {
+                m_scanCurrentPage--;
+                seekToPageStart();
+                m_scanPageEdgeArmed = true;
+            } else if (!atEnd && !atStart) {
+                m_scanPageEdgeArmed = false;
+            }
+        } else if (!hovered || playing) {
+            m_scanPageEdgeArmed = false;
+        }
+    }
 
     // ── Hold await-end state ────────────────────────────────────────────────
-    // Mouse wheel extends the hold across scan-line direction changes.
-    // The wheel direction that adds a sweep alternates: if the current
-    // final sweep goes up, scroll up to extend; then scroll down for the
-    // next sweep, etc. Wrong-direction scroll does nothing.
     if (m_scanHoldAwaitEnd) {
-        // Cancel on RMB or ESC.
-        if (rmbClick || ImGui::IsKeyPressed(ImGuiKey_Escape)) {
+        if (ImGui::IsKeyPressed(ImGuiKey_Escape)) {
             m_scanHoldAwaitEnd = false;
             return;
         }
-
-        // Determine the direction of the final (current) sweep
-        // Sweep 0 = initial sweep direction; each extra sweep flips direction.
-        bool finalSweepUp = m_scanHoldGoingUp;
-        for (int i = 0; i < m_scanHoldExtraSweeps; ++i)
-            finalSweepUp = !finalSweepUp;
-
-        // Mouse wheel to add/remove extra sweeps
+        // Mouse wheel extends the hold span in pages.
         float wheel = ImGui::GetIO().MouseWheel;
-        if (std::abs(wheel) > 0.1f) {
-            // The direction needed to ADD a sweep = the direction of the
-            // NEXT sweep (opposite of the current final sweep).
-            bool nextSweepUp = !finalSweepUp;
-            bool scrollUp    = wheel > 0.f;
-            if (scrollUp == nextSweepUp) {
-                // Correct direction → add one more sweep
-                m_scanHoldExtraSweeps++;
-                finalSweepUp = !finalSweepUp;
+        if (hovered && std::abs(wheel) > 0.1f) {
+            if (wheel > 0.f) {
+                int maxExtra = (int)m_scanPageTable.size() - 1 - m_scanHoldStartPage;
+                m_scanHoldExtraSweeps = std::min(maxExtra,
+                                                 m_scanHoldExtraSweeps + 1);
             } else if (m_scanHoldExtraSweeps > 0) {
-                // Opposite direction → remove last sweep (undo)
                 m_scanHoldExtraSweeps--;
-                finalSweepUp = !finalSweepUp;
             }
         }
-
-        // Compute the time window for the final sweep.
-        // Walk through turn points: turn[0] = first turn after start,
-        // turn[i] = i-th turn after start.
-        float finalSweepStart = m_scanHoldStartT;
-        float finalSweepEnd   = m_scanHoldTurnCap;
-        for (int i = 0; i < m_scanHoldExtraSweeps; ++i) {
-            finalSweepStart = finalSweepEnd;
-            finalSweepEnd   = scanLineNextTurn(finalSweepStart + 0.001f);
+        // Navigating Prev/Next while in await-end auto-extends the span to
+        // at least cover the visited page.
+        if (m_scanCurrentPage > m_scanHoldStartPage) {
+            int needed = m_scanCurrentPage - m_scanHoldStartPage;
+            if (needed > m_scanHoldExtraSweeps) m_scanHoldExtraSweeps = needed;
         }
 
-        // Direction check: cursor must be in the correct direction within
-        // the final sweep. For extra sweeps, the user clicks anywhere in
-        // the scene Y range — the endpoint's Y is derived from the cursor.
-        float sy;
-        if (m_scanHoldExtraSweeps == 0) {
-            sy = origin.y + m_scanHoldStartY * size.y;
-        } else {
-            // For multi-sweep, the starting Y of the final sweep is at the
-            // turn boundary (0 or 1 depending on direction).
-            float turnFrac = finalSweepUp ? 1.f : 0.f;
-            sy = origin.y + turnFrac * size.y;
-        }
-        bool dirOk = finalSweepUp ? (mp.y <= sy + 2.f) : (mp.y >= sy - 2.f);
-        if (!dirOk && m_scanHoldExtraSweeps == 0) {
-            ImGui::SetMouseCursor(ImGuiMouseCursor_NotAllowed);
-            return;
-        }
         ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
 
-        if (lmbClick) {
-            // Commit hold
-            ImVec2 mpClamped(std::clamp(mp.x, origin.x, pMax.x),
-                             std::clamp(mp.y, origin.y, pMax.y));
-            float endFrac = localToScan(mpClamped).y;
-            if (finalSweepUp) endFrac = std::max(endFrac, 0.f);
-            else               endFrac = std::min(endFrac, 1.f);
+        if (hovered && inRect && lmbClick) {
+            // Commit: endpoint is at cursor on the currently displayed page.
+            ImVec2 mpC(std::clamp(mp.x, origin.x, pMax.x),
+                       std::clamp(mp.y, origin.y, pMax.y));
+            ImVec2 nrm = localToNorm(mpC);
+            float endY = std::clamp(nrm.y, 0.f, 1.f);
+            double endTime = scanPageYToTime(m_scanCurrentPage, endY);
+            if (!altHeld) endTime = (double)snapToScanMarker((float)endTime, 0.06f);
 
-            float endTime = scanLineTimeForFrac(finalSweepStart, endFrac);
-            endTime       = std::min(endTime, finalSweepEnd);
+            double startTime = (double)m_scanHoldStartT;
+            if (endTime < startTime + 0.02) endTime = startTime + 0.02;
 
             EditorNote n{};
-            n.type            = EditorNoteType::Hold;
-            n.time            = m_scanHoldStartT;
-            n.endTime         = endTime;
-            n.scanX           = m_scanHoldStartX;
-            n.scanY           = m_scanHoldStartY;
-            n.scanEndY        = endFrac;
-            n.scanHoldSweeps  = m_scanHoldExtraSweeps;
+            n.type             = EditorNoteType::Hold;
+            n.time             = (float)startTime;
+            n.endTime          = (float)endTime;
+            n.scanX            = m_scanHoldStartX;
+            n.scanY            = m_scanHoldStartY;
+            n.scanEndY         = endY;
+            n.scanHoldSweeps   = std::max(0, m_scanCurrentPage - m_scanHoldStartPage);
             notes().push_back(n);
             m_scanHoldAwaitEnd = false;
         }
@@ -3791,175 +4124,159 @@ void SongEditor::handleScanLineInput(ImVec2 origin, ImVec2 size, float curTime,
     }
 
     // ── Slide authoring state ──────────────────────────────────────────────
-    // LMB on scan line starts the slide. While LMB is held, RMB clicks
-    // place control points (sample/tick nodes). The path is straight lines
-    // between consecutive nodes (Cytus-style). Release LMB commits.
-    // Each control point after the head is automatically a sample point.
     if (m_scanSlideDragging) {
-        // Cancel on ESC
         if (ImGui::IsKeyPressed(ImGuiKey_Escape)) {
             m_scanSlideDragging = false;
             m_scanSlideDraft    = {};
+            m_scanSlidePathPages.clear();
             return;
         }
-
         if (!lmbDown) {
-            // Commit on LMB release if we have at least 2 points (head + 1 node).
-            if (m_scanSlideDraft.scanPath.size() >= 2) {
+            // Commit on LMB release with >=2 points.
+            if (m_scanSlideDraft.scanPath.size() >= 2 &&
+                m_scanSlidePathPages.size() == m_scanSlideDraft.scanPath.size())
+            {
                 auto& draft = m_scanSlideDraft;
-                float endFrac = draft.scanPath.back().second;
-                float endTime = scanLineTimeForFrac(draft.time, endFrac);
-                endTime       = std::min(endTime, m_scanSlideTurnCap);
-                draft.endTime = endTime;
-
-                // Auto-derive sample points from each control point after the head.
-                // Each sample point's time offset = how far along the scan sweep
-                // that control point's Y position is.
-                draft.samplePoints.clear();
-                float total = std::max(0.0001f, draft.endTime - draft.time);
-                for (size_t pi = 1; pi < draft.scanPath.size(); ++pi) {
-                    float ptFrac = draft.scanPath[pi].second;
-                    float ptTime = scanLineTimeForFrac(draft.time, ptFrac);
-                    ptTime       = std::min(ptTime, m_scanSlideTurnCap);
-                    float offset = std::clamp(ptTime - draft.time, 0.f, total);
-                    draft.samplePoints.push_back(offset);
+                // Compute absolute time for each node.
+                std::vector<double> absT(draft.scanPath.size());
+                for (size_t i = 0; i < draft.scanPath.size(); ++i) {
+                    int pi = m_scanSlidePathPages[i];
+                    absT[i] = scanPageYToTime(pi, draft.scanPath[i].second);
                 }
-                std::sort(draft.samplePoints.begin(), draft.samplePoints.end());
-
+                double t0 = absT.front();
+                double t1 = absT.back();
+                if (t1 <= t0 + 0.02) t1 = t0 + 0.02;
+                draft.time     = (float)t0;
+                draft.endTime  = (float)t1;
+                draft.samplePoints.clear();
+                for (size_t i = 1; i < absT.size(); ++i)
+                    draft.samplePoints.push_back((float)(absT[i] - t0));
                 notes().push_back(draft);
             }
             m_scanSlideDragging = false;
             m_scanSlideDraft    = {};
+            m_scanSlidePathPages.clear();
             return;
         }
+        // RMB: append a control point on the current page.
+        if (hovered && inRect && rmbClick) {
+            ImVec2 mpC(std::clamp(mp.x, origin.x, pMax.x),
+                       std::clamp(mp.y, origin.y, pMax.y));
+            ImVec2 nrm = localToNorm(mpC);
+            float nx = std::clamp(nrm.x, 0.f, 1.f);
+            float ny = std::clamp(nrm.y, 0.f, 1.f);
 
-        // RMB click while LMB held → place a new control point / sample node
-        if (rmbClick) {
-            float mx = std::clamp(mp.x, origin.x, pMax.x);
-            float my = std::clamp(mp.y, origin.y, pMax.y);
-
-            // Direction enforcement: control point must continue in the
-            // same direction as the scan line sweep (no crossing the turn).
-            float sy = origin.y + m_scanSlideDraft.scanPath.back().second * size.y;
-            bool dirOk = m_scanSlideGoingUp ? (my <= sy + 1.f) : (my >= sy - 1.f);
-            if (!dirOk) {
-                ImGui::SetMouseCursor(ImGuiMouseCursor_NotAllowed);
-                return;
+            // Per-page monotonicity: within the same page, enforce that the
+            // new node lies in the time-forward direction from the previous
+            // one. Across pages, no constraint (time advances naturally).
+            if (!m_scanSlidePathPages.empty() &&
+                m_scanSlidePathPages.back() == m_scanCurrentPage)
+            {
+                float prevY = m_scanSlideDraft.scanPath.back().second;
+                bool forward = page.goingUp ? (ny <= prevY + 1e-3f)
+                                            : (ny >= prevY - 1e-3f);
+                if (!forward) {
+                    ImGui::SetMouseCursor(ImGuiMouseCursor_NotAllowed);
+                    return;
+                }
             }
 
-            // Clamp so the path doesn't pass the turn-around row.
-            if (m_scanSlideGoingUp) my = std::max(my, origin.y);
-            else                     my = std::min(my, pMax.y);
-
-            ImVec2 n = localToScan(ImVec2(mx, my));
-            m_scanSlideDraft.scanPath.emplace_back(n.x, n.y);
-            m_scanSlideLastY = my;
+            m_scanSlideDraft.scanPath.emplace_back(nx, ny);
+            m_scanSlidePathPages.push_back(m_scanCurrentPage);
         }
-
         ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
         return;
     }
 
-    // ── Idle: show cursor state + handle fresh clicks ──────────────────────
-    if (!onLine) {
-        // If we're off the scan line and a tool is active, hint NotAllowed.
-        if (m_noteTool != NoteTool::None && inRect)
-            ImGui::SetMouseCursor(ImGuiMouseCursor_NotAllowed);
+    // ── Idle: handle fresh clicks in the body rect ─────────────────────────
+    if (!hovered || !inRect) return;
+
+    if (m_noteTool == NoteTool::None) {
+        // No tool → click to select nearest note.
+        if (!lmbClick) return;
+        auto scanToLocalB = [&](float nx, float ny) -> ImVec2 {
+            return ImVec2(origin.x + nx * size.x, origin.y + ny * size.y);
+        };
+        for (size_t ni = 0; ni < notes().size(); ++ni) {
+            const auto& n = notes()[ni];
+            if (n.type != EditorNoteType::Tap &&
+                n.type != EditorNoteType::Flick &&
+                n.type != EditorNoteType::Hold &&
+                n.type != EditorNoteType::Slide) continue;
+            double pStart = page.startTime;
+            double pEnd   = page.startTime + page.duration;
+            if (n.time < pStart || n.time > pEnd) continue;
+            float y01 = scanPageTimeToY(m_scanCurrentPage, n.time);
+            ImVec2 h = scanToLocalB(n.scanX, y01);
+            float dx = mp.x - h.x, dy = mp.y - h.y;
+            if (dx * dx + dy * dy < 14.f * 14.f) {
+                m_selectedNoteIdx = (int)ni;
+                break;
+            }
+        }
         return;
     }
+
     ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
     if (!lmbClick) return;
 
-    ImVec2 mpN = localToScan(mp);
-    float mxN = std::clamp(mpN.x, 0.f, 1.f);
-    float myN = frac;  // lock Y to scan line
+    ImVec2 nrm = localToNorm(mp);
+    float nx = std::clamp(nrm.x, 0.f, 1.f);
+    float ny = std::clamp(nrm.y, 0.f, 1.f);
+    double clickTime = scanPageYToTime(m_scanCurrentPage, ny);
+    if (!altHeld) {
+        float snapTol = std::min(0.06f, 0.15f * (float)page.duration);
+        float snapped = snapToScanMarker((float)clickTime, snapTol);
+        if (std::abs(snapped - (float)clickTime) > 1e-6f) {
+            clickTime = (double)snapped;
+            ny = scanPageTimeToY(m_scanCurrentPage, clickTime);
+        }
+    }
 
     switch (m_noteTool) {
         case NoteTool::Tap: {
             EditorNote n{};
             n.type  = EditorNoteType::Tap;
-            n.time  = curTime;
-            n.scanX = mxN;
-            n.scanY = myN;
+            n.time  = (float)clickTime;
+            n.scanX = nx;
+            n.scanY = ny;
             notes().push_back(n);
             break;
         }
         case NoteTool::Flick: {
             EditorNote n{};
             n.type  = EditorNoteType::Flick;
-            n.time  = curTime;
-            n.scanX = mxN;
-            n.scanY = myN;
+            n.time  = (float)clickTime;
+            n.scanX = nx;
+            n.scanY = ny;
             notes().push_back(n);
             break;
         }
         case NoteTool::Hold: {
             m_scanHoldAwaitEnd    = true;
-            m_scanHoldStartX      = mxN;
-            m_scanHoldStartY      = myN;
-            m_scanHoldStartT      = curTime;
-            m_scanHoldTurnCap     = scanLineNextTurn(curTime);
-            m_scanHoldGoingUp     = scanLineGoingUp(curTime);
+            m_scanHoldStartPage   = m_scanCurrentPage;
+            m_scanHoldStartX      = nx;
+            m_scanHoldStartY      = ny;
+            m_scanHoldStartT      = (float)clickTime;
+            m_scanHoldGoingUp     = page.goingUp;
             m_scanHoldExtraSweeps = 0;
             break;
         }
         case NoteTool::Slide: {
             m_scanSlideDragging         = true;
-            m_scanSlideGoingUp          = scanLineGoingUp(curTime);
-            m_scanSlideTurnCap          = scanLineNextTurn(curTime);
-            m_scanSlideLastY            = mp.y;
+            m_scanSlideGoingUp          = page.goingUp;
             m_scanSlideDraft            = {};
             m_scanSlideDraft.type       = EditorNoteType::Slide;
-            m_scanSlideDraft.time       = curTime;
-            m_scanSlideDraft.scanX      = mxN;
-            m_scanSlideDraft.scanY      = myN;
-            m_scanSlideDraft.scanPath.emplace_back(mxN, myN);
+            m_scanSlideDraft.time       = (float)clickTime;
+            m_scanSlideDraft.scanX      = nx;
+            m_scanSlideDraft.scanY      = ny;
+            m_scanSlideDraft.scanPath.clear();
+            m_scanSlideDraft.scanPath.emplace_back(nx, ny);
+            m_scanSlidePathPages.clear();
+            m_scanSlidePathPages.push_back(m_scanCurrentPage);
             break;
         }
-        case NoteTool::None:
-        default:
-            // With no tool selected, click on a scan-line note to select it
-            // (opens the Note Properties popup). Hit-tests tap/flick heads,
-            // hold heads + bodies, and slide paths.
-            for (size_t ni = 0; ni < notes().size(); ++ni) {
-                const auto& n = notes()[ni];
-                ImVec2 head = scanToLocal(n.scanX, n.scanY);
-                float  nx = head.x, ny = head.y;
-                bool hit = false;
-
-                if (n.type == EditorNoteType::Tap ||
-                    n.type == EditorNoteType::Flick) {
-                    float dx = mp.x - nx, dy = mp.y - ny;
-                    hit = (dx * dx + dy * dy < 14.f * 14.f);
-                } else if (n.type == EditorNoteType::Hold) {
-                    float ey  = scanToLocal(n.scanX, n.scanEndY).y;
-                    float yLo = std::min(ny, ey);
-                    float yHi = std::max(ny, ey);
-                    hit = (std::abs(mp.x - nx) < 10.f &&
-                           mp.y >= yLo - 4.f && mp.y <= yHi + 4.f);
-                } else if (n.type == EditorNoteType::Slide) {
-                    for (size_t i = 1; i < n.scanPath.size(); ++i) {
-                        ImVec2 a = scanToLocal(n.scanPath[i - 1].first,
-                                               n.scanPath[i - 1].second);
-                        ImVec2 b = scanToLocal(n.scanPath[i].first,
-                                               n.scanPath[i].second);
-                        float ABx = b.x - a.x, ABy = b.y - a.y;
-                        float APx = mp.x - a.x, APy = mp.y - a.y;
-                        float len2 = ABx * ABx + ABy * ABy;
-                        float u    = len2 > 1e-4f ? (APx * ABx + APy * ABy) / len2 : 0.f;
-                        u = std::clamp(u, 0.f, 1.f);
-                        float cx = a.x + u * ABx, cy = a.y + u * ABy;
-                        float dx = mp.x - cx,     dy = mp.y - cy;
-                        if (dx * dx + dy * dy < 64.f) { hit = true; break; }
-                    }
-                }
-
-                if (hit) {
-                    m_selectedNoteIdx = (int)ni;
-                    break;
-                }
-            }
-            break;
+        default: break;
     }
 }
 
@@ -4543,7 +4860,12 @@ ChartData SongEditor::buildChartFromNotes() const {
     chart.diskAnimation.moves     = diskMove();
     chart.diskAnimation.scales    = diskScale();
 
-    chart.scanSpeedEvents = scanSpeed();
+    chart.scanSpeedEvents   = scanSpeed();
+    chart.scanPageOverrides = scanPages();
+
+    // Persist beat markers for this (mode, difficulty) so reopening the
+    // project restores them. Runtime consumers ignore the field.
+    chart.markers = markers();
 
     return chart;
 }
@@ -4557,8 +4879,10 @@ void SongEditor::exportAllCharts() {
     Difficulty  diffs[]      = {Difficulty::Easy, Difficulty::Medium, Difficulty::Hard};
 
     for (int d = 0; d < 3; d++) {
-        auto& edNotes = m_diffNotes[d];
-        if (edNotes.empty()) continue;
+        auto& edNotes   = m_diffNotes[d];
+        auto& edMarkers = m_diffMarkers[d];
+        // Persist even note-less difficulties so their authored markers round-trip.
+        if (edNotes.empty() && edMarkers.empty()) continue;
 
         // Save current difficulty, temporarily switch, build chart, restore
         Difficulty saved = m_currentDifficulty;
@@ -4805,8 +5129,21 @@ void SongEditor::exportAllCharts() {
             f << " }";
         }
 
-        // ── Scan-line speed events ───────────────────────────────────────
-        if (!chart.scanSpeedEvents.empty()) {
+        // ── Scan-line per-page speed overrides (authoritative when present) ─
+        // scanPageOverrides is the edit-time source of truth. scanSpeedEvents
+        // is regenerated from it at load; skip writing scanSpeedEvents when
+        // overrides are present to avoid round-trip drift.
+        if (!chart.scanPageOverrides.empty()) {
+            f << ",\n \"scanPages\": [";
+            for (size_t pi = 0; pi < chart.scanPageOverrides.size(); ++pi) {
+                const auto& p = chart.scanPageOverrides[pi];
+                if (pi) f << ", ";
+                f << "{\"index\": " << p.pageIndex
+                  << ", \"speed\": " << p.speed << "}";
+            }
+            f << "]";
+        } else if (!chart.scanSpeedEvents.empty()) {
+            // Legacy path: only write scanSpeedEvents if no page overrides.
             auto easingName2 = [](DiskEasing e) {
                 switch (e) {
                     case DiskEasing::Linear:     return "linear";
@@ -4824,6 +5161,18 @@ void SongEditor::exportAllCharts() {
                   << ", \"duration\": " << s.duration
                   << ", \"targetSpeed\": " << s.targetSpeed
                   << ", \"easing\": \"" << easingName2(s.easing) << "\"}";
+            }
+            f << "]";
+        }
+
+        // ── Beat markers for this difficulty ─────────────────────────
+        // Persisted so AI-detected or hand-placed markers reload with
+        // the chart. Applies to every game mode.
+        if (!chart.markers.empty()) {
+            f << ",\n \"markers\": [";
+            for (size_t mi = 0; mi < chart.markers.size(); ++mi) {
+                if (mi) f << ", ";
+                f << chart.markers[mi];
             }
             f << "]";
         }
@@ -5030,6 +5379,7 @@ void SongEditor::renderNoteToolbar() {
                         m_diffMarkers[(int)Difficulty::Hard]   = std::move(result.hardMarkers);
                         m_bpmChanges   = std::move(result.bpmChanges);
                         m_dominantBpm  = result.bpm;
+                        m_scanPageTableDirty = true;  // re-derive page durations from detected BPM
 
                         // Build status message showing BPM info
                         std::string bpmInfo = "BPM: " + std::to_string((int)result.bpm);

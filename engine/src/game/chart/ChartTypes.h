@@ -285,6 +285,19 @@ struct ScanSpeedEvent {
     DiskEasing easing      = DiskEasing::SineInOut;
 };
 
+// ── Scan-line per-page speed overrides ──────────────────────────────────────
+// Page-based speed model: the scan-line editor views the song one "page" at a
+// time, where a page = one sweep of the scan line (top→bottom or bottom→top).
+// Each page has a speed multiplier; default = 1.0 (uses base BPM). Overrides
+// are sparse — pages without an entry are implicit 1.0. At load time these
+// expand into synthetic ScanSpeedEvents so the runtime phase table stays
+// unchanged.
+
+struct ScanPageOverride {
+    int   pageIndex = 0;
+    float speed     = 1.0f;
+};
+
 // ── Shared Catmull-Rom path interpolation ───────────────────────────────────
 //
 // Evaluate a Catmull-Rom spline along a path of (x,y) pairs.
@@ -331,5 +344,11 @@ struct ChartData {
     std::vector<JudgmentLineEvent> judgmentLines;  // Phigros only
 
     DiskAnimation diskAnimation;                   // Lanota / circle mode
-    std::vector<ScanSpeedEvent> scanSpeedEvents;   // Cytus scan-line speed
+    std::vector<ScanSpeedEvent>    scanSpeedEvents;    // Cytus scan-line speed
+    std::vector<ScanPageOverride>  scanPageOverrides;  // Cytus per-page speed
+
+    // Beat markers authored for this (mode, difficulty). Mirrors what the
+    // editor keeps in m_diffMarkers; persisted per chart file so reopening a
+    // project restores AI-detected / hand-placed markers for every mode.
+    std::vector<float>             markers;
 };

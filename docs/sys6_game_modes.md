@@ -60,6 +60,8 @@ Engine creates renderers via `createRenderer(GameModeConfig)` factory.
 
 **Page visibility:** Notes shown only during their sweep page. Multi-sweep holds span multiple pages. Scale/fade approach animation (0.30->1.0 scale, 0.25->1.0 alpha).
 
+**Per-page speed overrides (2026-04-17):** `ScanPageOverride {pageIndex, speed}` entries stored sparsely in `ChartData::scanPageOverrides`. At load time `ChartLoader::expandScanPagesToSpeedEvents` (see `engine/src/game/chart/ScanPageUtils.h`) rebuilds `scanSpeedEvents` from the overrides: one zero-duration step event at each overridden page's start time, plus a return-to-1.0 event at the next page if the next page has no override. Precedence: when a chart contains `scanPages`, overrides are authoritative and any on-disk `scanSpeedEvents` are ignored and replaced at load. BPM changes that fall mid-page are handled by truncating the page at the timing-point boundary (`partialTail=true`), so the scan line stays continuous across BPM boundaries.
+
 **Spatial picker:** `pickNoteAt(screenPx, songTime, pixelTol)` with +/-0.18s timing gate. Slide paths checked by vertex proximity.
 
 **Circle mode input wiring (2026-04-10):** Two input paths converge on `markNoteHit` + particle feedback:

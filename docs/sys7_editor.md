@@ -51,15 +51,32 @@ Each layer = self-contained ImGui panel. Test Game = separate process via `Creat
 
 **Judgment Windows:** Perfect/Good/Bad ms thresholds.
 
-### Scan Line Authoring
+### Scan Line Authoring (paginated, 2026-04-17)
 
-Scan-line mode skips the chart timeline; scene fills the full height. In-scene tool row: Tap / Flick / Hold / Slide. All clicks gated by `|mouseY - scanLineY| < 10px`.
+Scene shows exactly one "page" at a time. A page = one sweep of the scan line (top->bottom OR bottom->top). Default duration = `240/BPM` seconds (one bar @ 4/4). Page 0 sweeps bottom->top; direction alternates each page to match runtime.
 
-**Tap/Flick:** LMB on scan line commits note.
+**Scene-embedded toolbar row:** `[Tap] [Flick] [Hold] [Slide] | [Select] | [Analyze Beats] [Clear Markers]`. The beat-analysis buttons call the same `AudioAnalyzer` pipeline as 2D modes and populate `m_diffMarkers` + `m_bpmChanges`; completion flips `m_scanPageTableDirty = true` so page durations re-derive from detected BPM. `Select` is the pointer tool (NoteTool::None) — click-to-select existing notes.
 
-**Hold:** LMB starts head. Mouse wheel extends across sweeps (alternating scroll directions). LMB commits endpoint. Preview shows zigzag body + "+N sweeps" indicator.
+**Navigation strip (top of scene body):** `[<] Page N/M  BPM X  dt Y.YYs` label `[>]` Prev/Next arrows; per-page speed `InputFloat` (0.25x..4x, step 0.25); `[Place All]` button that auto-fills a Tap on every AI beat marker. `PageUp` / `PageDown` keys also navigate.
 
-**Slide (Cytus-style):** LMB on scan line starts. RMB while LMB held places control-point nodes (straight lines between them). Each node = sample tick point. Release LMB commits. Direction enforcement prevents crossing scan-line turns.
+**Per-page speed:** editing the speed input creates/updates/removes a `ScanPageOverride` for the current page (removed when set back to exactly 1.0). Page table and phase table are rebuilt lazily. Speed 2.0x halves the page's duration, etc.
+
+**AI markers on page:** dashed horizontal orange ticks (same color as 2D modes' timeline markers) drawn at each beat's page-Y. Sourced from `m_diffMarkers[currentDiff]`. Clicks snap to the nearest marker within `min(0.06s, 0.15 * page.duration)`; hold `Alt` to place without snapping.
+
+**Tap/Flick:** any LMB click in the page body is valid (no scan-line proximity gate). Time is derived from `scanPageYToTime(pageIdx, yNorm)`.
+
+**Hold:** LMB anywhere in the body starts the head. Mouse wheel extends the span in page units (`m_scanHoldExtraSweeps`). Navigating Prev/Next while in await-end automatically extends the span to cover the visited page. LMB on the target page commits. Preview shows the body across all spanned pages plus cross-page markers.
+
+**Slide:** LMB starts, RMB adds nodes, Prev/Next allowed between RMBs (each node stores its `pageIndex`). On LMB release each node's absolute time is `scanPageYToTime(node.pageIndex, node.y)`; `samplePoints` hold deltas from the head. Per-page monotonicity: within one page the node must lie in the page's time-forward direction (enforced with `ImGuiMouseCursor_NotAllowed`); across pages no constraint beyond non-decreasing page index.
+
+**Cross-page markers:** hold/slide bodies crossing the current page draw a small triangle (`▲` at the start edge, `▼` at the end edge, edge parity based on `page.goingUp`) to hint at the neighbor page.
+
+**Cursor-follow scan line:** when the mouse hovers the page body, an amber horizontal line tracks the cursor Y and a floating `t=M:SS.sss` label shows the projected song time. Lets the author preview where a click would place a note before committing.
+
+**Auto page turning:**
+- *During playback:* the page follows `curTime` via `scanPageForTime`; the song-time scan line moves smoothly within the current page and the page snaps to the next one when the playhead crosses a boundary.
+- *While idle (not playing):* moving the cursor within `10px` of the page's time-forward edge advances to the next page; moving within `10px` of the start edge returns to the previous page. Armed-once (re-armed when the cursor leaves the edge zone) and gated on actual mouse motion so a parked cursor doesn't flip repeatedly.
+- Prev/Next buttons, jump-to-page, edge-flip, and PageUp/PageDown all seek `m_sceneTime` to the new page's start so the auto-sync in `renderSceneView` doesn't snap back. Edge-flip is disabled during playback (the scan-line auto-advance owns the page there).
 
 ### Arc Editing (3D DropNotes Mode, redesigned 2026-04-17)
 
@@ -89,7 +106,7 @@ Multi-waypoint arc editor. Only visible/active in DropNotes + ThreeD mode.
 
 ### Chart Persistence
 
-Save -> `exportAllCharts()` writes UCF JSON per difficulty. Song open -> loads charts back via `ChartLoader`. Round-trips: notes, scan fields, disk animation, scan speed events, waypoints, sample points, arc data (startX/Y, endX/Y, easeX/Y, color, void), arctap positions.
+Save -> `exportAllCharts()` writes UCF JSON per difficulty. Song open -> loads charts back via `ChartLoader`. Round-trips: notes, scan fields, disk animation, scan speed events, waypoints, sample points, arc data (startX/Y, endX/Y, easeX/Y, color, void), arctap positions, beat markers.
 
 **Per-(mode, difficulty) chart files (2026-04-12):** Filenames are keyed on both game mode and difficulty: `assets/charts/<song>_<modeKey>_<diff>.json`, where `modeKey ∈ {drop2d, drop3d, circle, scan}`. Each (mode, difficulty) pair owns an independent chart file — switching modes never overwrites or reuses another mode's notes.
 
@@ -98,6 +115,16 @@ Save -> `exportAllCharts()` writes UCF JSON per difficulty. Song open -> loads c
 - `reloadChartsForCurrentMode()` clears in-memory `m_diffNotes` / `m_diffMarkers` / disk-FX / scan-speed / BPM state, then loads the three (easy/medium/hard) files for the current `gameMode` from disk (starting empty when a file is absent) and updates `m_song->chartEasy/Medium/Hard` accordingly.
 - `loadChartFile(diff, chartRel)` is the extracted single-chart loader used by both `setSong()` and `reloadChartsForCurrentMode()` (replaces the previous inline lambda).
 - Mode / Dimension buttons in `renderGameModeConfig()` hook the switch: `exportAllCharts()` saves the old mode's charts, the mode/dimension field is updated, then `reloadChartsForCurrentMode()` pulls the new mode's charts.
+
+### Beat marker persistence (2026-04-17)
+
+Beat markers (AI-detected by `AudioAnalyzer` + hand-placed) now round-trip through the chart JSON alongside notes. Previously only `m_diffNotes` survived a save/load; every reopen forced the author to re-run beat analysis.
+
+- `ChartData::markers` is a `std::vector<float>` persisted per (mode, difficulty) chart file. Applies uniformly across every game mode.
+- `buildChartFromNotes()` copies the current difficulty's `markers()` into `chart.markers` before emitting.
+- `exportAllCharts()` emits a `"markers": [t0, t1, ...]` array in the chart JSON, and now also exports difficulties whose notes are empty but whose markers aren't (so marker-only work survives).
+- `ChartLoader::loadUnified()` parses the `"markers"` array into `ChartData::markers`.
+- `SongEditor::loadChartFile` hydrates `m_diffMarkers[(int)diff]` from `chart.markers` so the authoring markers appear immediately on reopen.
 
 ### Achievement Image Pickers (asset-drag only, 2026-04-12)
 

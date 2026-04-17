@@ -79,8 +79,21 @@ Build Tools
 - `lib/arm64-v8a/libc++_shared.so` — C++ runtime
 - `assets/shaders/*.spv` — 10 SPIR-V shaders
 - `assets/assets/audio/` — music files
-- `assets/assets/charts/` — chart JSON files
+- `assets/assets/charts/` — chart JSON files (pruned to selected mode — see below)
 - `assets/project.json`, `music_selection.json`, `start_screen.json`
+
+## Packaging-time chart prune (2026-04-17)
+
+**Why:** The editor keeps one chart file per (song, mode, difficulty) so the author can freely switch between DropNotes/Circle/ScanLine without losing prior work — `<song>_drop3d_hard.json`, `<song>_scan_hard.json`, etc. all coexist on disk. Shipping every stale mode in the APK bloats the asset bundle. Rule: **in the package, each song keeps only its currently-selected mode** (the files referenced by `music_selection.json::sets[].songs[].chartEasy|Medium|Hard`). The live editor project under `Projects/<name>/` is never modified.
+
+**Where:** `engine/src/ui/ProjectHub.cpp`
+
+- `stageProjectForPackaging(projectRoot, safeName)` creates `%TEMP%/<safeName>_apk_stage_<ts>/`, selectively copies `project.json`, `start_screen.json`, `music_selection.json`, and `assets/` (recursive) into it, then calls `prunePackagedCharts(staging)`.
+- `prunePackagedCharts(stagingRoot)` parses `<staging>/music_selection.json`, collects the set of song names + referenced chart basenames, walks `<staging>/assets/charts/`, and deletes any `<songName>_*.json` not in the keep set. Files not prefixed with a known song name (`demo.json`, etc.) are left alone.
+- `collectKeepSet` is the helper that reads the three `chartEasy/Medium/Hard` fields per song and normalises paths to basenames.
+- `ProjectHub::startApkBuild` now builds the staging path, passes it to `build_apk.bat` in place of the live project path (falls back to the live path if staging fails), and stores it in `m_apkStagingPath`.
+- `ProjectHub::renderApkDialog` removes the staging directory via `fs::remove_all` as soon as the async build future resolves — success or failure.
+- `build_apk.bat` itself was left unchanged; the prune is invisible to the shell script.
 
 ## Android Launch Crash Fix (2026-04-05)
 

@@ -1,4 +1,5 @@
 #include "ChartLoader.h"
+#include "ScanPageUtils.h"
 #include <fstream>
 #include <sstream>
 #include <stdexcept>
@@ -630,6 +631,94 @@ ChartData ChartLoader::loadUnified(const std::string& path) {
                 }
             }
         }
+    }
+
+    // ── Scan-line per-page speed overrides ──────────────────────────────
+    // "scanPages": [{ "index": 3, "speed": 2.0 }, ...]
+    // When present, this is authoritative and the runtime-facing
+    // scanSpeedEvents are rebuilt from it below.
+    {
+        auto spKey = content.find("\"scanPages\"");
+        if (spKey != std::string::npos) {
+            auto arrStart = content.find('[', spKey);
+            if (arrStart != std::string::npos) {
+                auto arrEnd = findMatchingBracket(content, arrStart);
+                if (arrEnd != std::string::npos) {
+                    std::string arr = content.substr(arrStart + 1, arrEnd - arrStart - 1);
+                    auto objStrLocal = [](const std::string& obj, const std::string& k) {
+                        auto p = obj.find("\"" + k + "\"");
+                        if (p == std::string::npos) return std::string();
+                        p = obj.find(':', p) + 1;
+                        while (p < obj.size() && (obj[p]==' '||obj[p]=='\t')) p++;
+                        auto e = p;
+                        while (e < obj.size() && obj[e] != ',' && obj[e] != '}') e++;
+                        return obj.substr(p, e - p);
+                    };
+                    size_t p = 0;
+                    while ((p = arr.find('{', p)) != std::string::npos) {
+                        auto e = arr.find('}', p);
+                        if (e == std::string::npos) break;
+                        std::string obj = arr.substr(p, e - p + 1);
+                        ScanPageOverride ov{};
+                        try { ov.pageIndex = std::stoi(objStrLocal(obj, "index")); } catch (...) {}
+                        try { ov.speed     = std::stof(objStrLocal(obj, "speed")); } catch (...) {}
+                        if (ov.speed > 0.f) chart.scanPageOverrides.push_back(ov);
+                        p = e + 1;
+                    }
+                }
+            }
+        }
+    }
+
+    // "markers": [1.23, 2.45, ...]  — beat markers persisted per chart file.
+    // Applies to every game mode; the editor copies them into m_diffMarkers.
+    {
+        auto mKey = content.find("\"markers\"");
+        if (mKey != std::string::npos) {
+            auto arrStart = content.find('[', mKey);
+            if (arrStart != std::string::npos) {
+                auto arrEnd = findMatchingBracket(content, arrStart);
+                if (arrEnd != std::string::npos) {
+                    std::string arr = content.substr(arrStart + 1, arrEnd - arrStart - 1);
+                    size_t p = 0;
+                    while (p < arr.size()) {
+                        while (p < arr.size() && (arr[p] == ' ' || arr[p] == '\t' ||
+                                                  arr[p] == '\n' || arr[p] == '\r' ||
+                                                  arr[p] == ','))
+                            p++;
+                        if (p >= arr.size()) break;
+                        size_t e = p;
+                        while (e < arr.size() && arr[e] != ',' &&
+                               arr[e] != ' ' && arr[e] != '\t' &&
+                               arr[e] != '\n' && arr[e] != '\r')
+                            e++;
+                        if (e > p) {
+                            try { chart.markers.push_back(std::stof(arr.substr(p, e - p))); }
+                            catch (...) {}
+                        }
+                        p = e;
+                    }
+                }
+            }
+        }
+    }
+
+    // If page overrides exist, rebuild scanSpeedEvents from them so the
+    // runtime phase table reflects the authored per-page speeds.
+    if (!chart.scanPageOverrides.empty()) {
+        double endTime = 0.0;
+        for (const auto& n : chart.notes) {
+            endTime = std::max(endTime, n.time);
+            if (auto* h = std::get_if<HoldData>(&n.data)) endTime = std::max(endTime, n.time + h->duration);
+        }
+        endTime += 5.0;
+        float fallbackBpm = chart.timingPoints.empty() ? 120.f : chart.timingPoints.front().bpm;
+        auto pageTable = buildScanPageTable(chart.timingPoints,
+                                            chart.scanPageOverrides,
+                                            endTime,
+                                            fallbackBpm);
+        chart.scanSpeedEvents = expandScanPagesToSpeedEvents(pageTable,
+                                                             chart.scanPageOverrides);
     }
 
     computeBeatPositions(chart);
