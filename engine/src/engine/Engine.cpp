@@ -244,6 +244,16 @@ void Engine::update(float dt) {
 
     if (m_activeMode && m_sceneViewer.isPlaying()) {
         double songT = m_clock.songTime();
+
+        // Auto play: consume every note whose time has arrived and dispatch
+        // Perfect hits. Runs before the miss sweep so nothing decays to Miss.
+        if (m_autoPlay) {
+            auto autoHits = m_hitDetector.autoPlayTick(songT);
+            for (auto& ah : autoHits) {
+                dispatchHitResult(ah.result, ah.lane);
+            }
+        }
+
         auto missed = m_hitDetector.update(songT);
         for (auto& m : missed) {
             m_judgment.recordJudgment(Judgment::Miss);
@@ -263,7 +273,14 @@ void Engine::update(float dt) {
             m_score.onJudgment(j);
             if (m_activeMode && t.lane >= 0)
                 m_activeMode->showJudgment(t.lane, j);
-            if (t.hit) m_audio.playClickSfx();
+            // No SFX on hold sample ticks. playClickSfx() allocates a new
+            // ma_audio_buffer + ma_sound per call and leaks them both, which
+            // adds up fast on dense sample-point holds — the leaked source
+            // list keeps growing inside miniaudio's mixer and the audio
+            // thread starts to stutter, which the player hears as music
+            // lag whenever a hold body crosses the judgement line. The
+            // player is already pressing the lane during a hold, so a
+            // per-tick click is unnecessary feedback anyway.
         }
         // Holds whose touch wandered off the curve for ≥2 consecutive ticks
         // are marked broken inside the detector. Remove their touch mapping
@@ -301,6 +318,7 @@ void Engine::update(float dt) {
             }
         }
 
+        m_activeMode->setActiveHoldIds(m_hitDetector.activeHoldIds());
         m_activeMode->onUpdate(dt, songT);
     }
 
@@ -454,6 +472,8 @@ void Engine::setMode(GameModeRenderer* renderer, const ChartData& chart,
     m_judgment.reset();
     m_score.reset();
     m_activeTouches.clear();
+    m_keyboardHolds.clear();
+    m_currentChart = chart;
 }
 
 // ── Game mode factory ────────────────────────────────────────────────────────
@@ -479,7 +499,8 @@ std::unique_ptr<GameModeRenderer> Engine::createRenderer(const GameModeConfig& c
 // ── Gameplay lifecycle ───────────────────────────────────────────────────────
 
 void Engine::launchGameplay(const SongInfo& song, Difficulty difficulty,
-                            const std::string& projectPath) {
+                            const std::string& projectPath, bool autoPlay) {
+    m_autoPlay = autoPlay;
     std::string chartRel = chartPathForDifficulty(song, difficulty);
     if (chartRel.empty()) {
         std::cout << "[Engine] No chart for selected difficulty\n";
@@ -492,6 +513,7 @@ void Engine::launchGameplay(const SongInfo& song, Difficulty difficulty,
     ChartData chart = ChartLoader::load(chartPath);
     auto renderer = createRenderer(song.gameMode);
     setMode(renderer.release(), chart, &song.gameMode);
+    m_currentProjectPath = projectPath;
 
     m_audio.stop();
 
@@ -509,6 +531,7 @@ void Engine::launchGameplay(const SongInfo& song, Difficulty difficulty,
     m_gameplayLeadIn = leadIn + song.gameMode.audioOffset;
     m_audioStarted = false;
     m_pendingAudioPath = audioPath;
+    m_currentAudioPath = audioPath;
 
     switchLayer(EditorLayer::GamePlay);
 
@@ -522,6 +545,7 @@ void Engine::launchGameplayDirect(const SongInfo& song, const ChartData& chart,
 
     auto renderer = createRenderer(song.gameMode);
     setMode(renderer.release(), chart, &song.gameMode);
+    m_currentProjectPath = projectPath;
 
     m_audio.stop();
 
@@ -537,10 +561,46 @@ void Engine::launchGameplayDirect(const SongInfo& song, const ChartData& chart,
     m_gameplayLeadIn = leadIn + song.gameMode.audioOffset;
     m_audioStarted = false;
     m_pendingAudioPath = song.audioFile.empty() ? "" : audioPath;
+    m_currentAudioPath = m_pendingAudioPath;
 
     switchLayer(EditorLayer::GamePlay);
 
     std::cout << "[Engine] Gameplay started (direct): " << song.name << "\n";
+}
+
+void Engine::restartGameplay() {
+    // Re-run the same setup the launchGameplay path does so renderer state,
+    // hit detector, judgment, score, lead-in, and audio gating are all back
+    // to a clean slate. The previous restart path only reset the score and
+    // clock — leaving consumed-note sets, active holds, and the audio-start
+    // gate stale, which is why the second run looked dead.
+    if (!m_activeMode) return;
+
+    m_audio.stop();
+
+    auto renderer = createRenderer(m_gameplayConfig);
+    setMode(renderer.release(), m_currentChart, &m_gameplayConfig);
+
+    m_gameplayPaused = false;
+    m_showResults = false;
+    m_sceneViewer.setPlaying(true);
+
+    float leadIn = 2.0f;
+    m_clock.setSongTime(-leadIn - m_gameplayConfig.audioOffset);
+    m_gameplayLeadIn = leadIn + m_gameplayConfig.audioOffset;
+    m_audioStarted = false;
+    // The first launch consumed m_pendingAudioPath after loading. Restore
+    // it from the cached path so the lead-in handler reloads + replays the
+    // same song instead of falling into the silent "no audio" branch (which
+    // would also instantly trip the song-end guard and pop the results
+    // screen, since !m_audio.isPlaying() becomes true forever).
+    m_pendingAudioPath = m_currentAudioPath;
+
+    // The Restart button is reachable from the pause menu, which paused
+    // the clock via togglePause(). Resume it explicitly so tick() returns
+    // a real dt again — without this, songTime stays frozen and nothing
+    // on screen moves.
+    m_clock.resume();
 }
 
 void Engine::exitGameplay() {
@@ -556,7 +616,11 @@ void Engine::exitGameplay() {
     m_activeTouches.clear();
     clearBackgroundTexture();
     if (m_testMode) {
-        exitTestMode();
+        // In test mode, exiting a song should hand the player back to the
+        // music selection page so they can pick another song. Test mode
+        // itself stays active — the standalone window only closes via
+        // ESC from the start screen / a full exitTestMode() path.
+        switchLayer(EditorLayer::MusicSelection);
     } else {
         switchLayer(m_preGameplayLayer);
     }
@@ -789,14 +853,7 @@ void Engine::renderPauseOverlay() {
     }
     ImGui::Spacing();
     if (ImGui::Button("Restart", ImVec2(-1, 40))) {
-        m_audio.stop();
-        m_audio.play();
-        m_clock.setSongTime(0.0);
-        m_judgment.reset();
-        m_score.reset();
-        m_activeTouches.clear();
-        m_gameplayPaused = false;
-        m_sceneViewer.setPlaying(true);
+        restartGameplay();
     }
     ImGui::Spacing();
     if (ImGui::Button("Exit", ImVec2(-1, 40))) {

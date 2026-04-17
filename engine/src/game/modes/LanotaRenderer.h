@@ -121,8 +121,9 @@ private:
     uint32_t  m_width = 0, m_height = 0;
     double    m_songTime = 0.0;
     glm::vec2 m_diskCenter{0.f, 0.f};  // current world-space XY of disk center
-    float     m_diskScale    = 1.f;    // current uniform scale applied to radii
-    float     m_diskRotation = 0.f;    // current whole-disk rotation (radians)
+    float     m_diskScale        = 1.f;  // current uniform scale applied to radii
+    float     m_diskInitialScale = 1.f;  // base multiplier from GameModeConfig::diskInitialScale
+    float     m_diskRotation     = 0.f;  // current whole-disk rotation (radians)
 
     std::vector<Ring>              m_rings;
     std::vector<RotationEvent>     m_rotationEvents; // sorted by startTime; may be empty
@@ -135,15 +136,18 @@ private:
     // cross-lane hold body can be drawn even when the main note loop has
     // converted them to angle-based ring notes (which drops the HoldData).
     struct HoldBody {
+        uint32_t noteId;
         double   startTime;
         HoldData data;
     };
     std::vector<HoldBody> m_holdBodies;
 
     static constexpr int   RING_SEGMENTS  = 64;
-    static constexpr float INNER_RADIUS   = 0.9f;  // world units — small (spawn) disk
-    static constexpr float BASE_RADIUS    = 2.4f;  // world units — large (hit) disk radius
-    static constexpr float RING_SPACING   = 0.6f;  // world units between outer rings
+    // Per-instance disk layout, seeded from GameModeConfig in onInit and
+    // falling back to the legacy defaults when no config is provided.
+    float INNER_RADIUS  = 0.9f;
+    float BASE_RADIUS   = 2.4f;
+    float RING_SPACING  = 0.6f;
     static constexpr float NOTE_WORLD_R   = 0.22f; // note visual radius in world units
     static constexpr float APPROACH_SECS  = 2.0f;  // seconds to travel inner → outer
     static constexpr float FOV_Y_DEG      = 60.f;

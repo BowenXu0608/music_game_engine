@@ -36,13 +36,7 @@ void PhigrosRenderer::onResize(uint32_t w, uint32_t h) {
 }
 
 void PhigrosRenderer::onUpdate(float dt, double songTime) {
-    // Loop
-    double maxTime = 0.0;
-    for (auto& le : m_lineEvents)
-        for (auto& n : le.attachedNotes)
-            maxTime = std::max(maxTime, n.time);
-    double loopDuration = maxTime + 1.0;
-    m_songTime = loopDuration > 0.0 ? fmod(songTime, loopDuration) : songTime;
+    m_songTime = songTime;
 
     updateLineKeyframes(m_songTime);
 

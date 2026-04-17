@@ -377,24 +377,6 @@ void StartScreenEditor::render(Engine* engine) {
     ImGui::Begin("Start Screen Editor", nullptr,
                  ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoResize);
 
-    // ── Test Game button — top right ─────────────────────────────────────────
-    {
-        ImVec2 startPos = ImGui::GetCursorStartPos();
-        ImVec2 winSize  = ImGui::GetWindowSize();
-        ImGui::SetCursorPos(ImVec2(winSize.x - 120, startPos.y));
-        ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.15f, 0.55f, 0.2f, 1.0f));
-        ImGui::PushStyleColor(ImGuiCol_ButtonHovered,  ImVec4(0.2f, 0.65f, 0.25f, 1.0f));
-        ImGui::PushStyleColor(ImGuiCol_ButtonActive,   ImVec4(0.1f, 0.45f, 0.15f, 1.0f));
-        if (ImGui::Button("Test Game", ImVec2(104, 28))) {
-            // Spawn a child process so the editor stays open and the test
-            // game runs in its own window. Matches the Song Editor's Test
-            // Game button behavior.
-            if (engine) engine->spawnTestGameProcess(m_projectPath);
-        }
-        ImGui::PopStyleColor(3);
-        ImGui::SetCursorPos(startPos);
-    }
-
     ImVec2 contentSize = ImGui::GetContentRegionAvail();
     const float splitterThick = 4.f;
     const float navH  = 36.f;

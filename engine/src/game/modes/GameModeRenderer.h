@@ -2,6 +2,8 @@
 #include "renderer/Camera.h"
 #include "game/chart/ChartTypes.h"
 #include "gameplay/JudgmentSystem.h"
+#include <unordered_set>
+#include <cstdint>
 
 class Renderer;
 struct GameModeConfig;
@@ -19,4 +21,14 @@ public:
     virtual const Camera& getCamera() const = 0;
 
     virtual void showJudgment(int lane, Judgment judgment) {}
+
+    // Set by Engine each frame so renderers can highlight hold notes that
+    // are currently being held (bloom/glow visual feedback).
+    void setActiveHoldIds(const std::vector<uint32_t>& ids) {
+        m_activeHoldIds.clear();
+        for (uint32_t id : ids) m_activeHoldIds.insert(id);
+    }
+
+protected:
+    std::unordered_set<uint32_t> m_activeHoldIds;
 };

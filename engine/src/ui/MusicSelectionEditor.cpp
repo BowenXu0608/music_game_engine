@@ -203,6 +203,15 @@ void MusicSelectionEditor::load(const std::string& projectPath) {
 
                         // Background
                         song.gameMode.backgroundImage = gm.value("backgroundImage", "");
+
+                        // 3D sky height
+                        song.gameMode.skyHeight = gm.value("skyHeight", 1.f);
+
+                        // Circle-mode disk defaults
+                        song.gameMode.diskInnerRadius  = gm.value("diskInnerRadius",  0.9f);
+                        song.gameMode.diskBaseRadius   = gm.value("diskBaseRadius",   2.4f);
+                        song.gameMode.diskRingSpacing  = gm.value("diskRingSpacing",  0.6f);
+                        song.gameMode.diskInitialScale = gm.value("diskInitialScale", 1.0f);
                     }
                     set.songs.push_back(std::move(song));
                 }
@@ -284,6 +293,15 @@ void MusicSelectionEditor::save() {
             // Background
             gmJ["backgroundImage"] = song.gameMode.backgroundImage;
 
+            // 3D sky height
+            gmJ["skyHeight"] = song.gameMode.skyHeight;
+
+            // Circle-mode disk defaults
+            gmJ["diskInnerRadius"]  = song.gameMode.diskInnerRadius;
+            gmJ["diskBaseRadius"]   = song.gameMode.diskBaseRadius;
+            gmJ["diskRingSpacing"]  = song.gameMode.diskRingSpacing;
+            gmJ["diskInitialScale"] = song.gameMode.diskInitialScale;
+
             songJ["gameMode"] = gmJ;
             songsArr.push_back(songJ);
         }
@@ -351,24 +369,6 @@ void MusicSelectionEditor::render(Engine* engine) {
     ImGui::SetNextWindowSize(ImGui::GetIO().DisplaySize);
     ImGui::Begin("Music Selection", nullptr,
                  ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoResize);
-
-    // ── Test Game button — top right ─────────────────────────────────────────
-    {
-        ImVec2 startPos = ImGui::GetCursorStartPos();
-        ImVec2 winSize  = ImGui::GetWindowSize();
-        ImGui::SetCursorPos(ImVec2(winSize.x - 120, startPos.y));
-        ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.15f, 0.55f, 0.2f, 1.0f));
-        ImGui::PushStyleColor(ImGuiCol_ButtonHovered,  ImVec4(0.2f, 0.65f, 0.25f, 1.0f));
-        ImGui::PushStyleColor(ImGuiCol_ButtonActive,   ImVec4(0.1f, 0.45f, 0.15f, 1.0f));
-        if (ImGui::Button("Test Game", ImVec2(104, 28))) {
-            // Spawn a child process so the editor stays open and the test
-            // game runs in its own window. Matches the Song Editor's Test
-            // Game button behavior.
-            if (engine) engine->spawnTestGameProcess(m_projectPath);
-        }
-        ImGui::PopStyleColor(3);
-        ImGui::SetCursorPos(startPos);
-    }
 
     // Scan assets once per project
     if (!m_assetsScanned && !m_projectPath.empty()) {
@@ -1012,11 +1012,47 @@ void MusicSelectionEditor::renderPlayButton(ImVec2 origin, float width) {
         ImVec2(triX + triSize * 1.2f, triY),
         textCol);
 
-    // Clickable
+    // The START button serves two contexts:
+    //   1. Editor layout preview — the user is designing how the selection
+    //      page looks, so clicking should NOT drop them into a play session.
+    //   2. Test-game player flow — the user is actually navigating the
+    //      game, so clicking MUST launch the selected song.
+    // Engine::isTestMode() distinguishes the two.
     ImGui::SetCursorScreenPos(ImVec2(bx, by));
     if (ImGui::InvisibleButton("##play_btn", ImVec2(btnW, btnH)) && canPlay) {
-        auto& song = m_sets[m_selectedSet].songs[m_selectedSong];
-        m_engine->launchGameplay(song, m_selectedDifficulty, m_projectPath);
+        if (m_engine && m_engine->isTestMode()) {
+            auto& song = m_sets[m_selectedSet].songs[m_selectedSong];
+            m_engine->launchGameplay(song, m_selectedDifficulty, m_projectPath, m_autoPlay);
+        }
+    }
+
+    // ── Auto Play toggle (below the START button) ───────────────────────────
+    float abtnW = btnW;
+    float abtnH = 28.f;
+    float abx = bx;
+    float aby = by + btnH + 8.f;
+
+    ImU32 aBg   = m_autoPlay ? IM_COL32(220, 140, 50, 240) : IM_COL32(60, 60, 70, 200);
+    ImU32 aText = m_autoPlay ? IM_COL32(255, 255, 255, 255) : IM_COL32(200, 200, 210, 230);
+
+    ImVec2 mPos = ImGui::GetIO().MousePos;
+    bool aHover = mPos.x >= abx && mPos.x <= abx + abtnW &&
+                  mPos.y >= aby && mPos.y <= aby + abtnH;
+    if (aHover && !m_autoPlay) aBg = IM_COL32(90, 90, 100, 230);
+    if (aHover &&  m_autoPlay) aBg = IM_COL32(240, 160, 70, 255);
+
+    dl->AddRectFilled(ImVec2(abx, aby), ImVec2(abx + abtnW, aby + abtnH), aBg, 6.f);
+    dl->AddRect(ImVec2(abx, aby), ImVec2(abx + abtnW, aby + abtnH),
+                IM_COL32(180, 180, 200, 180), 6.f, 0, 1.2f);
+
+    const char* aLabel = m_autoPlay ? "AUTO PLAY: ON" : "AUTO PLAY: OFF";
+    ImVec2 aSz = ImGui::CalcTextSize(aLabel);
+    dl->AddText(ImVec2(abx + (abtnW - aSz.x) * 0.5f, aby + (abtnH - aSz.y) * 0.5f),
+                aText, aLabel);
+
+    ImGui::SetCursorScreenPos(ImVec2(abx, aby));
+    if (ImGui::InvisibleButton("##autoplay_btn", ImVec2(abtnW, abtnH))) {
+        m_autoPlay = !m_autoPlay;
     }
 }
 

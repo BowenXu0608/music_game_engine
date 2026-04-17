@@ -14,7 +14,7 @@
 #include <utility>
 
 // ── Editor note types (separate from gameplay ChartTypes) ───────────────────
-enum class EditorNoteType { Tap, Hold, Slide, Flick };
+enum class EditorNoteType { Tap, Hold, Slide, Flick, Arc, ArcTap };
 
 // Lane-change transition style for a Hold note. Mirrors ChartTypes::HoldTransition.
 enum class EditorHoldTransition { Straight = 0, Angle90 = 1, Curve = 2, Rhomboid = 3 };
@@ -25,6 +25,16 @@ struct EditorHoldWaypoint {
     int                  lane          = 0;
     float                transitionLen = 0.f;
     EditorHoldTransition style         = EditorHoldTransition::Curve;
+};
+
+// One waypoint along an authored Arc's path. Arcs with >=2 waypoints use
+// this list; the old 2-endpoint fields are kept for backward compat.
+struct ArcWaypoint {
+    float time  = 0.f;   // absolute time in seconds
+    float x     = 0.f;   // normalized X [0..1] (lane position)
+    float y     = 0.f;   // normalized Y [0..1] (height: 0=ground, 1=sky)
+    float easeX = 0.f;   // X easing TO this point from previous (0=linear)
+    float easeY = 0.f;   // Y easing TO this point from previous
 };
 
 struct EditorNote {
@@ -59,6 +69,22 @@ struct EditorNote {
     int   scanHoldSweeps = 0; // extra sweeps the hold crosses (0 = single sweep)
     std::vector<std::pair<float,float>> scanPath; // slide drag path
 
+    // ── Arc fields (Arcaea 3D mode only) ──────────────────────────────────
+    // Multi-waypoint arc path. When >=2 entries, this is the authoritative
+    // arc shape and the legacy 2-endpoint fields below are ignored.
+    std::vector<ArcWaypoint> arcWaypoints;
+
+    // Legacy 2-endpoint fields (still used when arcWaypoints is empty).
+    float arcStartX  = 0.f;   // normalized X [0..1] at start time
+    float arcEndX    = 0.f;   // normalized X [0..1] at end time
+    float arcStartY  = 0.f;   // height [0..1] at start (0=ground, 1=sky)
+    float arcEndY    = 0.f;   // height [0..1] at end
+    float arcEaseX   = 0.f;   // X easing power (matches ArcData convention)
+    float arcEaseY   = 0.f;   // Y easing power
+    int   arcColor   = 0;     // 0=cyan, 1=pink
+    bool  arcIsVoid  = false;  // void arc = visual only, no input
+    int   arcTapParent = -1;   // ArcTap only: index into notes() of parent Arc
+
     int effectiveEndTrack() const {
         if (!waypoints.empty()) return waypoints.back().lane;
         return endTrack < 0 ? track : endTrack;
@@ -68,7 +94,7 @@ struct EditorNote {
     }
 };
 
-enum class NoteTool { None, Tap, Hold, Slide, Flick };
+enum class NoteTool { None, Tap, Hold, Slide, Flick, Arc, ArcTap };
 
 class Engine;
 class VulkanContext;
@@ -100,6 +126,8 @@ private:
     ChartData buildChartFromNotes() const;
     void exportAllCharts();
     void launchTestProcess();
+    void reloadChartsForCurrentMode();
+    void loadChartFile(Difficulty diff, const std::string& chartRel);
 
     SongInfo*      m_song        = nullptr;
     std::string    m_projectPath;
@@ -237,6 +265,14 @@ private:
     float      m_scanSlideLastY    = 0.f;
     float      m_scanSlideTurnCap  = 0.f;
 
+    // ── Arc editing state (Arcaea 3D mode) ──────────────────────────────────
+    bool       m_arcPlacing     = false;  // click-to-place in progress
+    EditorNote m_arcDraft;                // in-progress arc with waypoints
+    int        m_arcDraftColor  = 0;      // 0=cyan, 1=pink (toolbar pick)
+    float      m_heightCurveH   = 120.f;  // height editor panel pixel height
+    int        m_heightDragArc  = -1;     // index of arc being height-edited
+    int        m_heightDragWp   = -1;     // which waypoint is being dragged
+
     void renderDifficultySelector();
     void renderSceneView(ImDrawList* dl, ImVec2 origin, ImVec2 size, Engine* engine);
     void renderNoteToolbar();
@@ -247,6 +283,22 @@ private:
                      int trackCount, float trackH, float regionTop, bool skyOnly);
     float snapToMarker(float time) const;
     int   trackFromY(float mouseY, float regionTop, float trackH, int trackCount) const;
+
+    // ── Arc editing helpers ─────────────────────────────────────────────────
+    void handleArcPlacement(ImVec2 origin, ImVec2 size, float startTime,
+                            int trackCount, float trackH, float regionTop);
+    void handleArcTapPlacement(ImVec2 origin, ImVec2 size, float startTime,
+                               int trackCount, float trackH, float regionTop);
+    void renderArcNotes(ImDrawList* dl, ImVec2 origin, ImVec2 size, float startTime,
+                        int trackCount, float trackH, float regionTop);
+    void renderArcHeightEditor(ImDrawList* dl, ImVec2 origin, ImVec2 size);
+    void fixupArcTapParents(int deletedIdx);
+    // Evaluate arc position at normalized time t [0..1]. Supports multi-waypoint.
+    static glm::vec2 evalArcEditor(const EditorNote& arc, float t);
+    static float trackToArcX(int track, int trackCount);
+    static int   arcXToTrack(float arcX, int trackCount);
+    // Migrate legacy 2-endpoint arc to multi-waypoint representation.
+    static void ensureArcWaypoints(EditorNote& arc);
 
     // ── Scan Line helpers ────────────────────────────────────────────────────
     // Schedule: 1 bar (4 beats) per sweep at the dominant BPM (fallback 120).

@@ -97,6 +97,7 @@ private:
         double speed;  // instantaneous speed multiplier at this time
     };
 
+    Renderer* m_renderer = nullptr;
     Camera   m_camera;
     uint32_t m_width = 0, m_height = 0;
     double   m_songTime = 0.0;

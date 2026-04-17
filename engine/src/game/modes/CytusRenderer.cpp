@@ -1,5 +1,6 @@
 #include "CytusRenderer.h"
 #include "renderer/Renderer.h"
+#include "renderer/ParticleSystem.h"
 #include <glm/glm.hpp>
 #include <cmath>
 #include <algorithm>
@@ -153,6 +154,7 @@ bool CytusRenderer::scanLineGoingUp(double t) const {
 
 void CytusRenderer::onInit(Renderer& renderer, const ChartData& chart,
                            const GameModeConfig* /*config*/) {
+    m_renderer = &renderer;
     // Dominant BPM from chart timing (editor always writes at least one
     // point). Fallback 120.
     m_bpm = chart.timingPoints.empty() ? 120.f
@@ -475,6 +477,20 @@ void CytusRenderer::showJudgment(int lane, Judgment judgment) {
         if (d < bestDist) { bestDist = d; best = &note; }
     }
     if (best) best->isHit = true;
+
+    // Particle burst at the note's on-screen position.
+    if (m_renderer && best) {
+        glm::vec4 pColor;
+        int pCount = 12;
+        switch (judgment) {
+            case Judgment::Perfect: pColor = {0.2f, 1.f,  0.3f, 1.f}; pCount = 20; break;
+            case Judgment::Good:    pColor = {0.3f, 0.6f, 1.f,  1.f}; pCount = 14; break;
+            case Judgment::Bad:     pColor = {1.f,  0.6f, 0.2f, 1.f}; pCount = 10; break;
+            default: return;
+        }
+        m_renderer->particles().emitBurst({best->sx, best->sy}, pColor, pCount,
+                                          200.f, 8.f, 0.5f);
+    }
 }
 
 // Linear interpolation along a piecewise-linear path at parameter u ∈ [0,1].

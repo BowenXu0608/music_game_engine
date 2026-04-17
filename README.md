@@ -1,9 +1,9 @@
 # Music Game Engine
 
 A C++20/Vulkan-based rhythm game engine with a Unity Hub-style editor for mobile rhythm game development.  
-Supports **BanG Dream**, **Phigros**, **Arcaea**, **Cytus**, and **Lanota** as plugin game modes.
+Supports **BanG Dream**, **Arcaea**, **Cytus**, and **Lanota** as plugin game modes (Phigros renderer exists but is not currently reachable from the UI).
 
-**Last updated:** 2026-04-05
+**Last updated:** 2026-04-12
 
 ---
 
@@ -15,36 +15,40 @@ Music_game/
 │   ├── include/MusicGameEngine/       # Public API headers
 │   └── src/
 │       ├── core/                      # System 3: ECS, SceneGraph, Transform
-│       ├── engine/                    # System 3: Engine, AudioEngine, GameClock
+│       ├── engine/                    # System 3: Engine, AudioEngine, GameClock, AudioAnalyzer
 │       ├── game/
 │       │   ├── chart/                 # System 2: ChartLoader, ChartTypes (UCF)
-│       │   └── modes/                 # System 6: BandoriRenderer, PhigrosRenderer, …
+│       │   └── modes/                 # System 6: BandoriRenderer, ArcaeaRenderer,
+│       │                              #            LanotaRenderer, CytusRenderer, PhigrosRenderer
 │       ├── gameplay/                  # System 5: HitDetector, JudgmentSystem, ScoreTracker
 │       ├── input/                     # System 4: InputManager, GestureRecognizer, TouchTypes
-│       ├── renderer/                  # System 1: Vulkan pipeline, QuadBatch, LineBatch, …
+│       ├── renderer/                  # System 1: Vulkan pipeline, QuadBatch, LineBatch, MeshRenderer
 │       └── ui/                        # System 7: ImGui editor (ProjectHub → SongEditor)
+├── android/                           # System 8: APK packaging (AGP + NDK + Gradle)
+├── docs/                              # Per-system documentation (sys1..sys8)
 ├── Projects/                          # Game projects (one folder each)
-│   └── BandoriSandbox/
+│   └── test/
 ├── shaders/                           # GLSL source → compiled to build/shaders/*.spv
-├── third_party/                       # GLFW, GLM, VMA, ImGui, stb, nlohmann
+├── third_party/                       # GLFW, GLM, VMA, ImGui, stb, miniaudio
 └── build/
     └── Debug/
-        └── MusicGameEngineTest.exe    # Hub launcher; supports --test <project_path> for standalone test game mode
+        └── MusicGameEngineTest.exe    # Hub launcher; --test <project_path> for standalone test game
 ```
 
 ---
 
-## 7 Systems Overview
+## 8 Systems Overview
 
 | # | System | Status | Doc |
 |---|---|---|---|
-| 1 | [Rendering](#system-1--rendering) | ✅ Complete | [RENDERING_SYSTEM.md](RENDERING_SYSTEM.md) |
-| 2 | [Resource Management](#system-2--resource-management) | ✅ Complete | [RESOURCE_MANAGEMENT.md](RESOURCE_MANAGEMENT.md) |
-| 3 | [Core Engine](#system-3--core-engine) | ✅ Complete | [CORE_ENGINE.md](CORE_ENGINE.md) |
-| 4 | [Input & Gesture](#system-4--input--gesture) | ✅ Complete | [INPUT_SYSTEM.md](INPUT_SYSTEM.md) |
-| 5 | [Gameplay](#system-5--gameplay) | ✅ Complete | [INPUT_SYSTEM.md](INPUT_SYSTEM.md) |
-| 6 | [Game Mode Plugins](#system-6--game-mode-plugins) | ✅ Complete | [GAME_MODES.md](GAME_MODES.md) |
-| 7 | [Editor UI](#system-7--editor-ui) | ✅ Complete | [EDITOR_SYSTEM.md](EDITOR_SYSTEM.md) |
+| 1 | [Rendering](#system-1--rendering) | ✅ Complete | [docs/sys1_rendering.md](docs/sys1_rendering.md) |
+| 2 | [Resource Management](#system-2--resource-management) | ✅ Complete | [docs/sys2_resources.md](docs/sys2_resources.md) |
+| 3 | [Core Engine](#system-3--core-engine) | ✅ Complete | [docs/sys3_core_engine.md](docs/sys3_core_engine.md) |
+| 4 | [Input & Gesture](#system-4--input--gesture) | ✅ Complete | [docs/sys4_input.md](docs/sys4_input.md) |
+| 5 | [Gameplay](#system-5--gameplay) | ✅ Complete | [docs/sys5_gameplay.md](docs/sys5_gameplay.md) |
+| 6 | [Game Mode Plugins](#system-6--game-mode-plugins) | ✅ Complete | [docs/sys6_game_modes.md](docs/sys6_game_modes.md) |
+| 7 | [Editor UI](#system-7--editor-ui) | ✅ Complete | [docs/sys7_editor.md](docs/sys7_editor.md) |
+| 8 | [Android Packaging](#system-8--android-packaging) | 🟡 In Progress | [docs/sys8_android.md](docs/sys8_android.md) |
 
 ---
 
@@ -74,7 +78,7 @@ Vulkan-based graphics pipeline. Two sub-layers: Vulkan backend + Batcher layer.
 
 **Shaders** (`shaders/`): quad, line, mesh, bloom_downsample/upsample (compute), composite
 
-> Full details: [RENDERING_SYSTEM.md](RENDERING_SYSTEM.md)
+> Full details: [docs/sys1_rendering.md](docs/sys1_rendering.md)
 
 ---
 
@@ -99,6 +103,8 @@ All external file I/O: textures, audio, charts, asset browsing, GIFs.
 | Phigros (legacy) | `.pec` / `.pgr` | Phigros |
 | Lanota (legacy) | `.lan` | Lanota |
 
+**Note types:** Tap, Hold (with multi-waypoint cross-lane paths + transition styles Straight / Angle90 / Curve / Rhomboid), Flick, Drag, Slide (with custom paths for ScanLine mode), Arc (Arcaea-style 3D curves with X/Y easing), ArcTap, Ring.
+
 **Project folder layout:**
 ```
 Projects/<ProjectName>/
@@ -111,7 +117,7 @@ Projects/<ProjectName>/
     └── textures/   — .png / .jpg / .gif
 ```
 
-> Full details: [RESOURCE_MANAGEMENT.md](RESOURCE_MANAGEMENT.md)
+> Full details: [docs/sys2_resources.md](docs/sys2_resources.md)
 
 ---
 
@@ -125,7 +131,7 @@ Foundational runtime: data model, main loop, timing.
 - **Engine** (`engine/src/engine/Engine.h/.cpp`) — main loop, owns all subsystems as members, owns GLFW callbacks and user pointer
 - **GameClock** (`engine/src/engine/GameClock.h`) — wall clock + DSP time override for chart sync; header-only
 
-> Architecture details in [RENDERING_SYSTEM.md](RENDERING_SYSTEM.md) (Core Architecture section)
+> Full details: [docs/sys3_core_engine.md](docs/sys3_core_engine.md)
 
 ---
 
@@ -147,7 +153,7 @@ Multi-touch input pipeline. Supports desktop (GLFW mouse simulation) and mobile 
 | `SLIDE_SLOP_PX` | 25 px | Min movement for slide |
 | `VELOCITY_WINDOW_S` | 0.08 s | Velocity averaging window |
 
-> Full details: [INPUT_SYSTEM.md](INPUT_SYSTEM.md)
+> Full details: [docs/sys4_input.md](docs/sys4_input.md)
 
 ---
 
@@ -170,28 +176,30 @@ Hit detection, judgment grading, and score tracking.
 | Bad | ±100 ms |
 | Miss | >100 ms or note passed |
 
-> Full details: [INPUT_SYSTEM.md](INPUT_SYSTEM.md)
+> Full details: [docs/sys5_gameplay.md](docs/sys5_gameplay.md)
 
 ---
 
 ## System 6 — Game Mode Plugins
 
-Plugin architecture: `GameModeRenderer` abstract interface + 5 implementations.
+Plugin architecture: `GameModeRenderer` abstract interface + 5 implementations. Selected via `GameModeType` enum (DropNotes, Circle, ScanLine) with optional `DropDimension` (TwoD / ThreeD) for DropNotes.
 
-| Plugin | Game | Notes |
-|---|---|---|
-| `BandoriRenderer` | BanG Dream | 5-lane highway, perspective, eye_z ≥8 |
-| `PhigrosRenderer` | Phigros | Rotating judgment lines, uses SceneGraph |
-| `ArcaeaRenderer` | Arcaea | 3D perspective, arc ribbons via MeshRenderer |
-| `CytusRenderer` | Cytus | Horizontal scanning line |
-| `LanotaRenderer` | Lanota | Concentric ring tunnel perspective |
+| Plugin | Game | GameModeType | Notes |
+|---|---|---|---|
+| `BandoriRenderer` | BanG Dream | DropNotes + TwoD | Dynamic lane count from config, perspective camera, cross-lane holds with 4 transition styles, per-type note colors (Tap/Hold/Flick/Drag/Slide) |
+| `ArcaeaRenderer` | Arcaea | DropNotes + ThreeD | Ground + sky regions, 32-segment arc ribbon meshes with X/Y easing, diamond ArcTap quads on arc paths |
+| `LanotaRenderer` | Lanota | Circle | Concentric disks with keyframed rotate/scale/move animation, lane-enable mask timeline, per-lane spans (1/2/3) |
+| `CytusRenderer` | Cytus | ScanLine | Variable-speed scan line with phase accumulation table, straight-line slides, multi-sweep holds, page visibility |
+| `PhigrosRenderer` | Phigros | (unreachable) | Rotating judgment lines with SceneGraph — renderer exists but not wired to any GameModeType |
 
-`Engine` holds active mode as `std::unique_ptr<GameModeRenderer>`.  
+`Engine` holds active mode as `std::unique_ptr<GameModeRenderer>`. `Engine::createRenderer(config)` factory dispatches by GameModeType.
 Game modes render via `Renderer&` — never allocate Vulkan resources directly.
 
 The `GameModeRenderer` base class provides a `showJudgment()` virtual method for per-mode judgment display, and `onInit` accepts an optional `GameModeConfig` for runtime configuration.
 
-> Full details: [RENDERING_SYSTEM.md](RENDERING_SYSTEM.md) (Game Mode Integration section)
+**All 4 reachable modes are playable end-to-end** — create in editor, save, play via Test Game.
+
+> Full details: [docs/sys6_game_modes.md](docs/sys6_game_modes.md)
 
 ---
 
@@ -200,7 +208,7 @@ The `GameModeRenderer` base class provides a `showJudgment()` virtual method for
 Unity Hub-style editor built on ImGui + Vulkan. Layer-based flow:
 
 ```
-ProjectHub → StartScreenEditor → MusicSelectionEditor → SongEditor → (GamePlay)
+ProjectHub → StartScreenEditor → MusicSelectionEditor → SongEditor → (TestGame process)
 ```
 
 | Layer | Purpose |
@@ -208,12 +216,36 @@ ProjectHub → StartScreenEditor → MusicSelectionEditor → SongEditor → (Ga
 | **Project Hub** | Browse + create projects, folder scaffolding |
 | **Start Screen Editor** | Background, logo, tap text, transition, audio; live preview |
 | **Music Selection Editor** | Arcaea-style card stack wheels, hierarchy panel, cover picker |
-| **Song Editor** | DAW-style layout (scene preview + chart timeline simultaneous), left sidebar config, Madmom beat analysis (auto-generate markers for 3 difficulties), toolbar (Analyze/Place All/Clear), audio playback controls, difficulty selector (Easy/Medium/Hard) with per-difficulty notes, camera controls, HUD config (score/combo position and style), chart persistence (save/load as unified JSON) |
-| **Scene Viewer** | Gameplay viewport, Play/Stop, stats |
-| **Test Game** | Green button on all editor pages; launches full game flow preview |
-| **Asset Browser** | Unified import system (`importAssetsToProject`), shared across all pages, "All Files" default |
+| **Song Editor** | DAW-style layout with per-mode features (see below) |
+| **Test Game** | Green button on all editor pages; launches child process of `MusicGameEngineTest.exe --test <project>` |
+| **Asset Browser** | Unified import system shared across all pages, "All Files" default |
 
-> Full details: [EDITOR_SYSTEM.md](EDITOR_SYSTEM.md)
+**SongEditor features:**
+- DAW-style layout: scene preview + chart timeline simultaneous, left sidebar config, waveform strip
+- Per-difficulty notes (Easy/Medium/Hard)
+- Madmom beat analysis — auto-generate markers for 3 difficulties
+- Game mode config: DropNotes/Circle/ScanLine + 2D/3D dimension + track count + camera + HUD
+- Multi-waypoint hold authoring via drag-to-record
+- **Circle mode:** keyframed disk animation (rotate/scale/move) with easing
+- **ScanLine mode:** variable-speed keyframes, Cytus-style slides (LMB+RMB), multi-sweep holds
+- **3D DropNotes mode:** 3-panel arc editing — timeline ribbons, height curve editor, cross-section preview; ArcTap click-to-place on parent arc
+- Chart persistence: save/load as Unified Chart Format JSON
+
+> Full details: [docs/sys7_editor.md](docs/sys7_editor.md)
+
+---
+
+## System 8 — Android Packaging
+
+Build-APK pipeline that exports any project to a standalone Android app. Desktop code untouched; Android-specific code isolated in `AndroidVulkanContext`, `AndroidSwapchain`, `AndroidEngine`, `AndroidFileIO`, and `android_main.cpp`.
+
+- **Toolchain:** AGP 8.5, NDK r27c, CMake, SDK 36, Build Tools 37.0.0
+- **Asset pipeline:** Bundles project + shaders into APK
+- **Network:** China-friendly (Aliyun mirrors, BITS for downloads)
+- **UI:** "Build APK" button → save dialog → progress → APK ready
+- **Features:** Landscape lock, window resize/rotation handlers, surface transform fix for portrait↔landscape
+
+> Full details: [docs/sys8_android.md](docs/sys8_android.md)
 
 ---
 
@@ -268,38 +300,52 @@ Press **ESC** at any time to close the test game window and return to editing.
 
 ## Documentation
 
-One document per system:
+One document per system, all under `docs/`:
 
 | System | Document | Contents |
 |---|---|---|
-| System 1 | [RENDERING_SYSTEM.md](RENDERING_SYSTEM.md) | Vulkan backend, batchers, shaders, frame loop, performance, lessons learned |
-| System 2 | [RESOURCE_MANAGEMENT.md](RESOURCE_MANAGEMENT.md) | TextureManager, AudioEngine, ChartLoader, UCF format, AssetBrowser, GifPlayer |
-| System 3 | [CORE_ENGINE.md](CORE_ENGINE.md) | ECS, SceneGraph, Transform, Engine main loop, GameClock, build system |
-| System 4+5 | [INPUT_SYSTEM.md](INPUT_SYSTEM.md) | Gesture recognition, hit detection, judgment, score, platform integration |
-| System 6 | [GAME_MODES.md](GAME_MODES.md) | GameModeRenderer interface + BandoriRenderer, PhigrosRenderer, ArcaeaRenderer, CytusRenderer, LanotaRenderer |
-| System 7 | [EDITOR_SYSTEM.md](EDITOR_SYSTEM.md) | ProjectHub, StartScreen, MusicSelection, SongEditor, GameFlowPreview, AssetBrowser |
+| System 1 | [docs/sys1_rendering.md](docs/sys1_rendering.md) | Vulkan backend, batchers, shaders, descriptor pools |
+| System 2 | [docs/sys2_resources.md](docs/sys2_resources.md) | ChartTypes, UCF format, ChartLoader, AudioEngine, dynamic BPM |
+| System 3 | [docs/sys3_core_engine.md](docs/sys3_core_engine.md) | ECS, SceneGraph, Engine main loop, GameClock, build system |
+| System 4 | [docs/sys4_input.md](docs/sys4_input.md) | Keyboard + touch, gesture recognition, platform bridges, DPI |
+| System 5 | [docs/sys5_gameplay.md](docs/sys5_gameplay.md) | HitDetector, judgment, score, cross-lane holds, sample-tick scoring |
+| System 6 | [docs/sys6_game_modes.md](docs/sys6_game_modes.md) | GameModeRenderer interface + Bandori/Arcaea/Lanota/Cytus renderers |
+| System 7 | [docs/sys7_editor.md](docs/sys7_editor.md) | SongEditor DAW layout, all authoring flows, arc editing, chart persistence |
+| System 8 | [docs/sys8_android.md](docs/sys8_android.md) | APK packaging, Android Vulkan context, build flow, China network |
 
 ---
 
-## Recent Additions (2026-04-04 ~ 2026-04-05)
+## Recent Additions
 
-- **ChartLoader completion** — all 6 format parsers fully implemented with complete note type coverage (drag, arctap, ring, slide, flick direction, arc easing)
-- **Beat Analysis via Madmom** — `tools/analyze_audio.py` + `AudioAnalyzer` C++ class; auto-generates markers for Easy (downbeats), Medium (all beats), Hard (beats + onsets)
-- **DAW-style SongEditor layout** — scene preview and chart timeline visible simultaneously; left sidebar for config
-- **Gameplay lead-in** — 2-second visual lead-in before audio starts; configurable audio offset per song
-- **HUD foreground fix** — score/combo now uses `ImGui::GetForegroundDrawList()` for guaranteed visibility
-- **Bug fixes** — waveform LOD dangling reference crash; MusicSelectionEditor Play button bounds check
+**2026-04-12**
+- **Arc/ArcTap editor** — 3-panel editing for Arcaea-style arcs: timeline ribbons (click-drag create), height curve editor (draggable start/end Y handles), cross-section preview (front-face view with arc dots). Full JSON round-trip, ArcaeaRenderer renders arc ribbons + diamond ArcTaps.
+- **Scan Line variable-speed** — phase-accumulation table for keyframed scan speed, straight-line slides (Cytus-style with LMB+RMB nodes), multi-sweep holds
+- **Circle disk animation** — keyframed rotate/scale/move with easing, lane-enable mask timeline
+- **Cross-mode integration audit** — 10 bug fixes across all modes, Bandori Slide coloring, all 4 reachable modes verified end-to-end
+
+**2026-04-10**
+- **Cross-lane holds** — multi-waypoint hold authoring with 4 transition styles (Straight/Angle90/Curve/Rhomboid), Bandori-style sample-tick scoring
+- **Game-mode factory fix** — Circle→LanotaRenderer, ScanLine→CytusRenderer
+- **Test Game unification** — all Test Game buttons route through `Engine::spawnTestGameProcess()`
+
+**2026-04-09 — Android packaging (Rounds 1–5)**
+- APK pipeline, landscape lock, window resize/rotation handlers, surface transform fix for portrait↔landscape, StartScreen integration
+
+**2026-04-04 ~ 2026-04-05**
+- ChartLoader completion, Beat Analysis via Madmom (3 difficulty markers), DAW-style SongEditor layout, gameplay lead-in, HUD foreground fix
 
 ---
 
 ## Future Plans
 
-### Priority 1: Mobile Platform
-Android JNI multi-touch (bridge designed), iOS UITouch bridge (bridge designed), Vulkan Android surface.
+### Priority 1: Android Packaging Validation
+Round 5d swapchain extent fix needs on-device validation. Multi-device testing.
 
-### Priority 2: Configurable Timing & Replay
-Per-song judgment windows (Perfect/Good/Bad/Miss) — ✅ done (editor UI sliders).  
-Remaining: wire to gameplay HitDetector, replay system (record + deterministic replay), auto-play mode.
+### Priority 2: Editor Polish
+- BPM grid snapping for note placement
+- Copy/paste note patterns
+- Undo/redo
+- Note drag-to-reposition
 
-### Priority 3: Advanced Chart Editor
-Remaining: BPM grid snapping, copy/paste note patterns, undo/redo, note drag-to-reposition.
+### Priority 3: Replay & Auto-Play
+Deterministic replay record/playback, auto-play mode for chart validation.

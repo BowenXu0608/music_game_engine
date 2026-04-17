@@ -77,7 +77,105 @@ Engine creates renderers via `createRenderer(GameModeConfig)` factory.
 
 ## ArcaeaRenderer (3D Drop Notes)
 
-Floor + arc + sky notes with perspective. Uses `checkHitPosition` / `beginHoldPosition` for spatial input. Arc holds scored holistically on release via `judgeArc(accuracy)`.
+Arcaea-style 3D highway with a ground lane, an elevated sky band, and arc holds that curve between them. Uses `checkHitPosition` / `beginHoldPosition` for spatial input. Arc holds scored holistically on release via `judgeArc(accuracy)`.
+
+### Playfield geometry — single source of truth (2026-04-17)
+
+All mesh construction references five constants in the header; do **not** introduce parallel magic numbers elsewhere in the file:
+
+```
+SCROLL_SPEED    = 8.f    // world units/sec notes scroll toward camera
+GROUND_Y        = -2.f   // ground plane (world y)
+LANE_HALF_WIDTH = 3.f    // lane near-edge spans x ∈ [-3, +3]
+LANE_FAR_Z      = -60.f  // lane back edge (far)
+JUDGMENT_Z      = 0.f    // lane front edge / judgment plane
+```
+
+The ground mesh, the judgment gate, the tap-lane mapping, and the arc/arctap coordinate transforms all derive from these. Changing lane width means editing *one* line.
+
+### Rectangle judgment gate (2026-04-17)
+
+Four thin coplanar quads at `z = JUDGMENT_Z` whose corners are byte-for-byte identical to the ground mesh's near-edge corners (`±LANE_HALF_WIDTH`, `GROUND_Y`, `JUDGMENT_Z`). Visual hierarchy per Arcaea convention:
+
+- **Bottom bar** — bright warm yellow, thickness 0.08, grown *upward* from `GROUND_Y` so its bottom edge matches the ground's near edge exactly. This is the ground judgment line.
+- **Sky bar** — dim cool cyan, thickness 0.035, at `GROUND_Y + skyHeight`. This is the arctap judgment line.
+- **Vertical posts** — dim neutral, thickness 0.035, grown *inward* from `±LANE_HALF_WIDTH` so their outer edges stay flush with the lane.
+
+`skyHeight` reads from `GameModeConfig::skyHeight` (editable via the SongEditor slider in the 3D Mode properties).
+
+### Lane mapping — Bandori-style slot spacing (2026-04-17)
+
+`m_laneCount` starts from `config->trackCount` (default 7) and auto-expands as the chart is scanned — mirrors `BandoriRenderer::onInit`. For each `Tap`/`Flick`, if `lround(laneX) >= m_laneCount`, `m_laneCount` is bumped to `lane + 1`.
+
+Tap world-x is slot-centered (not edge-based):
+
+```
+laneSpacing = (2 * LANE_HALF_WIDTH) / N        // N equal slots across the lane width
+wx = (lane - (N-1)*0.5) * laneSpacing          // lane 0 is half-a-slot inside left edge
+```
+
+With `N=12`, `laneSpacing=0.5`, lane 0 center at `-2.75` and lane 11 at `+2.75` — every tap fits inside the lane. The older `(N-1)`-based mapping put lane 0 *on* the edge at `x=-3`, so the tap mesh bled outside.
+
+The tap mesh itself scales to the slot: `hw = min(0.4, slotHalf * 0.9)`. Prevents neighbor-slot overlap at high lane counts.
+
+### Arc coordinate transform (2026-04-17)
+
+Chart arcs author `startX/endX/startY/endY` in **normalized [0,1]** space. The previous renderer treated those as raw world coords, so arcs floated in a random corner away from the lane. `evalArc(arc, t)` now returns world coords:
+
+```
+wx = (nx * 2 - 1) * LANE_HALF_WIDTH            // [-LANE_HALF, +LANE_HALF]
+wy = GROUND_Y + ny * m_skyHeight               // [GROUND_Y, GROUND_Y + skyHeight]
+```
+
+`h=0` → arc sits on the ground judgment line. `h=1` → sits on the sky judgment line. Midway values map linearly. World-y is independent of z: a constant-h arc is a flat horizontal ribbon at that y, regardless of distance.
+
+### Smooth arc clipping via dynamic vertex buffer (2026-04-17)
+
+Previously arcs were built once as a static mesh and just translated; the consumed portion kept rendering past the judgment line, and the old mesh topology made any clipping snap to segment boundaries.
+
+Fix: each arc's vertex buffer is created via `createDynamicBuffer` (host-mapped). In `onUpdate` every frame:
+
+```
+tClip = clamp((songTime - startTime) / duration, 0, 1)
+writeArcVertices(am, tClip)   // memcpy into mesh.vertexBuffer.mapped
+```
+
+`writeArcVertices` samples the arc from `t ∈ [tClip, 1.0]` (not `[0, 1]`) — the first vertex pair sits exactly at the current judgment-line parameter, and since `tClip` is a continuous float, the trailing edge recedes smoothly frame-by-frame with no segment popping. The index buffer stays static (topology never changes).
+
+Staging-based `updateMesh` is **not** used for this path — it calls `vkQueueWaitIdle` per upload and would tank the frame budget. Host-mapped writes are free.
+
+### Void-arc and ArcTap rendering (2026-04-17)
+
+- **Void arcs** (`isVoid=true`) are invisible ArcTap carriers per Arcaea convention. They were previously rendering as dim cyan ribbons at 40% alpha, showing up as "gray strips" on the lane. Now skipped entirely in `onRender`.
+- **ArcTaps** were being dropped in `onInit` (no handler). Added `m_arcTaps` container, `buildArcTapMesh` (thin camera-facing horizontal bar, 0.64 × 0.16), and a render loop that translates each to `((arcX·2-1)·LANE_HALF, GROUND_Y + arcY·skyHeight, JUDGMENT_Z - z)` where `z = (noteTime - songTime)·SCROLL_SPEED`. Culled at `z < 0` so they vanish at the judgment plane.
+
+### Rim-glow pitfall — use camera-facing normals for bright meshes (2026-04-17)
+
+The shared `mesh.frag` applies a rim glow: `rim = 1 - |dot(n, {0,0,1})|; outColor = base + base * rim * 2`. A vertex normal of `{0, 1, 0}` (ground-up) gives `rim = 1` and triples the base color, saturating any bright color to pure white.
+
+- **Ground mesh**: keep `{0, 1, 0}` — its base is dark `(0.15, 0.15, 0.25)`, and the rim glow is what makes it read as purple.
+- **Tap, ArcTap, Arc meshes**: use `{0, 0, 1}` — these start bright (yellow / white / cyan / pink) and would blow to white under rim glow.
+
+This was the root cause of "all notes look the same color (white)" — not a rendering bug, a normal-vector oversight.
+
+### Hit particles (2026-04-17)
+
+`ArcaeaRenderer` didn't override `showJudgment` — the no-op base class was being called, so no particles fired. Key details when implementing:
+
+1. **Emit in world space, not screen pixels.** `ParticleSystem::flush` runs every particle through `viewProj * vec4(inPos, 0, 1)` in `quad.vert`. BandoriRenderer gets away with pixel coords because it uses a screen-space ortho camera; Arcaea is 3D perspective, so emitting at pixel coords puts particles at nonsense clip positions. Use world-scale size (`0.15`) and velocity (`3 u/s`) as well.
+2. **Route by `lane`, then by a sky-event table.** `Engine::dispatchHitResult` clamps arc/arctap lane from `-1` to `0` before calling `showJudgment`, so lane alone doesn't identify the note type. Solution:
+   - `lane > 0` → ground slot for that lane (taps, flicks, hold sample ticks).
+   - `lane == 0` → consult `m_hitEvents` (pre-computed list of *sky* events only: arctaps at `(arcX, arcY)` world, arc start/end at `evalArc(arc, 0/1)`). Within a tight ~30 ms window, prefer the sky position. Falls back to lane-0 ground otherwise.
+
+The ground table is deliberately empty — adding ground taps there would let a hold-tick at `t=1.65` snap to an arctap event at `t=1.67` and put the particle in the sky.
+
+### No chart looping (2026-04-17)
+
+`onUpdate` used to wrap `m_songTime` with `fmod(songTime, maxTime + 1.0)` so the chart replayed forever. Removed — `m_songTime = songTime` passes audio time straight through. Per-type culling handles end-of-song state: taps cull at `z < 0`, arcs cull at `songRel >= duration`, arctaps cull at `z < 0`.
+
+### Tap cull tightened (2026-04-17)
+
+Was `z < -2` (taps lingered ~0.25 s past the judgment line, falling through the foreground). Now `z < 0` — taps disappear exactly at the judgment plane.
 
 ## PhigrosRenderer
 

@@ -32,6 +32,25 @@ namespace fs = std::filesystem;
 namespace {
     constexpr float kPi_ = 3.14159265358979f;
 
+    // Chart file naming: <name>_<modeKey>_<difficulty>.json so every
+    // (mode, difficulty) pair gets its own independent chart file.
+    const char* modeKey(const GameModeConfig& gm) {
+        switch (gm.type) {
+            case GameModeType::DropNotes:
+                return (gm.dimension == DropDimension::ThreeD) ? "drop3d" : "drop2d";
+            case GameModeType::Circle:   return "circle";
+            case GameModeType::ScanLine: return "scan";
+        }
+        return "unknown";
+    }
+
+    std::string chartRelPathFor(const std::string& songName,
+                                const GameModeConfig& gm,
+                                const char* diffSuffix) {
+        return std::string("assets/charts/") + songName + "_"
+             + modeKey(gm) + "_" + diffSuffix + ".json";
+    }
+
     float applyDiskEasing(float t, DiskEasing e) {
         switch (e) {
             case DiskEasing::SineInOut:
@@ -82,27 +101,37 @@ namespace {
             [](const DiskRotationEvent& e){ return e.targetAngle; });
     }
 
-    // Reachability predicate bounds match the FOV/Z=0 hit plane used by
-    // LanotaRenderer (FOV_Y=60°, eye at z=4): ~±3.0 world-units horizontally
-    // and ~±2.3 vertically, shrunk by a 5% inner margin.
-    constexpr float kPlayHalfX = 3.0f * 0.95f;
-    constexpr float kPlayHalfY = 2.3f * 0.95f;
-    constexpr float kBaseRadius = 2.4f;  // LanotaRenderer BASE_RADIUS
+    // Reachability predicate bounds: LanotaRenderer uses FOV_Y=60° with eye
+    // at z=4, giving a fixed visible rect of ~±3.0 × ±2.31 at the z=0 hit
+    // plane. A lane's hit point is reachable only if it lands inside that
+    // rect — the bound must NOT grow with the disk radius, otherwise scaling
+    // the disk up also scales the "playable" window and nothing is ever
+    // gated. A small +0.15 margin prevents the default ring (r≈2.4) from
+    // clipping its top/bottom lanes right at the boundary.
+    constexpr float kFovHalfX = 3.0f;
+    constexpr float kFovHalfY = 2.31f;
 
     uint32_t laneMaskForTransform(int trackCount,
+                                  float outerR,
                                   const glm::vec2& center,
                                   float scale,
                                   float rotation) {
         if (trackCount <= 0) return 0xFFFFFFFFu;
-        const float outerR = kBaseRadius * scale;
+        const float r = outerR * scale;
+        const float halfX = kFovHalfX + 0.15f;
+        const float halfY = kFovHalfY + 0.15f;
         uint32_t mask = 0;
-        for (int lane = 0; lane < trackCount && lane < 32; ++lane) {
+        const int laneLimit = std::min(trackCount, 32);
+        for (int lane = 0; lane < laneLimit; ++lane) {
             float a = kPi_ * 0.5f - (static_cast<float>(lane) / trackCount) * (kPi_ * 2.f) + rotation;
-            float lx = center.x + std::cos(a) * outerR;
-            float ly = center.y + std::sin(a) * outerR;
-            if (std::abs(lx) > kPlayHalfX || std::abs(ly) > kPlayHalfY) continue;
+            float lx = center.x + std::cos(a) * r;
+            float ly = center.y + std::sin(a) * r;
+            if (std::abs(lx) > halfX || std::abs(ly) > halfY) continue;
             mask |= (1u << lane);
         }
+        // Lanes 32+ can't fit in a uint32_t mask — treat them as always enabled
+        // so high-track-count circle charts aren't silently gated.
+        if (trackCount > 32) mask |= 0xFFFFFFFFu;
         return mask;
     }
 } // namespace
@@ -139,9 +168,14 @@ void SongEditor::setSong(SongInfo* song, const std::string& projectPath) {
 
     if (!song) return;
 
-    auto loadChart = [&](Difficulty diff, const std::string& chartRel) {
-        if (chartRel.empty()) return;
-        std::string fullPath = projectPath + "/" + chartRel;
+    // Prefer mode-keyed charts; each (mode, difficulty) is fully independent.
+    reloadChartsForCurrentMode();
+}
+
+void SongEditor::loadChartFile(Difficulty diff, const std::string& chartRel) {
+    if (!m_song || chartRel.empty()) return;
+    {
+        std::string fullPath = m_projectPath + "/" + chartRel;
         try {
             ChartData chart = ChartLoader::load(fullPath);
             auto& edNotes = m_diffNotes[(int)diff];
@@ -203,10 +237,132 @@ void SongEditor::setSong(SongInfo* song, const std::string& projectPath) {
                     en.type = EditorNoteType::Slide;
                 } else if (n.type == NoteType::Flick) {
                     en.type = EditorNoteType::Flick;
+                } else if (n.type == NoteType::Arc) {
+                    en.type = EditorNoteType::Arc;
+                    if (auto* arc = std::get_if<ArcData>(&n.data)) {
+                        en.arcStartX = arc->startPos.x;
+                        en.arcStartY = arc->startPos.y;
+                        en.arcEndX   = arc->endPos.x;
+                        en.arcEndY   = arc->endPos.y;
+                        en.endTime   = en.time + arc->duration;
+                        en.arcEaseX  = arc->curveXEase;
+                        en.arcEaseY  = arc->curveYEase;
+                        en.arcColor  = arc->color;
+                        en.arcIsVoid = arc->isVoid;
+                    }
+                } else if (n.type == NoteType::ArcTap) {
+                    en.type = EditorNoteType::ArcTap;
+                    en.arcTapParent = -1; // resolved below
+                    if (auto* tap = std::get_if<TapData>(&n.data)) {
+                        en.arcStartX = tap->laneX;  // store position for matching
+                        en.arcStartY = tap->scanY;
+                    }
                 } else {
                     en.type = EditorNoteType::Tap;
                 }
                 edNotes.push_back(en);
+            }
+
+            // ── Reconstruct ArcTap → Arc parent linkage ─────────────────
+            // For each ArcTap, find the nearest Arc whose time range contains it.
+            for (size_t i = 0; i < edNotes.size(); ++i) {
+                auto& atn = edNotes[i];
+                if (atn.type != EditorNoteType::ArcTap) continue;
+                int bestArc = -1;
+                float bestDist = 1e9f;
+                for (size_t j = 0; j < edNotes.size(); ++j) {
+                    const auto& arc = edNotes[j];
+                    if (arc.type != EditorNoteType::Arc) continue;
+                    if (atn.time < arc.time - 0.001f || atn.time > arc.endTime + 0.001f)
+                        continue;
+                    // Evaluate arc position at arctap time and compare
+                    float dur = arc.endTime - arc.time;
+                    float tP = (dur > 0.0001f) ? (atn.time - arc.time) / dur : 0.f;
+                    glm::vec2 pos = evalArcEditor(arc, std::clamp(tP, 0.f, 1.f));
+                    float dist = std::abs(pos.x - atn.arcStartX)
+                               + std::abs(pos.y - atn.arcStartY);
+                    if (dist < bestDist) {
+                        bestDist = dist;
+                        bestArc  = (int)j;
+                    }
+                }
+                atn.arcTapParent = bestArc;
+            }
+
+            // ── Auto-merge consecutive connected arc segments ──────────
+            // If arc B starts where arc A ends (same color, positions match,
+            // time matches), merge them into a single multi-waypoint arc.
+            {
+                constexpr float kTimeTol = 0.005f;
+                constexpr float kPosTol  = 0.01f;
+                std::vector<bool> merged(edNotes.size(), false);
+                for (size_t i = 0; i < edNotes.size(); ++i) {
+                    if (merged[i]) continue;
+                    auto& base = edNotes[i];
+                    if (base.type != EditorNoteType::Arc) continue;
+
+                    // Initialize waypoints for this arc if not yet multi-waypoint
+                    if (base.arcWaypoints.empty()) {
+                        ArcWaypoint w0, w1;
+                        w0.time = base.time; w0.x = base.arcStartX; w0.y = base.arcStartY;
+                        w1.time = base.endTime; w1.x = base.arcEndX; w1.y = base.arcEndY;
+                        w1.easeX = base.arcEaseX; w1.easeY = base.arcEaseY;
+                        base.arcWaypoints = {w0, w1};
+                    }
+
+                    // Greedily chain subsequent arcs
+                    bool found = true;
+                    while (found) {
+                        found = false;
+                        const auto& lastWp = base.arcWaypoints.back();
+                        for (size_t j = 0; j < edNotes.size(); ++j) {
+                            if (j == i || merged[j]) continue;
+                            auto& cand = edNotes[j];
+                            if (cand.type != EditorNoteType::Arc) continue;
+                            if (cand.arcColor != base.arcColor) continue;
+                            if (std::abs(cand.time - lastWp.time) > kTimeTol) continue;
+                            if (std::abs(cand.arcStartX - lastWp.x) > kPosTol) continue;
+                            if (std::abs(cand.arcStartY - lastWp.y) > kPosTol) continue;
+
+                            // Merge: append cand's end as a new waypoint
+                            ArcWaypoint wp;
+                            wp.time  = cand.endTime;
+                            wp.x     = cand.arcEndX;
+                            wp.y     = cand.arcEndY;
+                            wp.easeX = cand.arcEaseX;
+                            wp.easeY = cand.arcEaseY;
+                            base.arcWaypoints.push_back(wp);
+                            base.endTime = wp.time;
+                            base.arcEndX = wp.x;
+                            base.arcEndY = wp.y;
+                            merged[j] = true;
+
+                            // Update any ArcTap parents pointing to j
+                            for (auto& n : edNotes) {
+                                if (n.type == EditorNoteType::ArcTap && n.arcTapParent == (int)j)
+                                    n.arcTapParent = (int)i;
+                            }
+                            found = true;
+                            break;
+                        }
+                    }
+                }
+                // Remove merged arcs
+                std::vector<EditorNote> cleaned;
+                std::vector<int> indexMap(edNotes.size(), -1);
+                for (size_t i = 0; i < edNotes.size(); ++i) {
+                    if (!merged[i]) {
+                        indexMap[i] = (int)cleaned.size();
+                        cleaned.push_back(std::move(edNotes[i]));
+                    }
+                }
+                // Fixup ArcTap parent indices
+                for (auto& n : cleaned) {
+                    if (n.type == EditorNoteType::ArcTap && n.arcTapParent >= 0) {
+                        n.arcTapParent = indexMap[n.arcTapParent];
+                    }
+                }
+                edNotes = std::move(cleaned);
             }
 
             // Disk animation (circle mode) — copy into the per-difficulty
@@ -222,11 +378,46 @@ void SongEditor::setSong(SongInfo* song, const std::string& projectPath) {
         } catch (...) {
             // Chart file doesn't exist or can't be parsed — start empty
         }
-    };
+    }
+}
 
-    loadChart(Difficulty::Easy,   song->chartEasy);
-    loadChart(Difficulty::Medium, song->chartMedium);
-    loadChart(Difficulty::Hard,   song->chartHard);
+void SongEditor::reloadChartsForCurrentMode() {
+    if (!m_song) return;
+
+    // Discard any in-memory notes/markers from the previous mode so a
+    // fresh (mode, difficulty) pair always starts from its own file or empty.
+    m_diffNotes.clear();
+    m_diffMarkers.clear();
+    m_diffDiskRot.clear();
+    m_diffDiskMove.clear();
+    m_diffDiskScale.clear();
+    m_diffScanSpeed.clear();
+    m_bpmChanges.clear();
+    m_dominantBpm = 0.f;
+    m_laneMaskDirty = true;
+    m_scanPhaseDirty = true;
+
+    const char* diffSuffix[] = {"easy", "medium", "hard"};
+    Difficulty  diffs[]      = {Difficulty::Easy, Difficulty::Medium, Difficulty::Hard};
+    for (int d = 0; d < 3; ++d) {
+        std::string rel = chartRelPathFor(m_song->name, m_song->gameMode, diffSuffix[d]);
+        std::string full = m_projectPath + "/" + rel;
+        if (fs::exists(full)) {
+            loadChartFile(diffs[d], rel);
+            switch (diffs[d]) {
+                case Difficulty::Easy:   m_song->chartEasy   = rel; break;
+                case Difficulty::Medium: m_song->chartMedium = rel; break;
+                case Difficulty::Hard:   m_song->chartHard   = rel; break;
+            }
+        } else {
+            // No file yet for this (mode, diff) — clear any stale SongInfo path.
+            switch (diffs[d]) {
+                case Difficulty::Easy:   m_song->chartEasy.clear();   break;
+                case Difficulty::Medium: m_song->chartMedium.clear(); break;
+                case Difficulty::Hard:   m_song->chartHard.clear();   break;
+            }
+        }
+    }
 }
 
 // ── Thumbnail cache ──────────────────────────────────────────────────────────
@@ -362,6 +553,7 @@ void SongEditor::render(Engine* engine) {
         ImGui::Spacing();
         renderGameModeConfig();
         ImGui::Spacing();
+
         ImGui::Separator();
         ImGui::Spacing();
         if (ImGui::CollapsingHeader("Assets", ImGuiTreeNodeFlags_DefaultOpen))
@@ -386,7 +578,10 @@ void SongEditor::render(Engine* engine) {
     ImGui::BeginChild("SECenter", ImVec2(mainW, bodyH), false);
     {
         const bool scanLineMode = (m_song->gameMode.type == GameModeType::ScanLine);
-        float editableH = std::max(80.f, bodyH - waveformH - splitterThick);
+        const bool is3DMode = (m_song->gameMode.type == GameModeType::DropNotes
+                               && m_song->gameMode.dimension == DropDimension::ThreeD);
+        const float arcHeightH = is3DMode ? m_heightCurveH : 0.f;
+        float editableH = std::max(80.f, bodyH - waveformH - splitterThick - arcHeightH);
         float sceneH    = scanLineMode ? editableH
                                        : std::max(40.f, editableH * m_sceneSplit);
         float timelineH = scanLineMode ? 0.f
@@ -460,6 +655,21 @@ void SongEditor::render(Engine* engine) {
                     renderChartTimeline(dl, tlOrigin, tlSize, engine);
                     ImGui::Dummy(tlSize);
                 }
+            }
+            ImGui::EndChild();
+        }
+
+        // ── Arc Height Curve Editor (3D mode only) ─────────────────────────
+        if (is3DMode && arcHeightH > 0.f) {
+            ImGui::BeginChild("SEArcHeight", ImVec2(0, arcHeightH), true,
+                              ImGuiWindowFlags_NoScrollWithMouse | ImGuiWindowFlags_NoScrollbar);
+            {
+                ImVec2 avail = ImGui::GetContentRegionAvail();
+                ImVec2 hOrigin = ImGui::GetCursorScreenPos();
+                ImVec2 hSize(avail.x, avail.y);
+                ImDrawList* dl = ImGui::GetWindowDrawList();
+                renderArcHeightEditor(dl, hOrigin, hSize);
+                ImGui::Dummy(hSize);
             }
             ImGui::EndChild();
         }
@@ -592,9 +802,11 @@ void SongEditor::render(Engine* engine) {
                          ImGuiWindowFlags_NoCollapse)) {
             EditorNote& sel = notes()[m_selectedNoteIdx];
             const char* typeName =
-                (sel.type == EditorNoteType::Tap)   ? "Tap"   :
-                (sel.type == EditorNoteType::Hold)  ? "Hold"  :
-                (sel.type == EditorNoteType::Flick) ? "Flick" : "Slide";
+                (sel.type == EditorNoteType::Tap)    ? "Tap"    :
+                (sel.type == EditorNoteType::Hold)   ? "Hold"   :
+                (sel.type == EditorNoteType::Flick)  ? "Flick"  :
+                (sel.type == EditorNoteType::Arc)    ? "Arc"    :
+                (sel.type == EditorNoteType::ArcTap) ? "ArcTap" : "Slide";
             ImGui::Text("Type: %s", typeName);
             ImGui::Text("Time: %.3f s", sel.time);
             const bool isScanLine = (m_song && m_song->gameMode.type == GameModeType::ScanLine);
@@ -758,8 +970,166 @@ void SongEditor::render(Engine* engine) {
                 ImGui::Separator();
             }
 
+            // ── Arc properties ──────────────────────────────────────────────
+            if (sel.type == EditorNoteType::Arc) {
+                ImGui::Text("Duration: %.3f s", sel.endTime - sel.time);
+                ImGui::Text("Waypoints: %d", (int)sel.arcWaypoints.size());
+                ImGui::Separator();
+
+                ImGui::Text("Appearance");
+                bool isCyan = (sel.arcColor == 0);
+                if (ImGui::RadioButton("Cyan (0)##arc", isCyan))  sel.arcColor = 0;
+                ImGui::SameLine();
+                if (ImGui::RadioButton("Pink (1)##arc", !isCyan)) sel.arcColor = 1;
+                ImGui::Checkbox("Void (no input)##arc", &sel.arcIsVoid);
+                ImGui::Spacing();
+                ImGui::Separator();
+
+                // Easing names/values shared by all waypoint combos
+                const char* easeNames[] = {
+                    "s (linear)", "b (bezier)", "si (sine-in)", "so (sine-out)",
+                    "sisi", "siso", "sosi", "soso"
+                };
+                const float easeVals[] = { 0.f, 1.f, 2.f, -2.f, 3.f, -3.f, 4.f, -4.f };
+                constexpr int easeCount = 8;
+                auto findEaseIdx = [&](float v) -> int {
+                    for (int i = 0; i < easeCount; ++i)
+                        if (easeVals[i] == v) return i;
+                    return 0;
+                };
+
+                if (sel.arcWaypoints.size() >= 2) {
+                    // ── Waypoint table ──────────────────────────────────────
+                    ImGui::Text("Waypoints (drag heights in Height panel)");
+                    int removeWp = -1;
+                    for (int wi = 0; wi < (int)sel.arcWaypoints.size(); ++wi) {
+                        auto& wp = sel.arcWaypoints[wi];
+                        ImGui::PushID(wi);
+                        ImGui::Text("#%d  t=%.3fs  X=%.2f  Y=%.2f", wi, wp.time, wp.x, wp.y);
+
+                        // Per-segment easing (segment from previous to this waypoint)
+                        if (wi > 0) {
+                            ImGui::SameLine();
+                            ImGui::SetNextItemWidth(100);
+                            int exIdx = findEaseIdx(wp.easeX);
+                            if (ImGui::Combo("eX##wp", &exIdx, easeNames, easeCount))
+                                wp.easeX = easeVals[exIdx];
+                            ImGui::SameLine();
+                            ImGui::SetNextItemWidth(100);
+                            int eyIdx = findEaseIdx(wp.easeY);
+                            if (ImGui::Combo("eY##wp", &eyIdx, easeNames, easeCount))
+                                wp.easeY = easeVals[eyIdx];
+                        }
+
+                        // Delete waypoint (only if >2 remain)
+                        if (sel.arcWaypoints.size() > 2 && wi > 0
+                            && wi < (int)sel.arcWaypoints.size() - 1) {
+                            ImGui::SameLine();
+                            if (ImGui::SmallButton("x##wp")) removeWp = wi;
+                        }
+                        ImGui::PopID();
+                    }
+                    if (removeWp >= 0) {
+                        sel.arcWaypoints.erase(sel.arcWaypoints.begin() + removeWp);
+                        // Sync times
+                        sel.time    = sel.arcWaypoints.front().time;
+                        sel.endTime = sel.arcWaypoints.back().time;
+                        sel.arcStartX = sel.arcWaypoints.front().x;
+                        sel.arcStartY = sel.arcWaypoints.front().y;
+                        sel.arcEndX   = sel.arcWaypoints.back().x;
+                        sel.arcEndY   = sel.arcWaypoints.back().y;
+                    }
+
+                    // Button to convert to legacy (flatten to 2 endpoints)
+                    if (ImGui::Button("Flatten to 2 endpoints##arc")) {
+                        ArcWaypoint first = sel.arcWaypoints.front();
+                        ArcWaypoint last  = sel.arcWaypoints.back();
+                        sel.arcWaypoints.clear();
+                        sel.arcStartX = first.x; sel.arcStartY = first.y;
+                        sel.arcEndX   = last.x;  sel.arcEndY   = last.y;
+                        sel.arcEaseX  = 0.f;     sel.arcEaseY  = 0.f;
+                    }
+                } else {
+                    // ── Legacy 2-endpoint editing ───────────────────────────
+                    ImGui::Text("Position (0..1)");
+                    ImGui::SetNextItemWidth(-1);
+                    ImGui::SliderFloat("Start X##arc", &sel.arcStartX, 0.f, 1.f, "%.3f");
+                    ImGui::SetNextItemWidth(-1);
+                    ImGui::SliderFloat("End X##arc",   &sel.arcEndX,   0.f, 1.f, "%.3f");
+                    ImGui::SetNextItemWidth(-1);
+                    ImGui::SliderFloat("Start Y##arc", &sel.arcStartY, 0.f, 1.f, "%.3f");
+                    ImGui::SetNextItemWidth(-1);
+                    ImGui::SliderFloat("End Y##arc",   &sel.arcEndY,   0.f, 1.f, "%.3f");
+                    ImGui::Spacing();
+
+                    ImGui::Text("Easing");
+                    int xIdx = findEaseIdx(sel.arcEaseX);
+                    ImGui::SetNextItemWidth(-1);
+                    if (ImGui::Combo("X Easing##arc", &xIdx, easeNames, easeCount))
+                        sel.arcEaseX = easeVals[xIdx];
+                    int yIdx = findEaseIdx(sel.arcEaseY);
+                    ImGui::SetNextItemWidth(-1);
+                    if (ImGui::Combo("Y Easing##arc", &yIdx, easeNames, easeCount))
+                        sel.arcEaseY = easeVals[yIdx];
+
+                    // Button to convert legacy to multi-waypoint
+                    if (ImGui::Button("Convert to waypoints##arc")) {
+                        ensureArcWaypoints(sel);
+                    }
+                }
+                ImGui::Spacing();
+                ImGui::Separator();
+
+                // List child ArcTaps
+                ImGui::Text("ArcTaps on this arc:");
+                bool hasChildren = false;
+                for (size_t i = 0; i < notes().size(); ++i) {
+                    if (notes()[i].type == EditorNoteType::ArcTap
+                        && notes()[i].arcTapParent == m_selectedNoteIdx) {
+                        hasChildren = true;
+                        ImGui::PushID((int)i);
+                        ImGui::BulletText("t = %.3f s", notes()[i].time);
+                        ImGui::SameLine();
+                        if (ImGui::SmallButton("Select"))
+                            m_selectedNoteIdx = (int)i;
+                        ImGui::PopID();
+                    }
+                }
+                if (!hasChildren)
+                    ImGui::TextDisabled("(none)");
+                ImGui::Spacing();
+                ImGui::Separator();
+            }
+
+            // ── ArcTap properties ──────────────────────────────────────────
+            if (sel.type == EditorNoteType::ArcTap) {
+                if (sel.arcTapParent >= 0 && sel.arcTapParent < (int)notes().size()) {
+                    const auto& parent = notes()[sel.arcTapParent];
+                    if (parent.type == EditorNoteType::Arc) {
+                        float dur = parent.endTime - parent.time;
+                        float tP = std::clamp((sel.time - parent.time) / std::max(0.001f, dur), 0.f, 1.f);
+                        glm::vec2 pos = evalArcEditor(parent, tP);
+                        ImGui::Text("Parent Arc: #%d", sel.arcTapParent);
+                        ImGui::Text("Position: (%.3f, %.3f)", pos.x, pos.y);
+                        ImGui::Spacing();
+                        if (ImGui::SmallButton("Select Parent Arc"))
+                            m_selectedNoteIdx = sel.arcTapParent;
+                    } else {
+                        ImGui::TextColored(ImVec4(1, 0.3f, 0.3f, 1),
+                                           "Parent #%d is not an Arc!", sel.arcTapParent);
+                    }
+                } else {
+                    ImGui::TextColored(ImVec4(1, 0.3f, 0.3f, 1),
+                                       "Orphan ArcTap (parent missing)");
+                }
+                ImGui::Spacing();
+                ImGui::Separator();
+            }
+
             if (ImGui::Button("Delete Note", ImVec2(-1, 26))) {
-                notes().erase(notes().begin() + m_selectedNoteIdx);
+                int idx = m_selectedNoteIdx;
+                notes().erase(notes().begin() + idx);
+                fixupArcTapParents(idx);
                 m_selectedNoteIdx = -1;
             }
         }
@@ -879,8 +1249,15 @@ void SongEditor::renderGameModeConfig() {
             ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.3f, 0.5f, 0.9f, 1.0f));
             ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(0.15f, 0.35f, 0.75f, 1.0f));
         }
-        if (ImGui::Button(opt.label, ImVec2(-1, 42)))
-            gm.type = opt.type;
+        if (ImGui::Button(opt.label, ImVec2(-1, 42))) {
+            if (gm.type != opt.type) {
+                // Persist the current mode's charts before swapping so each
+                // (mode, difficulty) pair stays independent on disk.
+                exportAllCharts();
+                gm.type = opt.type;
+                reloadChartsForCurrentMode();
+            }
+        }
         if (selected)
             ImGui::PopStyleColor(3);
 
@@ -908,8 +1285,13 @@ void SongEditor::renderGameModeConfig() {
             ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.3f, 0.5f, 0.9f, 1.0f));
             ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(0.15f, 0.35f, 0.75f, 1.0f));
         }
-        if (ImGui::Button("2D - Ground Only", ImVec2(w, 36)))
-            gm.dimension = DropDimension::TwoD;
+        if (ImGui::Button("2D - Ground Only", ImVec2(w, 36))) {
+            if (gm.dimension != DropDimension::TwoD) {
+                exportAllCharts();
+                gm.dimension = DropDimension::TwoD;
+                reloadChartsForCurrentMode();
+            }
+        }
         if (is2D) ImGui::PopStyleColor(3);
 
         ImGui::SameLine();
@@ -919,10 +1301,50 @@ void SongEditor::renderGameModeConfig() {
             ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.3f, 0.5f, 0.9f, 1.0f));
             ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(0.15f, 0.35f, 0.75f, 1.0f));
         }
-        if (ImGui::Button("3D - Ground + Sky", ImVec2(w, 36)))
-            gm.dimension = DropDimension::ThreeD;
+        if (ImGui::Button("3D - Ground + Sky", ImVec2(w, 36))) {
+            if (gm.dimension != DropDimension::ThreeD) {
+                exportAllCharts();
+                gm.dimension = DropDimension::ThreeD;
+                reloadChartsForCurrentMode();
+            }
+        }
         if (is3D) ImGui::PopStyleColor(3);
 
+        // Sky height slider (3D mode only)
+        if (is3D) {
+            ImGui::Spacing();
+            ImGui::Text("Sky Height");
+            ImGui::SetNextItemWidth(-1);
+            ImGui::SliderFloat("##skyHeight", &gm.skyHeight, -1.f, 3.f, "%.2f");
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("World Y of the sky judgment line.\n"
+                                  "Arc height [0..1] maps from ground to this value.");
+        }
+
+        ImGui::Spacing();
+    }
+
+    // ── Circle Mode Disk Defaults ────────────────────────────────────────────
+    if (gm.type == GameModeType::Circle) {
+        ImGui::Spacing();
+        ImGui::Text("Disk Layout");
+        ImGui::Separator();
+
+        ImGui::SetNextItemWidth(-1);
+        if (ImGui::SliderFloat("##diskInner",   &gm.diskInnerRadius,  0.2f, 3.0f, "Inner radius (spawn): %.2f")) m_laneMaskDirty = true;
+        ImGui::SetNextItemWidth(-1);
+        if (ImGui::SliderFloat("##diskBase",    &gm.diskBaseRadius,   1.0f, 6.0f, "Hit ring radius: %.2f"))       m_laneMaskDirty = true;
+        ImGui::SetNextItemWidth(-1);
+        if (ImGui::SliderFloat("##diskSpacing", &gm.diskRingSpacing,  0.1f, 1.5f, "Extra ring spacing: %.2f"))    m_laneMaskDirty = true;
+        ImGui::SetNextItemWidth(-1);
+        if (ImGui::SliderFloat("##diskScale",   &gm.diskInitialScale, 0.3f, 5.0f, "Initial scale: %.2f"))         m_laneMaskDirty = true;
+        if (ImGui::SmallButton("Reset disk defaults")) {
+            gm.diskInnerRadius  = 0.9f;
+            gm.diskBaseRadius   = 2.4f;
+            gm.diskRingSpacing  = 0.6f;
+            gm.diskInitialScale = 1.0f;
+            m_laneMaskDirty = true;
+        }
         ImGui::Spacing();
     }
 
@@ -937,6 +1359,7 @@ void SongEditor::renderGameModeConfig() {
     int prevTrackCount = gm.trackCount;
     if (ImGui::SliderInt("##tracks", &gm.trackCount, 3, trackMax, "%d tracks")
         && gm.trackCount != prevTrackCount && gm.trackCount > 0) {
+        m_laneMaskDirty = true;
         // Re-fit every authored note to the new lane count using modulo, so
         // notes that fell off the right edge wrap back into the highway.
         // Affects all difficulties — the editor only stores authored data
@@ -1174,7 +1597,7 @@ void SongEditor::renderGameModeConfig() {
                     case DiskKfTrack::Scale: {
                         auto& ev = diskScale()[sel];
                         editCommon(ev.startTime, ev.duration, ev.easing);
-                        if (ImGui::SliderFloat("Target scale", &ev.targetScale, 0.1f, 3.0f, "%.2f×"))
+                        if (ImGui::SliderFloat("Target scale", &ev.targetScale, 0.1f, 5.0f, "%.2f×"))
                             m_laneMaskDirty = true;
                         if (ImGui::Button("Delete##kf", ImVec2(-1, 22))) remove = true;
                         if (remove) {
@@ -1343,38 +1766,40 @@ void SongEditor::renderGameModeConfig() {
         ImGui::Text("Full Combo (FC)");
         ImGui::TextDisabled("No misses — every note hit");
 
-        // FC image picker
+        // FC image picker — asset drag-drop only
         {
-            char fcBuf[256];
-            strncpy(fcBuf, gm.fcImage.c_str(), 255); fcBuf[255] = '\0';
-            ImGui::SetNextItemWidth(-70);
-            if (ImGui::InputText("##fcImg", fcBuf, 256))
-                gm.fcImage = fcBuf;
-
-            // Drag-drop target
+            const ImVec2 slotSz(96, 96);
+            ImVec2 slotPos = ImGui::GetCursorScreenPos();
+            ImGui::InvisibleButton("##fcSlot", slotSz);
+            ImDrawList* dl = ImGui::GetWindowDrawList();
+            ImVec2 slotMax(slotPos.x + slotSz.x, slotPos.y + slotSz.y);
+            VkDescriptorSet fcThumb = gm.fcImage.empty() ? VK_NULL_HANDLE : getThumb(gm.fcImage);
+            if (fcThumb) {
+                dl->AddImage((ImTextureID)(uint64_t)fcThumb, slotPos, slotMax);
+            } else {
+                dl->AddRectFilled(slotPos, slotMax, IM_COL32(35, 35, 50, 255), 4.f);
+                const char* hint = "Drag asset here";
+                ImVec2 ts = ImGui::CalcTextSize(hint);
+                dl->AddText(ImVec2(slotPos.x + (slotSz.x - ts.x) * 0.5f,
+                                    slotPos.y + (slotSz.y - ts.y) * 0.5f),
+                            IM_COL32(140, 140, 160, 200), hint);
+            }
+            dl->AddRect(slotPos, slotMax, IM_COL32(120, 120, 160, 180), 4.f, 0, 1.5f);
             if (ImGui::BeginDragDropTarget()) {
                 if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("ASSET_PATH")) {
                     gm.fcImage = std::string(static_cast<const char*>(payload->Data), payload->DataSize - 1);
                 }
                 ImGui::EndDragDropTarget();
             }
-
             ImGui::SameLine();
-            if (ImGui::Button("Browse##fc")) {
-                std::string path = browseFile(
-                    L"Images\0*.png;*.jpg;*.jpeg\0All Files\0*.*\0", "images");
-                if (!path.empty()) gm.fcImage = path;
-            }
-
-            // Show thumbnail if set
+            ImGui::BeginGroup();
             if (!gm.fcImage.empty()) {
-                VkDescriptorSet fcThumb = getThumb(gm.fcImage);
-                if (fcThumb) {
-                    ImGui::Image((ImTextureID)(uint64_t)fcThumb, ImVec2(48, 48));
-                } else {
-                    ImGui::TextDisabled("[%s]", gm.fcImage.c_str());
-                }
+                ImGui::TextDisabled("%s", gm.fcImage.c_str());
+                if (ImGui::Button("Clear##fcClear")) gm.fcImage.clear();
+            } else {
+                ImGui::TextDisabled("(no image)");
             }
+            ImGui::EndGroup();
         }
 
         ImGui::Spacing();
@@ -1383,38 +1808,40 @@ void SongEditor::renderGameModeConfig() {
         ImGui::Text("All Perfect (AP)");
         ImGui::TextDisabled("Every note judged Perfect");
 
-        // AP image picker
+        // AP image picker — asset drag-drop only
         {
-            char apBuf[256];
-            strncpy(apBuf, gm.apImage.c_str(), 255); apBuf[255] = '\0';
-            ImGui::SetNextItemWidth(-70);
-            if (ImGui::InputText("##apImg", apBuf, 256))
-                gm.apImage = apBuf;
-
-            // Drag-drop target
+            const ImVec2 slotSz(96, 96);
+            ImVec2 slotPos = ImGui::GetCursorScreenPos();
+            ImGui::InvisibleButton("##apSlot", slotSz);
+            ImDrawList* dl = ImGui::GetWindowDrawList();
+            ImVec2 slotMax(slotPos.x + slotSz.x, slotPos.y + slotSz.y);
+            VkDescriptorSet apThumb = gm.apImage.empty() ? VK_NULL_HANDLE : getThumb(gm.apImage);
+            if (apThumb) {
+                dl->AddImage((ImTextureID)(uint64_t)apThumb, slotPos, slotMax);
+            } else {
+                dl->AddRectFilled(slotPos, slotMax, IM_COL32(35, 35, 50, 255), 4.f);
+                const char* hint = "Drag asset here";
+                ImVec2 ts = ImGui::CalcTextSize(hint);
+                dl->AddText(ImVec2(slotPos.x + (slotSz.x - ts.x) * 0.5f,
+                                    slotPos.y + (slotSz.y - ts.y) * 0.5f),
+                            IM_COL32(140, 140, 160, 200), hint);
+            }
+            dl->AddRect(slotPos, slotMax, IM_COL32(120, 120, 160, 180), 4.f, 0, 1.5f);
             if (ImGui::BeginDragDropTarget()) {
                 if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("ASSET_PATH")) {
                     gm.apImage = std::string(static_cast<const char*>(payload->Data), payload->DataSize - 1);
                 }
                 ImGui::EndDragDropTarget();
             }
-
             ImGui::SameLine();
-            if (ImGui::Button("Browse##ap")) {
-                std::string path = browseFile(
-                    L"Images\0*.png;*.jpg;*.jpeg\0All Files\0*.*\0", "images");
-                if (!path.empty()) gm.apImage = path;
-            }
-
-            // Show thumbnail if set
+            ImGui::BeginGroup();
             if (!gm.apImage.empty()) {
-                VkDescriptorSet apThumb = getThumb(gm.apImage);
-                if (apThumb) {
-                    ImGui::Image((ImTextureID)(uint64_t)apThumb, ImVec2(48, 48));
-                } else {
-                    ImGui::TextDisabled("[%s]", gm.apImage.c_str());
-                }
+                ImGui::TextDisabled("%s", gm.apImage.c_str());
+                if (ImGui::Button("Clear##apClear")) gm.apImage.clear();
+            } else {
+                ImGui::TextDisabled("(no image)");
             }
+            ImGui::EndGroup();
         }
 
         ImGui::Spacing();
@@ -1802,10 +2229,19 @@ void SongEditor::renderChartTimeline(ImDrawList* dl, ImVec2 origin, ImVec2 size,
         renderNotes(dl, origin, size, startTime, tc, skyTrackH, skyTop, true);
         renderNotes(dl, origin, size, startTime, tc, gndTrackH, gndTop, false);
 
+        // Render arc ribbons + arctap diamonds in sky region (Arcaea layout)
+        renderArcNotes(dl, origin, size, startTime, tc, skyTrackH, skyTop);
+
         // Handle note placement in sky or ground based on mouse Y
         if (mouseInTimeline && m_noteTool != NoteTool::None) {
             ImVec2 mpos2 = ImGui::GetIO().MousePos;
-            if (mpos2.y < gndTop) {
+            if (m_noteTool == NoteTool::Arc) {
+                // Arc: authored in the sky region (purple area)
+                handleArcPlacement(origin, size, startTime, tc, skyTrackH, skyTop);
+            } else if (m_noteTool == NoteTool::ArcTap) {
+                // ArcTap: snap to arc in sky region
+                handleArcTapPlacement(origin, size, startTime, tc, skyTrackH, skyTop);
+            } else if (mpos2.y < gndTop) {
                 // Sky region — only Click and Press allowed
                 if (m_noteTool != NoteTool::Slide)
                     handleNotePlacement(origin, size, startTime, tc, true, skyTrackH, skyTop, engine);
@@ -1959,10 +2395,15 @@ void SongEditor::renderChartTimeline(ImDrawList* dl, ImVec2 origin, ImVec2 size,
                 }
                 if (bestIdx >= 0) {
                     notes().erase(notes().begin() + bestIdx);
+                    fixupArcTapParents(bestIdx);
                     m_holdDragging  = false;
                     m_holdLastTrack = -1;
                     m_holdDraft     = EditorNote{};
                     deletedNote = true;
+                    if (m_selectedNoteIdx == bestIdx)
+                        m_selectedNoteIdx = -1;
+                    else if (m_selectedNoteIdx > bestIdx)
+                        m_selectedNoteIdx--;
                 }
             }
 
@@ -2224,19 +2665,23 @@ void SongEditor::renderSceneView(ImDrawList* dl, ImVec2 origin, ImVec2 size,
     // ── Helper: note-type color ─────────────────────────────────────────────
     auto noteColor = [](EditorNoteType t) -> ImU32 {
         switch (t) {
-            case EditorNoteType::Tap: return IM_COL32(100, 180, 255, 230);
-            case EditorNoteType::Hold: return IM_COL32(80, 220, 100, 230);
-            case EditorNoteType::Slide: return IM_COL32(220, 130, 255, 230);
-            case EditorNoteType::Flick: return IM_COL32(255, 180, 80, 230);
+            case EditorNoteType::Tap:    return IM_COL32(100, 180, 255, 230);
+            case EditorNoteType::Hold:   return IM_COL32(80, 220, 100, 230);
+            case EditorNoteType::Slide:  return IM_COL32(220, 130, 255, 230);
+            case EditorNoteType::Flick:  return IM_COL32(255, 180, 80, 230);
+            case EditorNoteType::Arc:    return IM_COL32(80, 200, 255, 230);
+            case EditorNoteType::ArcTap: return IM_COL32(255, 180, 60, 230);
         }
         return IM_COL32(100, 180, 255, 230);
     };
     auto noteColorDim = [](EditorNoteType t) -> ImU32 {
         switch (t) {
-            case EditorNoteType::Tap: return IM_COL32(60, 110, 160, 160);
-            case EditorNoteType::Hold: return IM_COL32(50, 140, 60, 160);
-            case EditorNoteType::Slide: return IM_COL32(140, 80, 160, 160);
-            case EditorNoteType::Flick: return IM_COL32(180, 120, 50, 160);
+            case EditorNoteType::Tap:    return IM_COL32(60, 110, 160, 160);
+            case EditorNoteType::Hold:   return IM_COL32(50, 140, 60, 160);
+            case EditorNoteType::Slide:  return IM_COL32(140, 80, 160, 160);
+            case EditorNoteType::Flick:  return IM_COL32(180, 120, 50, 160);
+            case EditorNoteType::Arc:    return IM_COL32(50, 130, 170, 160);
+            case EditorNoteType::ArcTap: return IM_COL32(180, 120, 40, 160);
         }
         return IM_COL32(60, 110, 160, 160);
     };
@@ -2326,6 +2771,10 @@ void SongEditor::renderSceneView(ImDrawList* dl, ImVec2 origin, ImVec2 size,
         // Draw actual notes on the highway
         float proj11 = std::abs(proj[1][1]);
         for (const auto& note : curNotes) {
+            // Arcs and ArcTaps are drawn by the dedicated sky block below —
+            // skip the lane-rect path so we don't duplicate them as drops.
+            if (note.type == EditorNoteType::Arc ||
+                note.type == EditorNoteType::ArcTap) continue;
             // Visibility window: a note is kept alive while any part of it
             // (head → tail for holds) is within the approach/hit range.
             // This way a hold whose head just passed stays fully on screen
@@ -2420,6 +2869,76 @@ void SongEditor::renderSceneView(ImDrawList* dl, ImVec2 origin, ImVec2 size,
                               noteColor(note.type), 2.f);
         }
 
+        // ── Arcs + ArcTaps (Arcaea-style, sky-space ribbons) ───────────────
+        if (is3D) {
+            float laneHalfW = (tc * 0.5f) * laneSpacing;
+            auto arcToWorld = [&](float ax, float ay, float dt) -> glm::vec3 {
+                float wx = (ax * 2.f - 1.f) * laneHalfW;
+                float wy = ay * SKY_Y;
+                float wz = -dt * SCROLL_SPEED;
+                return {wx, wy, wz};
+            };
+            for (const auto& note : curNotes) {
+                if (note.type != EditorNoteType::Arc) continue;
+                if (note.arcIsVoid) continue;
+                float dur = note.endTime - note.time;
+                if (dur < 0.0001f) continue;
+                float headDt = note.time - curTime;
+                float tailDt = note.endTime - curTime;
+                if (tailDt < -0.3f || headDt > lookAhead) continue;
+
+                constexpr int ARC_SAMPLES = 20;
+                ImVec2 prevPx{};
+                bool havePrev = false;
+                ImU32 acol = (note.arcColor == 0)
+                    ? IM_COL32(80, 200, 255, note.arcIsVoid ? 120 : 230)
+                    : IM_COL32(255, 100, 180, note.arcIsVoid ? 120 : 230);
+                for (int si = 0; si <= ARC_SAMPLES; ++si) {
+                    float u = (float)si / (float)ARC_SAMPLES;
+                    glm::vec2 p = evalArcEditor(note, u);
+                    float sampleDt = (note.time + u * dur) - curTime;
+                    if (sampleDt < -0.3f || sampleDt > lookAhead) {
+                        havePrev = false; continue;
+                    }
+                    glm::vec3 wp = arcToWorld(p.x, p.y, sampleDt);
+                    glm::vec4 clip = vp * glm::vec4(wp, 1.f);
+                    if (clip.w <= 0.f) { havePrev = false; continue; }
+                    ImVec2 px = w2s(wp);
+                    if (havePrev)
+                        dl->AddLine(prevPx, px, acol, 3.f);
+                    prevPx = px;
+                    havePrev = true;
+                }
+            }
+
+            for (const auto& note : curNotes) {
+                if (note.type != EditorNoteType::ArcTap) continue;
+                if (note.arcTapParent < 0 ||
+                    note.arcTapParent >= (int)curNotes.size()) continue;
+                const auto& parent = curNotes[note.arcTapParent];
+                if (parent.type != EditorNoteType::Arc) continue;
+                float pdur = parent.endTime - parent.time;
+                if (pdur < 0.0001f) continue;
+                float dt = note.time - curTime;
+                if (dt < -0.2f || dt > lookAhead) continue;
+                float u = std::clamp((note.time - parent.time) / pdur, 0.f, 1.f);
+                glm::vec2 p = evalArcEditor(parent, u);
+                glm::vec3 wp{(p.x * 2.f - 1.f) * laneHalfW, p.y * SKY_Y, -dt * SCROLL_SPEED};
+                glm::vec4 clip = vp * glm::vec4(wp, 1.f);
+                if (clip.w <= 0.f) continue;
+                ImVec2 c = w2s(wp);
+                float r = laneSpacing * proj11 * size.y * 0.5f / clip.w * 0.35f;
+                if (r < 3.f) r = 3.f;
+                ImVec2 pts[4] = {
+                    ImVec2(c.x, c.y - r), ImVec2(c.x + r, c.y),
+                    ImVec2(c.x, c.y + r), ImVec2(c.x - r, c.y)
+                };
+                dl->AddConvexPolyFilled(pts, 4, IM_COL32(255, 180, 60, 240));
+                dl->AddPolyline(pts, 4, IM_COL32(255, 240, 200, 220),
+                                ImDrawFlags_Closed, 1.5f);
+            }
+        }
+
         const char* label = is3D ? "3D Drop Notes" : "2D Drop Notes";
         dl->AddText(ImVec2(origin.x + 8, origin.y + 6),
                     IM_COL32(200, 200, 200, 180), label);
@@ -2441,6 +2960,8 @@ void SongEditor::renderSceneView(ImDrawList* dl, ImVec2 origin, ImVec2 size,
         // Preview uses a "world unit = (baseOuterR / kBaseRadius) pixels"
         // mapping so move-keyframe world XY drives the preview center
         // proportionally.  Y is flipped because ImGui y grows downward.
+        const float kBaseRadius = m_song && m_song->gameMode.diskBaseRadius > 0.f
+                                   ? m_song->gameMode.diskBaseRadius : 2.4f;
         const float worldToPx = baseOuterR / kBaseRadius;
         float centerX = baseCX + diskC.x * worldToPx;
         float centerY = baseCY - diskC.y * worldToPx;
@@ -3960,6 +4481,54 @@ ChartData SongEditor::buildChartFromNotes() const {
                 ev.data = std::move(fd);
                 break;
             }
+            case EditorNoteType::Arc: {
+                if (en.arcWaypoints.size() >= 2) {
+                    // Decompose multi-waypoint arc into N-1 segments
+                    const auto& wps = en.arcWaypoints;
+                    for (size_t s = 0; s + 1 < wps.size(); ++s) {
+                        NoteEvent segEv;
+                        segEv.time = wps[s].time;
+                        segEv.type = NoteType::Arc;
+                        ArcData ad{};
+                        ad.startPos   = glm::vec2(wps[s].x, wps[s].y);
+                        ad.endPos     = glm::vec2(wps[s+1].x, wps[s+1].y);
+                        ad.duration   = wps[s+1].time - wps[s].time;
+                        ad.curveXEase = wps[s+1].easeX;
+                        ad.curveYEase = wps[s+1].easeY;
+                        ad.color      = en.arcColor;
+                        ad.isVoid     = en.arcIsVoid;
+                        segEv.data = std::move(ad);
+                        chart.notes.push_back(segEv);
+                    }
+                    continue;  // skip the default push_back below
+                }
+                // Legacy 2-endpoint arc
+                ev.type = NoteType::Arc;
+                ArcData ad{};
+                ad.startPos   = glm::vec2(en.arcStartX, en.arcStartY);
+                ad.endPos     = glm::vec2(en.arcEndX, en.arcEndY);
+                ad.duration   = en.endTime - en.time;
+                ad.curveXEase = en.arcEaseX;
+                ad.curveYEase = en.arcEaseY;
+                ad.color      = en.arcColor;
+                ad.isVoid     = en.arcIsVoid;
+                ev.data = std::move(ad);
+                break;
+            }
+            case EditorNoteType::ArcTap: {
+                ev.type = NoteType::ArcTap;
+                TapData td{};
+                if (en.arcTapParent >= 0 && en.arcTapParent < (int)edNotes.size()) {
+                    const auto& parent = edNotes[en.arcTapParent];
+                    float dur = parent.endTime - parent.time;
+                    float tP = std::clamp((en.time - parent.time) / std::max(0.001f, dur), 0.f, 1.f);
+                    glm::vec2 pos = evalArcEditor(parent, tP);
+                    td.laneX = pos.x;
+                    td.scanY = pos.y;
+                }
+                ev.data = std::move(td);
+                break;
+            }
         }
         chart.notes.push_back(ev);
     }
@@ -3997,8 +4566,9 @@ void SongEditor::exportAllCharts() {
         ChartData chart = buildChartFromNotes();
         m_currentDifficulty = saved;
 
-        // Write unified chart JSON
-        std::string relPath = std::string("assets/charts/") + m_song->name + "_" + diffSuffix[d] + ".json";
+        // Write unified chart JSON. Filename is keyed on both the game mode
+        // and difficulty so each (mode, difficulty) pair owns its own file.
+        std::string relPath  = chartRelPathFor(m_song->name, m_song->gameMode, diffSuffix[d]);
         std::string fullPath = m_projectPath + "/" + relPath;
 
         // Ensure directory exists
@@ -4036,11 +4606,13 @@ void SongEditor::exportAllCharts() {
             auto& n = chart.notes[i];
             f << "    {\"time\": " << n.time << ", \"type\": ";
             switch (n.type) {
-                case NoteType::Tap:   f << "\"tap\"";   break;
-                case NoteType::Hold:  f << "\"hold\"";  break;
-                case NoteType::Slide: f << "\"slide\""; break;
-                case NoteType::Flick: f << "\"flick\""; break;
-                default:              f << "\"tap\"";    break;
+                case NoteType::Tap:    f << "\"tap\"";    break;
+                case NoteType::Hold:   f << "\"hold\"";   break;
+                case NoteType::Slide:  f << "\"slide\"";  break;
+                case NoteType::Flick:  f << "\"flick\"";  break;
+                case NoteType::Arc:    f << "\"arc\"";    break;
+                case NoteType::ArcTap: f << "\"arctap\""; break;
+                default:               f << "\"tap\"";    break;
             }
             f << ", \"lane\": ";
             int span = 1;
@@ -4152,6 +4724,28 @@ void SongEditor::exportAllCharts() {
                         f << "]";
                     }
                     f << "}";
+                }
+            }
+
+            // ── Arc-specific fields ──────────────────────────────────────
+            if (n.type == NoteType::Arc) {
+                if (auto* arc = std::get_if<ArcData>(&n.data)) {
+                    f << ", \"startX\": " << arc->startPos.x
+                      << ", \"startY\": " << arc->startPos.y
+                      << ", \"endX\": "   << arc->endPos.x
+                      << ", \"endY\": "   << arc->endPos.y
+                      << ", \"duration\": " << arc->duration
+                      << ", \"easeX\": "  << arc->curveXEase
+                      << ", \"easeY\": "  << arc->curveYEase
+                      << ", \"color\": "  << arc->color
+                      << ", \"void\": "   << (arc->isVoid ? "true" : "false");
+                }
+            }
+            // ── ArcTap position ──────────────────────────────────────────
+            if (n.type == NoteType::ArcTap) {
+                if (auto* tap = std::get_if<TapData>(&n.data)) {
+                    f << ", \"arcX\": " << tap->laneX
+                      << ", \"arcY\": " << tap->scanY;
                 }
             }
 
@@ -4357,6 +4951,8 @@ void SongEditor::renderNoteToolbar() {
                 m_holdDragging  = false;
                 m_holdLastTrack = -1;
                 m_holdDraft     = EditorNote{};
+                m_arcPlacing    = false;
+                m_arcDraft      = EditorNote{};
             }
         }
         if (active) ImGui::PopStyleColor(3);
@@ -4373,11 +4969,36 @@ void SongEditor::renderNoteToolbar() {
         toolBtn("Slide", NoteTool::Slide, ImVec4(0.7f, 0.3f, 0.7f, 1.f));
     }
 
+    // Arc tools: only in 3D DropNotes mode
+    if (is3D) {
+        toolBtn("Arc",    NoteTool::Arc,    ImVec4(0.3f, 0.7f, 0.9f, 1.f));
+        // Arc color picker (inline, no style push/pop)
+        if (m_noteTool == NoteTool::Arc) {
+            ImGui::SameLine();
+            const char* colorLabel = (m_arcDraftColor == 0) ? "[Cyan]" : "[Pink]";
+            ImGui::TextColored(
+                m_arcDraftColor == 0 ? ImVec4(0.3f, 0.8f, 1.f, 1.f) : ImVec4(1.f, 0.4f, 0.7f, 1.f),
+                "%s", colorLabel);
+            ImGui::SameLine();
+            if (ImGui::SmallButton("C##cyan")) m_arcDraftColor = 0;
+            ImGui::SameLine();
+            if (ImGui::SmallButton("P##pink")) m_arcDraftColor = 1;
+        }
+        toolBtn("ArcTap", NoteTool::ArcTap, ImVec4(0.8f, 0.5f, 0.2f, 1.f));
+    }
+
     // Show drag-recording indicator
     if (m_holdDragging && m_noteTool == NoteTool::Hold) {
         ImGui::SameLine();
         ImGui::TextColored(ImVec4(0.4f, 1.f, 0.4f, 1.f),
                            "Recording... (drag, release to commit)");
+    }
+
+    // Show arc placement hint
+    if (m_arcPlacing && m_noteTool == NoteTool::Arc) {
+        ImGui::SameLine();
+        ImGui::TextColored(ImVec4(0.3f, 0.8f, 1.f, 1.f),
+                           "Click to add waypoints, R-click/Enter to finish, Esc to cancel");
     }
 
     // Show hint for 3D sky restriction
@@ -4691,6 +5312,560 @@ void SongEditor::handleNotePlacement(ImVec2 origin, ImVec2 size, float startTime
     }
 }
 
+// ── Arc helper functions ────────────────────────────────────────────────────
+
+float SongEditor::trackToArcX(int track, int trackCount) {
+    if (trackCount <= 1) return 0.5f;
+    return static_cast<float>(track) / static_cast<float>(trackCount - 1);
+}
+
+int SongEditor::arcXToTrack(float arcX, int trackCount) {
+    int t = static_cast<int>(arcX * (trackCount - 1) + 0.5f);
+    return std::clamp(t, 0, trackCount - 1);
+}
+
+glm::vec2 SongEditor::evalArcEditor(const EditorNote& arc, float t) {
+    auto ease = [](float t, float e) -> float {
+        if (e == 0.f) return t;
+        return e > 0.f ? 1.f - powf(1.f - t, e + 1.f) : powf(t, -e + 1.f);
+    };
+
+    // ── Multi-waypoint path ────────────────────────────────────────────────
+    if (arc.arcWaypoints.size() >= 2) {
+        // t is normalized [0..1] over the full arc duration
+        float totalDur = arc.endTime - arc.time;
+        if (totalDur < 0.0001f) return {arc.arcWaypoints[0].x, arc.arcWaypoints[0].y};
+        float absTime = arc.time + t * totalDur;
+
+        // Find the segment containing absTime
+        const auto& wps = arc.arcWaypoints;
+        size_t seg = 0;
+        for (size_t i = 0; i + 1 < wps.size(); ++i) {
+            if (absTime <= wps[i + 1].time || i + 2 == wps.size()) { seg = i; break; }
+        }
+        const auto& a = wps[seg];
+        const auto& b = wps[seg + 1];
+        float segDur = b.time - a.time;
+        float u = (segDur > 0.0001f) ? std::clamp((absTime - a.time) / segDur, 0.f, 1.f) : 1.f;
+        float x = a.x + (b.x - a.x) * ease(u, b.easeX);
+        float y = a.y + (b.y - a.y) * ease(u, b.easeY);
+        return {x, y};
+    }
+
+    // ── Legacy 2-endpoint path ─────────────────────────────────────────────
+    float x = arc.arcStartX + (arc.arcEndX - arc.arcStartX) * ease(t, arc.arcEaseX);
+    float y = arc.arcStartY + (arc.arcEndY - arc.arcStartY) * ease(t, arc.arcEaseY);
+    return {x, y};
+}
+
+void SongEditor::ensureArcWaypoints(EditorNote& arc) {
+    if (!arc.arcWaypoints.empty()) return;
+    // Migrate legacy 2-endpoint arc into 2 waypoints
+    ArcWaypoint a, b;
+    a.time = arc.time;     a.x = arc.arcStartX; a.y = arc.arcStartY;
+    a.easeX = 0.f;         a.easeY = 0.f;
+    b.time = arc.endTime;  b.x = arc.arcEndX;   b.y = arc.arcEndY;
+    b.easeX = arc.arcEaseX; b.easeY = arc.arcEaseY;
+    arc.arcWaypoints = {a, b};
+}
+
+void SongEditor::fixupArcTapParents(int deletedIdx) {
+    for (auto& n : notes()) {
+        if (n.type != EditorNoteType::ArcTap) continue;
+        if (n.arcTapParent == deletedIdx)
+            n.arcTapParent = -1;        // orphaned
+        else if (n.arcTapParent > deletedIdx)
+            n.arcTapParent--;           // shift down
+    }
+}
+
+// ── Arc placement (click-to-place waypoints) ──────────────────────────────
+
+void SongEditor::handleArcPlacement(ImVec2 origin, ImVec2 size, float startTime,
+                                     int trackCount, float trackH, float regionTop) {
+    ImVec2 mpos = ImGui::GetMousePos();
+    float rawTime = startTime + (mpos.x - origin.x) / m_timelineZoom;
+    float snappedTime = snapToMarker(rawTime);
+    int track = trackFromY(mpos.y, regionTop, trackH, trackCount);
+    float arcX = trackToArcX(track, trackCount);
+
+    // Cancel with Escape
+    if (m_arcPlacing && ImGui::IsKeyPressed(ImGuiKey_Escape)) {
+        m_arcPlacing = false;
+        m_arcDraft = EditorNote{};
+        m_statusMsg   = "Arc cancelled";
+        m_statusTimer = 1.5f;
+        return;
+    }
+
+    // Finish with right-click or Enter (need >=2 waypoints)
+    if (m_arcPlacing && m_arcDraft.arcWaypoints.size() >= 2) {
+        bool finish = ImGui::IsMouseClicked(ImGuiMouseButton_Right)
+                   || ImGui::IsKeyPressed(ImGuiKey_Enter);
+        if (finish) {
+            // Commit the arc
+            auto& wps = m_arcDraft.arcWaypoints;
+            m_arcDraft.time    = wps.front().time;
+            m_arcDraft.endTime = wps.back().time;
+            m_arcDraft.track   = arcXToTrack(wps.front().x, trackCount);
+            // Sync legacy fields from first/last waypoint
+            m_arcDraft.arcStartX = wps.front().x;
+            m_arcDraft.arcStartY = wps.front().y;
+            m_arcDraft.arcEndX   = wps.back().x;
+            m_arcDraft.arcEndY   = wps.back().y;
+            notes().push_back(std::move(m_arcDraft));
+            m_arcPlacing = false;
+            m_arcDraft = EditorNote{};
+            m_statusMsg   = "Arc placed";
+            m_statusTimer = 1.5f;
+            return;
+        }
+    }
+
+    // Left-click adds a waypoint
+    if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+        if (!m_arcPlacing) {
+            // First waypoint — start new arc
+            m_arcPlacing = true;
+            m_arcDraft = EditorNote{};
+            m_arcDraft.type     = EditorNoteType::Arc;
+            m_arcDraft.arcColor = m_arcDraftColor;
+            m_arcDraft.arcIsVoid = false;
+
+            ArcWaypoint wp;
+            wp.time = snappedTime;
+            wp.x    = arcX;
+            wp.y    = 0.5f;  // default mid-sky height
+            wp.easeX = 0.f;
+            wp.easeY = 0.f;
+            m_arcDraft.arcWaypoints.push_back(wp);
+        } else {
+            // Subsequent waypoints — must be strictly after previous
+            float prevTime = m_arcDraft.arcWaypoints.back().time;
+            if (snappedTime > prevTime) {
+                ArcWaypoint wp;
+                wp.time = snappedTime;
+                wp.x    = arcX;
+                wp.y    = 0.5f;
+                wp.easeX = 0.f;  // linear by default
+                wp.easeY = 0.f;
+                m_arcDraft.arcWaypoints.push_back(wp);
+            }
+        }
+    }
+
+    // Draw preview of in-progress arc
+    if (m_arcPlacing && !m_arcDraft.arcWaypoints.empty()) {
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        const auto& wps = m_arcDraft.arcWaypoints;
+        float pxPerSec = m_timelineZoom;
+        float regionH  = trackH * trackCount;
+        auto arcXToPixelY = [&](float ax) -> float {
+            return regionTop + ax * regionH;
+        };
+        ImU32 col = (m_arcDraftColor == 0)
+            ? IM_COL32(80, 200, 255, 180) : IM_COL32(255, 100, 180, 180);
+
+        // Draw placed segments
+        for (size_t i = 0; i + 1 < wps.size(); ++i) {
+            float x0 = origin.x + (wps[i].time - startTime) * pxPerSec;
+            float y0 = arcXToPixelY(wps[i].x);
+            float x1 = origin.x + (wps[i+1].time - startTime) * pxPerSec;
+            float y1 = arcXToPixelY(wps[i+1].x);
+            dl->AddLine(ImVec2(x0, y0), ImVec2(x1, y1), col, 2.5f);
+        }
+
+        // Draw waypoint dots
+        for (auto& wp : wps) {
+            float px = origin.x + (wp.time - startTime) * pxPerSec;
+            float py = arcXToPixelY(wp.x);
+            dl->AddCircleFilled(ImVec2(px, py), 5.f, col);
+            dl->AddCircle(ImVec2(px, py), 6.f, IM_COL32(255, 255, 255, 200), 0, 1.5f);
+        }
+
+        // Draw line from last waypoint to mouse cursor
+        float lastPx = origin.x + (wps.back().time - startTime) * pxPerSec;
+        float lastPy = arcXToPixelY(wps.back().x);
+        float curPx  = origin.x + (snappedTime - startTime) * pxPerSec;
+        float curPy  = arcXToPixelY(arcX);
+        dl->AddLine(ImVec2(lastPx, lastPy), ImVec2(curPx, curPy),
+                    (col & 0x00FFFFFF) | 0x80000000, 1.5f);
+
+        // Status hint
+        int wpCount = (int)wps.size();
+        char buf[64];
+        snprintf(buf, sizeof(buf), "Arc: %d waypoint%s (R-click to finish)",
+                 wpCount, wpCount == 1 ? "" : "s");
+        dl->AddText(ImVec2(origin.x + 4, origin.y + 2), IM_COL32(220, 220, 240, 220), buf);
+    }
+}
+
+// ── ArcTap placement (snap to parent arc) ──────────────────────────────────
+
+void SongEditor::handleArcTapPlacement(ImVec2 origin, ImVec2 size, float startTime,
+                                        int trackCount, float trackH, float regionTop) {
+    if (!ImGui::IsMouseClicked(ImGuiMouseButton_Left)) return;
+
+    ImVec2 mpos = ImGui::GetMousePos();
+    float rawTime = startTime + (mpos.x - origin.x) / m_timelineZoom;
+    float snappedTime = snapToMarker(rawTime);
+    int track = trackFromY(mpos.y, regionTop, trackH, trackCount);
+    float clickArcX = trackToArcX(track, trackCount);
+
+    // Find the nearest arc that contains this time
+    int bestArc = -1;
+    float bestDist = 1e9f;
+    for (int i = 0; i < (int)notes().size(); ++i) {
+        const auto& n = notes()[i];
+        if (n.type != EditorNoteType::Arc) continue;
+        if (snappedTime < n.time || snappedTime > n.endTime) continue;
+
+        float tParam = (snappedTime - n.time) / std::max(0.001f, n.endTime - n.time);
+        glm::vec2 pos = evalArcEditor(n, tParam);
+        float dist = std::abs(pos.x - clickArcX);
+        if (dist < bestDist) {
+            bestDist = dist;
+            bestArc  = i;
+        }
+    }
+
+    // Tolerance: within ~2 tracks
+    float tolerance = (trackCount > 1) ? 2.f / (trackCount - 1) : 0.5f;
+    if (bestArc < 0 || bestDist > tolerance) {
+        // No parent arc — auto-spawn a short void arc at the click so that
+        // the ArcTap always has somewhere to live. The author can delete or
+        // convert the hidden arc later via the Arc tool.
+        EditorNote parent;
+        parent.type      = EditorNoteType::Arc;
+        parent.time      = snappedTime;
+        parent.endTime   = snappedTime + 0.5f;
+        parent.track     = arcXToTrack(clickArcX, trackCount);
+        parent.arcStartX = clickArcX;
+        parent.arcEndX   = clickArcX;
+        parent.arcStartY = 0.6f;
+        parent.arcEndY   = 0.6f;
+        parent.arcColor  = 0;
+        parent.arcIsVoid = true;  // hidden in gameplay, visible in editor
+        notes().push_back(parent);
+        bestArc = (int)notes().size() - 1;
+    }
+
+    EditorNote note;
+    note.type         = EditorNoteType::ArcTap;
+    note.time         = snappedTime;
+    note.arcTapParent = bestArc;
+    notes().push_back(note);
+    m_statusMsg   = "ArcTap placed";
+    m_statusTimer = 1.5f;
+}
+
+// ── renderArcHeightEditor ───────────────────────────────────────────────────
+
+void SongEditor::renderArcHeightEditor(ImDrawList* dl, ImVec2 origin, ImVec2 size) {
+    if (!m_song) return;
+
+    float pxPerSec = m_timelineZoom;
+    float startTime = m_timelineScrollX;
+
+    // Background
+    dl->AddRectFilled(origin, ImVec2(origin.x + size.x, origin.y + size.y),
+                      IM_COL32(20, 20, 30, 255));
+
+    // Label
+    dl->AddText(ImVec2(origin.x + 4, origin.y + 2),
+                IM_COL32(180, 180, 200, 200), "Height [0..1]");
+
+    // Horizontal grid lines at 0, 0.25, 0.5, 0.75, 1.0
+    const float pad = 14.f;
+    float plotH = size.y - pad * 2;
+    float plotTop = origin.y + pad;
+
+    auto heightToY = [&](float h) -> float {
+        return plotTop + (1.f - h) * plotH;
+    };
+    auto yToHeight = [&](float y) -> float {
+        return std::clamp(1.f - (y - plotTop) / plotH, 0.f, 1.f);
+    };
+
+    for (float h : {0.f, 0.25f, 0.5f, 0.75f, 1.f}) {
+        float y = heightToY(h);
+        ImU32 col = (h == 0.f || h == 1.f) ? IM_COL32(80, 80, 100, 180)
+                                             : IM_COL32(50, 50, 70, 120);
+        dl->AddLine(ImVec2(origin.x, y), ImVec2(origin.x + size.x, y), col, 1.f);
+
+        char buf[8];
+        snprintf(buf, sizeof(buf), "%.2f", h);
+        dl->AddText(ImVec2(origin.x + size.x - 30, y - 6), IM_COL32(120, 120, 150, 180), buf);
+    }
+
+    // Draw each arc's height curve with per-waypoint handles
+    constexpr int SEG_SAMPLES = 8;  // samples per segment
+    constexpr float HANDLE_R = 6.f;
+
+    for (int ni = 0; ni < (int)notes().size(); ++ni) {
+        auto& note = notes()[ni];
+        if (note.type != EditorNoteType::Arc) continue;
+
+        float dur = note.endTime - note.time;
+        if (dur < 0.0001f) continue;
+
+        float x0 = origin.x + (note.time - startTime) * pxPerSec;
+        float x1 = origin.x + (note.endTime - startTime) * pxPerSec;
+        if (x1 < origin.x || x0 > origin.x + size.x) continue;
+
+        ImU32 col = (note.arcColor == 0)
+            ? IM_COL32(80, 200, 255, 200)
+            : IM_COL32(255, 100, 180, 200);
+
+        // Multi-waypoint: draw height curve with per-segment sampling
+        if (note.arcWaypoints.size() >= 2) {
+            const auto& wps = note.arcWaypoints;
+            // Draw polyline through all segments
+            std::vector<ImVec2> pts;
+            for (size_t s = 0; s + 1 < wps.size(); ++s) {
+                for (int k = 0; k <= SEG_SAMPLES; ++k) {
+                    if (s > 0 && k == 0) continue; // avoid duplicating junction
+                    float localT = static_cast<float>(k) / SEG_SAMPLES;
+                    float absT = wps[s].time + localT * (wps[s+1].time - wps[s].time);
+                    float normT = (absT - note.time) / dur;
+                    glm::vec2 pos = evalArcEditor(note, normT);
+                    float px = origin.x + (absT - startTime) * pxPerSec;
+                    pts.push_back(ImVec2(px, heightToY(pos.y)));
+                }
+            }
+            if (pts.size() >= 2)
+                dl->AddPolyline(pts.data(), (int)pts.size(), col, ImDrawFlags_None, 2.f);
+
+            // Draw per-waypoint handles
+            ImVec2 mpos = ImGui::GetMousePos();
+            for (int wi = 0; wi < (int)wps.size(); ++wi) {
+                float hx = origin.x + (wps[wi].time - startTime) * pxPerSec;
+                float hy = heightToY(wps[wi].y);
+                ImVec2 handle(hx, hy);
+
+                ImU32 hcol = (ni == m_selectedNoteIdx) ? IM_COL32(255, 255, 255, 255) : col;
+                dl->AddCircleFilled(handle, HANDLE_R, hcol);
+                dl->AddCircle(handle, HANDLE_R, IM_COL32(255, 255, 255, 150), 0, 1.5f);
+
+                // Click to start dragging this waypoint's height
+                if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)
+                    && std::abs(mpos.x - hx) < HANDLE_R + 3.f
+                    && std::abs(mpos.y - hy) < HANDLE_R + 3.f) {
+                    m_heightDragArc = ni;
+                    m_heightDragWp  = wi;
+                    m_selectedNoteIdx = ni;
+                }
+            }
+        } else {
+            // Legacy 2-endpoint: draw simple curve
+            constexpr int LEGACY_SAMPLES = 20;
+            ImVec2 pts[LEGACY_SAMPLES + 1];
+            for (int s = 0; s <= LEGACY_SAMPLES; ++s) {
+                float t = static_cast<float>(s) / LEGACY_SAMPLES;
+                glm::vec2 pos = evalArcEditor(note, t);
+                float px = x0 + t * (x1 - x0);
+                pts[s] = ImVec2(px, heightToY(pos.y));
+            }
+            dl->AddPolyline(pts, LEGACY_SAMPLES + 1, col, ImDrawFlags_None, 2.f);
+
+            // Start/end handles (legacy)
+            ImVec2 startHandle(x0, heightToY(note.arcStartY));
+            ImVec2 endHandle(x1, heightToY(note.arcEndY));
+            ImU32 hcol = (ni == m_selectedNoteIdx) ? IM_COL32(255, 255, 255, 255) : col;
+            dl->AddCircleFilled(startHandle, HANDLE_R, hcol);
+            dl->AddCircleFilled(endHandle,   HANDLE_R, hcol);
+            dl->AddCircle(startHandle, HANDLE_R, IM_COL32(255, 255, 255, 150), 0, 1.5f);
+            dl->AddCircle(endHandle,   HANDLE_R, IM_COL32(255, 255, 255, 150), 0, 1.5f);
+
+            ImVec2 mpos = ImGui::GetMousePos();
+            if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+                if (std::abs(mpos.x - startHandle.x) < HANDLE_R + 2.f
+                    && std::abs(mpos.y - startHandle.y) < HANDLE_R + 2.f) {
+                    m_heightDragArc = ni;
+                    m_heightDragWp  = 0;  // start
+                    m_selectedNoteIdx = ni;
+                } else if (std::abs(mpos.x - endHandle.x) < HANDLE_R + 2.f
+                           && std::abs(mpos.y - endHandle.y) < HANDLE_R + 2.f) {
+                    m_heightDragArc = ni;
+                    m_heightDragWp  = 1;  // end
+                    m_selectedNoteIdx = ni;
+                }
+            }
+        }
+    }
+
+    // Process active drag
+    if (m_heightDragArc >= 0 && m_heightDragArc < (int)notes().size()) {
+        auto& note = notes()[m_heightDragArc];
+        if (note.type == EditorNoteType::Arc && ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+            float h = yToHeight(ImGui::GetMousePos().y);
+            if (!note.arcWaypoints.empty() && m_heightDragWp >= 0
+                && m_heightDragWp < (int)note.arcWaypoints.size()) {
+                note.arcWaypoints[m_heightDragWp].y = h;
+                // Sync legacy fields
+                note.arcStartY = note.arcWaypoints.front().y;
+                note.arcEndY   = note.arcWaypoints.back().y;
+            } else {
+                // Legacy 2-endpoint
+                if (m_heightDragWp == 0)
+                    note.arcStartY = h;
+                else
+                    note.arcEndY = h;
+            }
+        }
+        if (ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
+            m_heightDragArc = -1;
+            m_heightDragWp  = -1;
+        }
+    }
+}
+
+// ── renderArcNotes (timeline arc ribbons + arctap diamonds) ────────────────
+
+void SongEditor::renderArcNotes(ImDrawList* dl, ImVec2 origin, ImVec2 size,
+                                 float startTime, int trackCount,
+                                 float trackH, float regionTop) {
+    if (!m_song) return;
+
+    float pxPerSec = m_timelineZoom;
+    float regionH  = trackH * trackCount;
+
+    auto arcXToPixelY = [&](float ax) -> float {
+        return regionTop + ax * regionH;
+    };
+
+    // ── Draw arc ribbons ───────────────────────────────────────────────────
+    for (int ni = 0; ni < (int)notes().size(); ++ni) {
+        const auto& note = notes()[ni];
+        if (note.type != EditorNoteType::Arc) continue;
+        if (note.arcIsVoid) continue;
+
+        float dur = note.endTime - note.time;
+        if (dur < 0.0001f) continue;
+
+        float x0 = origin.x + (note.time - startTime) * pxPerSec;
+        float x1 = origin.x + (note.endTime - startTime) * pxPerSec;
+        if (x1 < origin.x || x0 > origin.x + size.x) continue;
+
+        ImU32 col = (note.arcColor == 0)
+            ? IM_COL32(80, 200, 255, 160) : IM_COL32(255, 100, 180, 160);
+
+        // Sample the arc curve and draw as a polyline ribbon
+        constexpr int SAMPLES = 32;
+        constexpr float HALF_W = 3.f;
+        ImVec2 top[SAMPLES + 1], bot[SAMPLES + 1];
+        for (int s = 0; s <= SAMPLES; ++s) {
+            float t = static_cast<float>(s) / SAMPLES;
+            glm::vec2 pos = evalArcEditor(note, t);
+            float px = x0 + t * (x1 - x0);
+            float py = arcXToPixelY(pos.x);
+            top[s] = ImVec2(px, py - HALF_W);
+            bot[s] = ImVec2(px, py + HALF_W);
+        }
+
+        for (int s = 0; s < SAMPLES; ++s) {
+            dl->AddQuadFilled(top[s], top[s + 1], bot[s + 1], bot[s], col);
+        }
+
+        // Waypoint handles (multi-waypoint arcs)
+        ImU32 capCol = (note.arcColor == 0)
+            ? IM_COL32(80, 200, 255, 220) : IM_COL32(255, 100, 180, 220);
+
+        if (note.arcWaypoints.size() >= 2) {
+            for (size_t wi = 0; wi < note.arcWaypoints.size(); ++wi) {
+                const auto& wp = note.arcWaypoints[wi];
+                float wpPx = origin.x + (wp.time - startTime) * pxPerSec;
+                float wpPy = arcXToPixelY(wp.x);
+                float r = (wi == 0 || wi == note.arcWaypoints.size() - 1) ? 5.f : 4.f;
+                dl->AddCircleFilled(ImVec2(wpPx, wpPy), r, capCol);
+                dl->AddCircle(ImVec2(wpPx, wpPy), r + 1.f,
+                              IM_COL32(255, 255, 255, 150), 0, 1.f);
+            }
+        } else {
+            // Legacy: start/end caps only
+            dl->AddCircleFilled(ImVec2(x0, arcXToPixelY(note.arcStartX)), 5.f, capCol);
+            dl->AddCircleFilled(ImVec2(x1, arcXToPixelY(note.arcEndX)),   5.f, capCol);
+        }
+
+        // Selection highlight
+        if (ni == m_selectedNoteIdx) {
+            for (int s = 0; s < SAMPLES; ++s) {
+                dl->AddQuad(top[s], top[s + 1], bot[s + 1], bot[s],
+                            IM_COL32(255, 255, 255, 200), 1.5f);
+            }
+        }
+    }
+
+    // ── Draw ArcTap diamonds ───────────────────────────────────────────────
+    for (int ni = 0; ni < (int)notes().size(); ++ni) {
+        const auto& note = notes()[ni];
+        if (note.type != EditorNoteType::ArcTap) continue;
+        if (note.arcTapParent < 0 || note.arcTapParent >= (int)notes().size()) continue;
+
+        const auto& parent = notes()[note.arcTapParent];
+        if (parent.type != EditorNoteType::Arc) continue;
+
+        float dur = parent.endTime - parent.time;
+        float tParam = (dur < 0.0001f) ? 0.f
+                        : std::clamp((note.time - parent.time) / dur, 0.f, 1.f);
+        glm::vec2 pos = evalArcEditor(parent, tParam);
+
+        float px = origin.x + (note.time - startTime) * pxPerSec;
+        float py = arcXToPixelY(pos.x);
+        if (px < origin.x || px > origin.x + size.x) continue;
+
+        constexpr float R = 6.f;
+        ImVec2 pts[4] = {
+            ImVec2(px, py - R), ImVec2(px + R, py),
+            ImVec2(px, py + R), ImVec2(px - R, py)
+        };
+        dl->AddConvexPolyFilled(pts, 4, IM_COL32(255, 180, 60, 220));
+        if (ni == m_selectedNoteIdx) {
+            dl->AddPolyline(pts, 4, IM_COL32(255, 255, 255, 220), ImDrawFlags_Closed, 2.f);
+        }
+    }
+
+    // ── Hit-test for selection ─────────────────────────────────────────────
+    if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)
+        && m_noteTool != NoteTool::Arc && m_noteTool != NoteTool::ArcTap) {
+        ImVec2 mpos = ImGui::GetMousePos();
+        // Check ArcTaps first
+        for (int ni = 0; ni < (int)notes().size(); ++ni) {
+            const auto& n = notes()[ni];
+            if (n.type != EditorNoteType::ArcTap) continue;
+            if (n.arcTapParent < 0 || n.arcTapParent >= (int)notes().size()) continue;
+            const auto& parent = notes()[n.arcTapParent];
+            float dur = parent.endTime - parent.time;
+            float tP = (dur < 0.0001f) ? 0.f
+                         : std::clamp((n.time - parent.time) / dur, 0.f, 1.f);
+            glm::vec2 pos = evalArcEditor(parent, tP);
+            float px = origin.x + (n.time - startTime) * pxPerSec;
+            float py = arcXToPixelY(pos.x);
+            if (std::abs(mpos.x - px) < 8.f && std::abs(mpos.y - py) < 8.f) {
+                m_selectedNoteIdx = ni;
+                return;
+            }
+        }
+        // Check Arcs
+        for (int ni = 0; ni < (int)notes().size(); ++ni) {
+            const auto& n = notes()[ni];
+            if (n.type != EditorNoteType::Arc) continue;
+            float dur = n.endTime - n.time;
+            if (dur < 0.0001f) continue;
+            float x0 = origin.x + (n.time - startTime) * pxPerSec;
+            float x1 = origin.x + (n.endTime - startTime) * pxPerSec;
+            if (mpos.x < x0 - 5.f || mpos.x > x1 + 5.f) continue;
+            float tP = std::clamp((mpos.x - x0) / (x1 - x0), 0.f, 1.f);
+            glm::vec2 pos = evalArcEditor(n, tP);
+            float py = arcXToPixelY(pos.x);
+            if (std::abs(mpos.y - py) < 10.f) {
+                m_selectedNoteIdx = ni;
+                return;
+            }
+        }
+    }
+}
+
 // ── renderNotes ─────────────────────────────────────────────────────────────
 
 void SongEditor::renderNotes(ImDrawList* dl, ImVec2 origin, ImVec2 size,
@@ -4711,10 +5886,12 @@ void SongEditor::renderNotes(ImDrawList* dl, ImVec2 origin, ImVec2 size,
     // Click = blue-green, Press = green, Slide = purple-green
     auto perfectColor = [](EditorNoteType t) -> ImU32 {
         switch (t) {
-            case EditorNoteType::Tap: return IM_COL32(40, 160, 220, 80);
-            case EditorNoteType::Hold: return IM_COL32(40, 200, 80, 80);
-            case EditorNoteType::Slide: return IM_COL32(180, 60, 200, 80);
-            case EditorNoteType::Flick: return IM_COL32(220, 150, 40, 80);
+            case EditorNoteType::Tap:    return IM_COL32(40, 160, 220, 80);
+            case EditorNoteType::Hold:   return IM_COL32(40, 200, 80, 80);
+            case EditorNoteType::Slide:  return IM_COL32(180, 60, 200, 80);
+            case EditorNoteType::Flick:  return IM_COL32(220, 150, 40, 80);
+            case EditorNoteType::Arc:    return IM_COL32(60, 180, 230, 80);
+            case EditorNoteType::ArcTap: return IM_COL32(230, 160, 50, 80);
         }
         return IM_COL32(40, 200, 80, 80);
     };
@@ -4747,6 +5924,9 @@ void SongEditor::renderNotes(ImDrawList* dl, ImVec2 origin, ImVec2 size,
 
     for (size_t ni = 0; ni < notes().size(); ++ni) {
         const auto& note = notes()[ni];
+        // Arc/ArcTap are rendered by renderArcNotes — skip here
+        if (note.type == EditorNoteType::Arc || note.type == EditorNoteType::ArcTap)
+            continue;
         if (note.isSky != skyOnly) continue;
 
         float noteX = origin.x + (note.time - startTime) * pxPerSec;
@@ -5099,17 +6279,19 @@ void SongEditor::rebuildLaneMaskTimeline() {
     std::sort(samples.begin(), samples.end());
     samples.erase(std::unique(samples.begin(), samples.end()), samples.end());
 
-    int tc = gm.trackCount;
+    int   tc     = gm.trackCount;
+    float baseR  = gm.diskBaseRadius   > 0.f ? gm.diskBaseRadius   : 2.4f;
+    float initS  = gm.diskInitialScale > 0.f ? gm.diskInitialScale : 1.f;
     for (double t : samples) {
         glm::vec2 c    = sampleDiskCenter  (t, diskMove());
-        float     s    = sampleDiskScale   (t, diskScale());
+        float     s    = sampleDiskScale   (t, diskScale()) * initS;
         float     r    = sampleDiskRotation(t, diskRot());
-        uint32_t  mask = laneMaskForTransform(tc, c, s, r);
+        uint32_t  mask = laneMaskForTransform(tc, baseR, c, s, r);
         if (m_laneMaskTimeline.empty() || m_laneMaskTimeline.back().mask != mask)
             m_laneMaskTimeline.push_back({t, mask});
     }
     if (m_laneMaskTimeline.empty())
-        m_laneMaskTimeline.push_back({0.0, laneMaskForTransform(tc, {0.f,0.f}, 1.f, 0.f)});
+        m_laneMaskTimeline.push_back({0.0, laneMaskForTransform(tc, baseR, {0.f,0.f}, initS, 0.f)});
 }
 
 uint32_t SongEditor::laneMaskAt(double songTime) const {

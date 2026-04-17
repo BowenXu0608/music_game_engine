@@ -38,6 +38,18 @@ originSessionId: d4e6dddd-1cc1-4f7b-8da6-079be9eb81c0
 
 **ActiveHold struct (public):** `noteId, startTime, noteStartTime, noteDuration, noteType, lane, currentLane, consecutiveMissedTicks, broken, holdData, positionSamples, sampleOffsets, nextSampleIdx`.
 - `getActiveHold(noteId)` — read-only access for slide tick scoring.
+- `activeHoldIds()` — returns a `std::vector<uint32_t>` of every currently-active hold. Engine pushes this to `GameModeRenderer::setActiveHoldIds()` each frame so renderers can bloom/brighten hold bodies while they're being held (2026-04-12).
+
+## Auto Play (2026-04-12)
+
+Watch-the-chart mode — the game auto-triggers Perfect hits on every note. Toggle per-launch on the Music Selection screen (AUTO PLAY: ON/OFF button below START). Flag flows `MusicSelectionEditor::m_autoPlay` → `Engine::launchGameplay(..., bool autoPlay)` → `Engine::m_autoPlay`.
+
+**HitDetector::autoPlayTick(songTime)** — returns `std::vector<AutoHit>` where `AutoHit { HitResult result, int lane, bool isHoldEnd }`. For every note whose `time <= songTime`:
+- Tap/Flick/Drag/Ring/Phigros: emit `HitResult{id, 0.f, type}` and erase.
+- Hold/Slide/Arc: push head hit, move the note into `m_activeHolds`, and keep syncing `currentLane = evalHoldLaneAt(holdData, tOff)` so `consumeSampleTicks` scores every tick Perfect.
+- Holds whose `noteStartTime + noteDuration` has elapsed emit a release `HitResult` with `isHoldEnd=true` and are erased from `m_activeHolds`.
+
+**Engine::update:** when `m_autoPlay` is true, calls `autoPlayTick` and dispatches every result through the normal `dispatchHitResult` path **before** the miss-sweep, so score / combo / HUD / particle bursts behave identically to a human hitting Perfect.
 
 **Miss detection:** `update(songTime)` removes expired notes (>0.1s past), returns `vector<MissedNote>`. Extracts lane from all data variants including LanotaRingData.
 

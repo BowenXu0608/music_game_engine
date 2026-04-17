@@ -65,6 +65,16 @@ void MeshRenderer::destroyMesh(BufferManager& bufMgr, Mesh& mesh) {
     mesh.indexCount = 0;
 }
 
+void MeshRenderer::updateMesh(VulkanContext& ctx, BufferManager& bufMgr, Mesh& mesh,
+                               const std::vector<MeshVertex>& verts,
+                               const std::vector<uint32_t>& indices) {
+    mesh.indexCount = static_cast<uint32_t>(indices.size());
+    if (!verts.empty())
+        bufMgr.uploadToBuffer(ctx, mesh.vertexBuffer, verts.data(), sizeof(MeshVertex) * verts.size());
+    if (!indices.empty())
+        bufMgr.uploadToBuffer(ctx, mesh.indexBuffer, indices.data(), sizeof(uint32_t) * indices.size());
+}
+
 void MeshRenderer::drawMesh(const Mesh& mesh, const glm::mat4& model, glm::vec4 tint) {
     m_queue.push_back({&mesh, model, tint});
 }

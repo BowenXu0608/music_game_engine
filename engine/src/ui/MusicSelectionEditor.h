@@ -82,6 +82,7 @@ private:
     int  m_selectedSet   = -1;    // index into m_sets, -1 = none
     int  m_selectedSong  = -1;    // index into m_sets[m_selectedSet].songs
     Difficulty m_selectedDifficulty = Difficulty::Hard;
+    bool       m_autoPlay = false;
 
     // ── Wheel scroll state (smooth animation) ────────────────────────────────
     float m_setScrollTarget  = 0.f;

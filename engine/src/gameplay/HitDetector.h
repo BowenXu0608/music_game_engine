@@ -61,6 +61,18 @@ public:
     // (no precise tap needed). Returns all consumed drags.
     std::vector<HitResult> consumeDrags(int lane, double songTime);
 
+    // Auto-play: at each update, consume every note whose hit time has
+    // arrived, producing Perfect hits (timingDelta=0). Begins and ends holds
+    // automatically, and keeps hold currentLane synced to the expected lane
+    // so sample-tick scoring stays Perfect. Returns (hit, lane) pairs; the
+    // `isHoldEnd` flag marks release events so callers don't double-judge.
+    struct AutoHit {
+        HitResult result;
+        int       lane;       // -1 if unknown (position-based notes)
+        bool      isHoldEnd;  // true = hold release, false = head/tap/etc.
+    };
+    std::vector<AutoHit> autoPlayTick(double songTime);
+
     // Id-based hit consumption — used when the caller (e.g. LanotaRenderer's
     // touch picker) has already chosen the specific note geometrically and
     // just needs the detector to validate the timing window, build the
@@ -115,6 +127,10 @@ public:
 
     // Access an active hold's state (read-only). Returns nullptr if not found.
     const ActiveHold* getActiveHold(uint32_t noteId) const;
+
+    // All currently-active hold note IDs — used by renderers to apply
+    // per-note visual effects (e.g. bloom/glow while a hold is being held).
+    std::vector<uint32_t> activeHoldIds() const;
 
 private:
 

@@ -91,6 +91,82 @@ std::vector<HitResult> HitDetector::consumeDrags(int lane, double songTime) {
     return results;
 }
 
+std::vector<HitDetector::AutoHit> HitDetector::autoPlayTick(double songTime) {
+    std::vector<AutoHit> out;
+
+    // 1) Consume every note whose time has arrived.
+    for (auto it = m_activeNotes.begin(); it != m_activeNotes.end(); ) {
+        if (it->time > songTime) { ++it; continue; }
+
+        // Lane extraction (best effort)
+        int lane = -1;
+        if (auto* tap  = std::get_if<TapData>(&it->data))         lane = static_cast<int>(std::lround(tap->laneX));
+        else if (auto* hd = std::get_if<HoldData>(&it->data))     lane = static_cast<int>(std::lround(hd->laneX));
+        else if (auto* fl = std::get_if<FlickData>(&it->data))    lane = static_cast<int>(std::lround(fl->laneX));
+        else if (auto* rg = std::get_if<LanotaRingData>(&it->data)) lane = angleToLane(rg->angle);
+
+        const bool isHold  = std::holds_alternative<HoldData>(it->data);
+        const bool isSlide = std::holds_alternative<TapData>(it->data) && it->type == NoteType::Slide;
+        const bool isArc   = std::holds_alternative<ArcData>(it->data);
+
+        if (isHold || isSlide || isArc) {
+            ActiveHold hold{};
+            hold.noteId        = it->id;
+            hold.startTime     = songTime;
+            hold.noteStartTime = it->time;
+            hold.noteType      = it->type;
+            if (isHold) {
+                const auto& hd = std::get<HoldData>(it->data);
+                hold.noteDuration = hd.duration;
+                hold.lane         = static_cast<int>(std::lround(hd.laneX));
+                hold.currentLane  = hold.lane;
+                hold.holdData     = hd;
+                hold.sampleOffsets.reserve(hd.samplePoints.size());
+                for (const auto& sp : hd.samplePoints) hold.sampleOffsets.push_back(sp.tOffset);
+                std::sort(hold.sampleOffsets.begin(), hold.sampleOffsets.end());
+            } else if (isSlide) {
+                const auto& td = std::get<TapData>(it->data);
+                hold.noteDuration = td.duration;
+                hold.lane         = static_cast<int>(std::lround(td.laneX));
+                hold.currentLane  = hold.lane;
+            } else {
+                hold.noteDuration = std::get<ArcData>(it->data).duration;
+            }
+            m_activeHolds[it->id] = std::move(hold);
+            out.push_back({HitResult{it->id, 0.f, it->type}, lane, false});
+        } else {
+            out.push_back({HitResult{it->id, 0.f, it->type}, lane, false});
+        }
+
+        it = m_activeNotes.erase(it);
+    }
+
+    // 2) Keep active-hold currentLane synced to expected — makes
+    // consumeSampleTicks award Perfect for every tick.
+    for (auto& [id, hold] : m_activeHolds) {
+        if (hold.broken) continue;
+        float tOff = static_cast<float>(songTime - hold.noteStartTime);
+        if (tOff < 0.f) tOff = 0.f;
+        if (hold.noteType == NoteType::Hold) {
+            hold.currentLane = static_cast<int>(std::lround(evalHoldLaneAt(hold.holdData, tOff)));
+        }
+    }
+
+    // 3) Finalize holds whose duration has elapsed.
+    for (auto it = m_activeHolds.begin(); it != m_activeHolds.end(); ) {
+        double endT = it->second.noteStartTime + it->second.noteDuration;
+        if (songTime >= endT && !it->second.broken) {
+            out.push_back({HitResult{it->first, 0.f, it->second.noteType},
+                           it->second.lane, true});
+            it = m_activeHolds.erase(it);
+        } else {
+            ++it;
+        }
+    }
+
+    return out;
+}
+
 std::optional<HitResult> HitDetector::consumeNoteById(uint32_t noteId, double songTime) {
     for (auto it = m_activeNotes.begin(); it != m_activeNotes.end(); ++it) {
         if (it->id != noteId) continue;
@@ -354,4 +430,11 @@ float HitDetector::getSlideAccuracy(uint32_t noteId) const {
 const HitDetector::ActiveHold* HitDetector::getActiveHold(uint32_t noteId) const {
     auto it = m_activeHolds.find(noteId);
     return (it != m_activeHolds.end()) ? &it->second : nullptr;
+}
+
+std::vector<uint32_t> HitDetector::activeHoldIds() const {
+    std::vector<uint32_t> ids;
+    ids.reserve(m_activeHolds.size());
+    for (auto& [id, _] : m_activeHolds) ids.push_back(id);
+    return ids;
 }

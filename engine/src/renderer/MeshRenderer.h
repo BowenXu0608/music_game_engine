@@ -27,6 +27,11 @@ public:
                     const std::vector<uint32_t>& indices);
     void destroyMesh(BufferManager& bufMgr, Mesh& mesh);
 
+    // Re-upload vertex/index data into an existing mesh's buffers.
+    void updateMesh(VulkanContext& ctx, BufferManager& bufMgr, Mesh& mesh,
+                    const std::vector<MeshVertex>& verts,
+                    const std::vector<uint32_t>& indices);
+
     // Queue a mesh draw — flushed in order
     void drawMesh(const Mesh& mesh, const glm::mat4& model, glm::vec4 tint);
 

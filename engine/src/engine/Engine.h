@@ -40,10 +40,11 @@ public:
     void switchLayer(EditorLayer layer) { m_currentLayer = layer; }
 
     void launchGameplay(const SongInfo& song, Difficulty difficulty,
-                        const std::string& projectPath);
+                        const std::string& projectPath, bool autoPlay = false);
     void launchGameplayDirect(const SongInfo& song, const ChartData& chart,
                               const std::string& projectPath);
     void exitGameplay();
+    void restartGameplay();
     StartScreenEditor& startScreenEditor() { return m_startScreenEditor; }
     MusicSelectionEditor& musicSelectionEditor() { return m_musicSelectionEditor; }
     SongEditor& songEditor() { return m_songEditor; }
@@ -112,10 +113,17 @@ private:
     EditorLayer                        m_preGameplayLayer = EditorLayer::MusicSelection;
     GameModeConfig                     m_gameplayConfig;  // config for current gameplay session
     bool                               m_gameplayPaused = false;
+    bool                               m_autoPlay = false;
     bool                               m_showResults = false;
     float                              m_gameplayLeadIn = 0.f;   // countdown before audio starts
     bool                               m_audioStarted = false;
     std::string                        m_pendingAudioPath;       // audio to load after lead-in
+    // Cached chart + project path for the current gameplay session so the
+    // Restart button can reload the same data without going through the
+    // hub/song-select flow again.
+    ChartData                          m_currentChart;
+    std::string                        m_currentProjectPath;
+    std::string                        m_currentAudioPath;       // resolved audio path for restart
     bool                               m_framebufferResized = false;
     bool                               m_running = false;
     bool                               m_hubMode = false;

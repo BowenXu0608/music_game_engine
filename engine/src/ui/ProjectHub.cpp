@@ -5,6 +5,12 @@
 #include <filesystem>
 #include <nlohmann/json.hpp>
 #include <cctype>
+#include <cstdlib>
+#ifdef _WIN32
+  #define WIN32_LEAN_AND_MEAN
+  #include <windows.h>
+  #include <shellapi.h>
+#endif
 
 namespace fs = std::filesystem;
 
@@ -232,6 +238,15 @@ void ProjectHub::render(Engine* engine) {
             }
             ImGui::SameLine();
             ImGui::Text("v%s", proj.version.c_str());
+            ImGui::SameLine();
+            ImGui::Dummy(ImVec2(20, 0));
+            ImGui::SameLine();
+            bool disableApk = m_apkRunning;
+            if (disableApk) ImGui::BeginDisabled();
+            if (ImGui::Button("Build APK", ImVec2(110, 28))) {
+                startApkBuild(proj);
+            }
+            if (disableApk) ImGui::EndDisabled();
             ImGui::PopID();
         }
     }
@@ -239,4 +254,110 @@ void ProjectHub::render(Engine* engine) {
     ImGui::End();
 
     renderCreateDialog(engine);
+    renderApkDialog();
+}
+
+// ── APK build ────────────────────────────────────────────────────────────────
+
+void ProjectHub::startApkBuild(const ProjectInfo& proj) {
+    if (m_apkRunning) return;
+
+    // Default output: <Desktop>/<ProjectName>.apk
+    fs::path desktop;
+#ifdef _WIN32
+    if (const char* up = std::getenv("USERPROFILE"))
+        desktop = fs::path(up) / "Desktop";
+#endif
+    if (desktop.empty() || !fs::exists(desktop))
+        desktop = fs::current_path();
+
+    std::string safeName = sanitizeName(proj.name.c_str());
+    if (safeName.empty()) safeName = "game";
+    fs::path outputApk = desktop / (safeName + ".apk");
+    fs::path logPath   = fs::temp_directory_path() / (safeName + "_apk_build.log");
+
+    // Resolve script path relative to CWD (build/Release or similar)
+    fs::path script = fs::absolute("../../tools/build_apk.bat");
+    if (!fs::exists(script)) script = fs::absolute("tools/build_apk.bat");
+
+    m_apkProjectName = proj.name;
+    m_apkOutputPath  = outputApk.string();
+    m_apkLogPath     = logPath.string();
+    m_apkRunning     = true;
+    m_showApkDialog  = true;
+    m_apkExitCode    = 0;
+
+    std::string projectPath = proj.path;
+    std::string scriptStr   = script.string();
+    std::string outStr      = outputApk.string();
+    std::string logStr      = logPath.string();
+
+    m_apkFuture = std::async(std::launch::async, [scriptStr, projectPath, outStr, logStr]() -> int {
+        std::string cmd = "\"\"" + scriptStr + "\" \"" + projectPath +
+                          "\" \"" + outStr + "\" > \"" + logStr + "\" 2>&1\"";
+        return std::system(cmd.c_str());
+    });
+}
+
+void ProjectHub::renderApkDialog() {
+    if (!m_showApkDialog) return;
+
+    if (m_apkRunning && m_apkFuture.valid() &&
+        m_apkFuture.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+        m_apkExitCode = m_apkFuture.get();
+        m_apkRunning  = false;
+    }
+
+    ImVec2 center{ImGui::GetIO().DisplaySize.x * 0.5f,
+                  ImGui::GetIO().DisplaySize.y * 0.5f};
+    ImGui::SetNextWindowPos(center, ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+    ImGui::SetNextWindowSize(ImVec2(560, 240), ImGuiCond_Always);
+    ImGui::Begin("Build APK", nullptr,
+                 ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
+                 ImGuiWindowFlags_NoCollapse);
+
+    ImGui::Text("Project: %s", m_apkProjectName.c_str());
+    ImGui::Text("Output:  %s", m_apkOutputPath.c_str());
+    ImGui::Separator();
+    ImGui::Spacing();
+
+    if (m_apkRunning) {
+        ImGui::TextColored(ImVec4(1.f, 0.85f, 0.2f, 1.f),
+                           "Building... (running Gradle, this can take a few minutes)");
+        ImGui::Spacing();
+        ImGui::TextDisabled("Log: %s", m_apkLogPath.c_str());
+    } else if (m_apkExitCode == 0) {
+        ImGui::TextColored(ImVec4(0.3f, 1.f, 0.3f, 1.f), "BUILD SUCCESSFUL");
+        ImGui::Spacing();
+        ImGui::TextWrapped("APK saved to:\n  %s", m_apkOutputPath.c_str());
+        ImGui::Spacing();
+#ifdef _WIN32
+        if (ImGui::Button("Show in Explorer", ImVec2(160, 28))) {
+            std::string arg = "/select,\"" + m_apkOutputPath + "\"";
+            ShellExecuteA(nullptr, "open", "explorer.exe", arg.c_str(), nullptr, SW_SHOWNORMAL);
+        }
+        ImGui::SameLine();
+#endif
+    } else {
+        ImGui::TextColored(ImVec4(1.f, 0.35f, 0.35f, 1.f),
+                           "BUILD FAILED (exit %d)", m_apkExitCode);
+        ImGui::Spacing();
+        ImGui::TextWrapped("See log for details:\n  %s", m_apkLogPath.c_str());
+        ImGui::Spacing();
+#ifdef _WIN32
+        if (ImGui::Button("Open Log", ImVec2(160, 28))) {
+            ShellExecuteA(nullptr, "open", m_apkLogPath.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+        }
+        ImGui::SameLine();
+#endif
+    }
+
+    bool canClose = !m_apkRunning;
+    if (!canClose) ImGui::BeginDisabled();
+    if (ImGui::Button("Close", ImVec2(110, 28))) {
+        m_showApkDialog = false;
+    }
+    if (!canClose) ImGui::EndDisabled();
+
+    ImGui::End();
 }

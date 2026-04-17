@@ -336,15 +336,29 @@ ChartData ChartLoader::loadUnified(const std::string& path) {
                 arc.endPos.x    = getFloat("endX");
                 arc.endPos.y    = getFloat("endY");
                 arc.duration    = getFloat("duration");
-                arc.curveXEase  = getFloat("curveXEase");
-                arc.curveYEase  = getFloat("curveYEase");
+                // Accept both old ("curveXEase") and new ("easeX") field names
+                float ex = getFloat("easeX");
+                arc.curveXEase  = (ex != 0.f) ? ex : getFloat("curveXEase");
+                float ey = getFloat("easeY");
+                arc.curveYEase  = (ey != 0.f) ? ey : getFloat("curveYEase");
                 arc.color       = getInt("color");
-                std::string voidStr = getVal("isVoid");
+                // Accept both "void" and "isVoid" field names
+                std::string voidStr = getVal("void");
+                if (voidStr.empty()) voidStr = getVal("isVoid");
                 arc.isVoid = (voidStr == "true" || voidStr == "1");
                 ev.data = arc;
             } else if (type == "arctap") {
                 ev.type = NoteType::ArcTap;
-                ev.data = TapData{getFloat("lane")};
+                TapData td{};
+                td.laneX = getFloat("lane");
+                // Read arc position if available (from editor export)
+                float ax = getFloat("arcX");
+                float ay = getFloat("arcY");
+                if (ax != 0.f || ay != 0.f) {
+                    td.laneX = ax;
+                    td.scanY = ay;
+                }
+                ev.data = td;
             } else if (type == "ring") {
                 ev.type = NoteType::Ring;
                 int span = getInt("laneSpan");

@@ -2,6 +2,7 @@
 #include <string>
 #include <vector>
 #include <functional>
+#include <future>
 
 class Engine;
 
@@ -55,8 +56,20 @@ struct GameModeConfig {
     float cameraTarget[3] = {0.f, 0.f, -20.f};
     float cameraFov       = 55.f;
 
+    // 3D DropNotes: sky judgment line height (world Y).
+    // Arc height [0..1] maps from ground (GROUND_Y) to this value.
+    float skyHeight = 1.f;
+
     // Background image for gameplay (relative path from project root)
     std::string backgroundImage;
+
+    // ── Circle-mode disk defaults ────────────────────────────────────────
+    // Used only when type == Circle. These override the renderer's
+    // compile-time defaults so each song can tune its own disk layout.
+    float diskInnerRadius  = 0.9f;   // inner spawn disk radius (world units)
+    float diskBaseRadius   = 2.4f;   // outer hit-ring radius  (world units)
+    float diskRingSpacing  = 0.6f;   // spacing between extra rings
+    float diskInitialScale = 1.0f;   // initial scale applied before keyframes
 };
 
 // ── Project info ─────────────────────────────────────────────────────────────
@@ -82,6 +95,8 @@ private:
     void scanProjects();
     void renderCreateDialog(Engine* engine);
     bool createProject(const std::string& name);
+    void startApkBuild(const ProjectInfo& proj);
+    void renderApkDialog();
 
     std::vector<ProjectInfo> m_projects;
     ProjectInfo              m_selectedProject;
@@ -92,4 +107,13 @@ private:
     bool        m_showCreateDialog = false;
     char        m_newProjectName[128] = {};
     std::string m_createError;
+
+    // APK build state
+    bool             m_showApkDialog  = false;
+    bool             m_apkRunning     = false;
+    int              m_apkExitCode    = 0;
+    std::string      m_apkProjectName;
+    std::string      m_apkOutputPath;
+    std::string      m_apkLogPath;
+    std::future<int> m_apkFuture;
 };

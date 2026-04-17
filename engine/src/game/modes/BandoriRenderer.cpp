@@ -4,6 +4,7 @@
 #include <glm/gtc/matrix_transform.hpp>
 #include <cmath>
 #include <algorithm>
+#include <vector>
 
 // Project world pos → screen coords (y=0 bottom, y=h top) using the perspective VP.
 // With Vulkan-corrected perspective (proj[1][1] *= -1):
@@ -125,6 +126,16 @@ void BandoriRenderer::onRender(Renderer& renderer) {
         auto* hold = std::get_if<HoldData>(&note.data);
         if (!hold || hold->duration <= 0.f) continue;
 
+        // If the head time has passed by more than the Bad window and the
+        // player never started holding, the head was missed or judged Bad —
+        // the entire hold should disappear, not just stop being interactive.
+        const bool holdActive = m_activeHoldIds.count(note.id) > 0;
+        constexpr double kBadWindow = 0.15;
+        if (!holdActive && m_songTime > (double)note.time + kBadWindow) {
+            m_hitNotes.insert(note.id);
+            continue;
+        }
+
         const float dur      = hold->duration;
         const float baseHalf = m_noteWorldW * 0.5f;
 
@@ -159,26 +170,107 @@ void BandoriRenderer::onRender(Renderer& renderer) {
             return baseHalf + tri * spread * 0.5f;
         };
 
-        const glm::vec4 holdBodyColor = {0.2f, 0.8f, 1.f, 0.85f};
+        // While the hold is actively being held, push RGB above 1.0 so the
+        // bloom post-process picks it up as a glow. Otherwise render normal.
+        const glm::vec4 holdBodyColor = holdActive
+            ? glm::vec4{0.6f, 2.4f, 3.0f, 0.95f}   // bright cyan → blooms
+            : glm::vec4{0.2f, 0.8f, 1.f, 0.85f};
 
-        // Tessellate ribbon with ~16 segments; more for Curve style.
-        const int N = (hold->transition == HoldTransition::Curve) ? 20 : 12;
+        // Tessellate the *visible* portion of the hold uniformly. Previously
+        // we sampled tOff in [0, dur] and culled out-of-window segments,
+        // which made long holds spawn in chunks at the far plane: each
+        // sample only popped in once its wz crossed the cull line, so the
+        // ribbon visibly extended itself N times. Instead, derive the tOff
+        // window directly from the visible Z range and tessellate inside it
+        // so the visible ribbon is always continuous from the very moment
+        // any part of the hold enters the highway.
+        //
+        //   wz = -(absT - songTime) * SCROLL_SPEED
+        //   absT = note.time + tOff
+        //   ⇒ tOff = (-wz / SCROLL_SPEED) - (note.time - songTime)
+        // While actively holding, hide everything past the judgement line
+        // (wz > 0). Before the hold is started, allow a small +12 of past
+        // overshoot so the head doesn't pop out the moment it crosses the
+        // line — gives the player a frame or two to react.
+        const float zNear = holdActive ? 0.f : 12.f;
+        const float zFar  = APPROACH_Z - 2.f;
+        const float dt    = static_cast<float>(note.time - m_songTime);
+        const float tOffAtZNear = (-zNear / SCROLL_SPEED) - dt;
+        const float tOffAtZFar  = (-zFar  / SCROLL_SPEED) - dt;
+        const float tOffLo = std::max(0.f,  std::min(tOffAtZNear, tOffAtZFar));
+        const float tOffHi = std::min(dur,  std::max(tOffAtZNear, tOffAtZFar));
+        if (tOffHi <= tOffLo + 1e-4f) continue;
+
+        // EVERY sample point sits on a fixed chart-time grid, so as the
+        // visible window scrolls, samples only enter/leave at the bounds —
+        // no sample's tOff ever drifts. Combined with chart-time-anchored
+        // corner samples (transition boundaries + interior subdivisions),
+        // this means the on-screen polyline shape for any segment of the
+        // hold is identical from frame to frame, eliminating the
+        // morph/lagging stutter at corners.
+        constexpr float kGridStep      = 0.04f;   // baseline sample period (sec)
+        constexpr int   kInteriorSamples = 8;     // extra samples per corner
+
+        std::vector<float> tSamples;
+        tSamples.reserve(64);
+
+        // 1. Fixed chart-time grid covering [0, dur].
+        for (float t = 0.f; t < dur; t += kGridStep) tSamples.push_back(t);
+        tSamples.push_back(dur);
+
+        // 2. Anchor samples at every transition window boundary plus dense
+        //    interior subdivisions. These are also chart-time-fixed.
+        auto addCornerSamples = [&](float tBeg, float tEnd) {
+            if (tEnd <= tBeg + 1e-4f) return;
+            tSamples.push_back(tBeg);
+            tSamples.push_back(tEnd);
+            for (int j = 1; j < kInteriorSamples; ++j)
+                tSamples.push_back(tBeg + (tEnd - tBeg) * (float)j / (float)kInteriorSamples);
+        };
+
+        if (!hold->waypoints.empty()) {
+            for (size_t wi = 1; wi < hold->waypoints.size(); ++wi) {
+                const auto& b = hold->waypoints[wi];
+                if (b.transitionLen <= 0.f) continue;
+                float tEnd = b.tOffset;
+                float tBeg = tEnd - b.transitionLen;
+                addCornerSamples(tBeg, tEnd);
+            }
+        } else if (hold->transition != HoldTransition::Straight
+                   && hold->transitionLen > 0.f
+                   && hold->effectiveEndLane() != hold->laneX) {
+            float tBeg = holdTransitionBegin(*hold);
+            float tEnd = tBeg + std::clamp(hold->transitionLen, 0.f, dur);
+            addCornerSamples(tBeg, tEnd);
+        }
+
+        // 3. Add the visible-window endpoints themselves as explicit samples
+        //    so the rendered ribbon's first/last vertex sits *exactly* on
+        //    the visible boundary instead of at whichever grid sample
+        //    happens to be inside it. Without this, the boundary slice
+        //    snaps between configurations as the window scrolls past grid
+        //    points, which reads as a flicker at the judgement line during
+        //    an active hold.
+        tSamples.push_back(tOffLo);
+        tSamples.push_back(tOffHi);
+
+        // 4. Sort & dedupe so the polyline marches forward in chart time.
+        std::sort(tSamples.begin(), tSamples.end());
+        tSamples.erase(std::unique(tSamples.begin(), tSamples.end(),
+                                   [](float a, float b) { return std::abs(a - b) < 1e-4f; }),
+                       tSamples.end());
+
         bool havePrev = false;
         glm::vec3 prevL{}, prevR{};
-        for (int i = 0; i <= N; ++i) {
-            float tOff = (float)i / (float)N * dur;
-            // Keep past (consumed) portions visible so the whole hold shape
-            // is readable while the player is still holding. The body is only
-            // clipped when its Z goes far behind the camera or far past the
-            // approach plane — not by "absT has passed songTime".
+        for (float tOff : tSamples) {
+            if (tOff < tOffLo - 1e-4f || tOff > tOffHi + 1e-4f) {
+                havePrev = false; continue;
+            }
             double absT = note.time + tOff;
 
             float lane = evalHoldLaneAt(*hold, tOff);
             float wx   = laneToWorldX(lane);
             float wz   = -static_cast<float>(absT - m_songTime) * SCROLL_SPEED;
-            // Upper clip raised to +12 so a segment just behind the hit zone
-            // stays on screen long enough for the player to see it.
-            if (wz > 12.f || wz < APPROACH_Z - 2.f) { havePrev = false; continue; }
 
             float hw = halfWAt(tOff);
             glm::vec3 L{wx - hw, 0.f, wz};
@@ -271,10 +363,13 @@ void BandoriRenderer::onRender(Renderer& renderer) {
         float nearW = std::abs(sNR.x - sNL.x);
         if (nearW < 2.f) continue;
 
-        glm::vec4 color = {1.f, 0.8f, 0.2f, 1.f};
-        if (note.type == NoteType::Hold)  color = {0.2f, 0.8f, 1.f, 1.f};
-        if (note.type == NoteType::Flick) color = {1.f, 0.3f, 0.3f, 1.f};
-        if (note.type == NoteType::Drag)  color = {0.6f, 1.f, 0.4f, 0.85f};
+        glm::vec4 color = {1.f, 0.8f, 0.2f, 1.f};          // Tap: yellow
+        if (note.type == NoteType::Hold)  color = m_activeHoldIds.count(note.id)
+                                              ? glm::vec4{0.6f, 2.4f, 3.0f, 1.f}   // active → bloom
+                                              : glm::vec4{0.2f, 0.8f, 1.f, 1.f};   // Hold: cyan
+        if (note.type == NoteType::Flick) color = {1.f, 0.3f, 0.3f, 1.f};   // Flick: red
+        if (note.type == NoteType::Drag)  color = {0.6f, 1.f, 0.4f, 0.85f}; // Drag: green
+        if (note.type == NoteType::Slide) color = {0.8f, 0.4f, 1.f, 1.f};   // Slide: purple
 
         // Order: NL, NR, FR, FL — matches drawQuad's BL,BR,TR,TL winding so the
         // existing index pattern (0,1,2, 2,3,0) tessellates correctly.

@@ -25,6 +25,18 @@ glm::vec2 LanotaRenderer::w2s(glm::vec3 pos, const glm::mat4& vp, float sw, floa
 void LanotaRenderer::onInit(Renderer& renderer, const ChartData& chart,
                             const GameModeConfig* config) {
     m_renderer = &renderer;
+
+    // Seed disk layout from the per-song config (falls back to defaults).
+    if (config) {
+        if (config->diskInnerRadius  > 0.f) INNER_RADIUS = config->diskInnerRadius;
+        if (config->diskBaseRadius   > 0.f) BASE_RADIUS  = config->diskBaseRadius;
+        if (config->diskRingSpacing  > 0.f) RING_SPACING = config->diskRingSpacing;
+        if (config->diskInitialScale > 0.f) {
+            m_diskInitialScale = config->diskInitialScale;
+            m_diskScale        = config->diskInitialScale;
+        }
+    }
+
     onResize(renderer.width(), renderer.height());
 
     // Track count for the lane→angle fallback (used when the chart has no
@@ -40,7 +52,7 @@ void LanotaRenderer::onInit(Renderer& renderer, const ChartData& chart,
     for (const auto& note : chart.notes) {
         if (note.type != NoteType::Hold) continue;
         if (auto* hd = std::get_if<HoldData>(&note.data))
-            m_holdBodies.push_back({note.time, *hd});
+            m_holdBodies.push_back({note.id, note.time, *hd});
     }
 
     std::unordered_map<int, std::vector<NoteEvent>> ringNotes;
@@ -217,12 +229,7 @@ float LanotaRenderer::getDiskScale(double songTime,
 }
 
 void LanotaRenderer::onUpdate(float /*dt*/, double songTime) {
-    double maxTime = 0.0;
-    for (auto& ring : m_rings)
-        for (auto& n : ring.notes)
-            maxTime = std::max(maxTime, n.time);
-    double loopDuration = maxTime + 1.0;
-    m_songTime = loopDuration > 0.0 ? fmod(songTime, loopDuration) : songTime;
+    m_songTime = songTime;
 
     // Whole-disk rotation drives every ring uniformly so downstream code
     // (onRender, picking) keeps its `ring.currentAngle` reads and doesn't
@@ -233,7 +240,7 @@ void LanotaRenderer::onUpdate(float /*dt*/, double songTime) {
 
     // Uniform disk scale: base radii are stored at init time; rescale each
     // frame so notes, dividers, and picks all see the same live value.
-    m_diskScale = getDiskScale(m_songTime, m_scaleEvents);
+    m_diskScale = m_diskInitialScale * getDiskScale(m_songTime, m_scaleEvents);
     for (auto& ring : m_rings)
         ring.radius = ring.baseRadius * m_diskScale;
 
@@ -462,6 +469,51 @@ void LanotaRenderer::onRender(Renderer& renderer) {
     }
 }
 
+// Smooth (Catmull-Rom Hermite) lane evaluator used only for the visual hold
+// body in Circle mode. The shared `evalHoldLaneAt` honours `transitionLen`
+// so the lane is constant outside each waypoint's transition window — that's
+// correct for hit detection but produces a sharp 90° kink in the rendered
+// path at every waypoint. Here we ignore `transitionLen` entirely and treat
+// each waypoint pair as a full Hermite cubic spanning the whole segment, so
+// the path bends through corners as a Bezier-style arc.
+static float evalHoldLaneSmoothLanota(const HoldData& h, float tOff) {
+    if (h.waypoints.size() < 2) return evalHoldLaneAt(h, tOff);
+
+    const auto& wp = h.waypoints;
+    if (tOff <= wp.front().tOffset) return static_cast<float>(wp.front().lane);
+    if (tOff >= wp.back().tOffset)  return static_cast<float>(wp.back().lane);
+
+    for (size_t i = 1; i < wp.size(); ++i) {
+        const auto& a = wp[i - 1];
+        const auto& b = wp[i];
+        if (tOff > b.tOffset) continue;
+
+        const float segLen = b.tOffset - a.tOffset;
+        if (segLen <= 1e-6f) return static_cast<float>(b.lane);
+
+        const float la = static_cast<float>(a.lane);
+        const float lb = static_cast<float>(b.lane);
+
+        // Catmull-Rom tangents — central differences across neighbours so
+        // each interior waypoint joins its segments with matching slopes
+        // (C1 continuity → smooth bends instead of sharp corners).
+        const float lPrev = (i >= 2)            ? static_cast<float>(wp[i - 2].lane) : la;
+        const float lNext = (i + 1 < wp.size()) ? static_cast<float>(wp[i + 1].lane) : lb;
+        const float ma    = 0.5f * (lb - lPrev);
+        const float mb    = 0.5f * (lNext - la);
+
+        const float u   = (tOff - a.tOffset) / segLen;
+        const float u2  = u * u;
+        const float u3  = u2 * u;
+        const float h00 =  2.f * u3 - 3.f * u2 + 1.f;
+        const float h10 =        u3 - 2.f * u2 + u;
+        const float h01 = -2.f * u3 + 3.f * u2;
+        const float h11 =        u3 -       u2;
+        return h00 * la + h10 * ma + h01 * lb + h11 * mb;
+    }
+    return static_cast<float>(wp.back().lane);
+}
+
 void LanotaRenderer::drawHoldBodies(Renderer& renderer) {
     if (m_holdBodies.empty() || m_rings.empty()) return;
 
@@ -488,7 +540,7 @@ void LanotaRenderer::drawHoldBodies(Renderer& renderer) {
 
         // Tessellate the hold body along its duration. Each sample gives an
         // angle (from the interpolated lane) and a radius (from timeDiff).
-        const int N = (h.transition == HoldTransition::Curve) ? 22 : 14;
+        const int N = (h.waypoints.size() > 1 || h.transition == HoldTransition::Curve) ? 36 : 16;
         const int span = std::clamp(h.laneSpan, 1, 3);
         const float halfA = 0.5f * span * laneAngular * 0.85f;
 
@@ -522,70 +574,167 @@ void LanotaRenderer::drawHoldBodies(Renderer& renderer) {
             return halfA + tri * spreadA * 0.5f;
         };
 
-        bool havePrev = false;
-        glm::vec2 prevIn{}, prevOut{};
+        // Render each time slice as a true angular arc slice on the ring —
+        // two points placed at (angle ± hA) on the circle of the note's
+        // current radius. Adjacent slices connect into a curved sector that
+        // follows the ring even when the hold stays in a single lane.
+        const bool holdActive = m_activeHoldIds.count(hb.noteId) > 0;
+        // Bright white-cyan core that blooms when the player is holding.
+        const glm::vec4 bodyColor = holdActive
+            ? glm::vec4{1.6f, 2.4f, 3.0f, 0.95f}
+            : glm::vec4{0.85f, 1.05f, 1.35f, 0.95f};
+
+        // ── Lanota-style hold body ─────────────────────────────────────────
+        // In real Lanota a hold body is a curved 2D track laid out on the
+        // disk: one end is the player's current expected position (the head
+        // on the hit ring), the other end is where the head will be at the
+        // tail's time. Lane shifts cause the track to bend across the disk,
+        // and the smooth Catmull-Rom evaluator gives Bezier-like corners.
+        //
+        // We sample N+1 points along the *remaining* hold duration. Each
+        // sample sits at (angle = lane→angle, radius = mapped from time)
+        // and the beam thickness is added by offsetting ±halfW along the
+        // local *path normal* in screen space, so the beam keeps a constant
+        // visual width even as it curves through tight bends.
+        const float innerEdge = INNER_RADIUS * m_diskScale;
+
+        // Real-time radius mapping: each part of the hold body sits at the
+        // radius given by its remaining travel time. Like a tap, samples
+        // spawn at the inner disk and slide outward; once a sample's absT
+        // catches up to the song time it pins to the hit ring. This lets
+        // the *whole* beam — head and body — fly out from the small inner
+        // disk instead of teleporting to the rim.
+        auto radiusForAbsT = [&](double absT) {
+            float td = static_cast<float>(absT - m_songTime);
+            float u  = std::clamp(td / APPROACH_SECS, 0.f, 1.f);
+            return hitRadius - u * (hitRadius - innerEdge);
+        };
+
+        // Visible portion: head end is max(headT, songTime) so once the head
+        // lands it pins to the rim; tail end is min(tailT, songTime+APPROACH)
+        // so the deepest visible sample sits just inside the inner disk.
+        const double absStart = std::max(static_cast<double>(headT), m_songTime);
+        const double absEnd   = std::min(static_cast<double>(tailT),
+                                         m_songTime + APPROACH_SECS);
+        if (absEnd <= absStart + 1e-6) continue;
+
+        // Sample the spine of the beam first. Centres are kept in screen
+        // space so we can offset perpendicular to the path tangent later.
+        struct Spine { glm::vec2 c; bool ok; };
+        std::vector<Spine> spine(N + 1);
         for (int i = 0; i <= N; ++i) {
-            float tOff = (float)i / (float)N * h.duration;
-            double absT = headT + tOff;
-            if (absT < m_songTime - 0.1) { havePrev = false; continue; }
-            if (absT > m_songTime + APPROACH_SECS) { havePrev = false; continue; }
+            double absT = absStart + (absEnd - absStart) * (double)i / (double)N;
+            float  tOff = std::clamp(static_cast<float>(absT - headT), 0.f, h.duration);
+            float lane = evalHoldLaneSmoothLanota(h, tOff);
+            float ang  = laneToAngle(lane) + m_rings.front().currentAngle
+                       - static_cast<float>(span - 1) * 0.5f * laneAngular;
+            float radius = radiusForAbsT(absT);
+            glm::vec3 w{ cosf(ang) * radius, sinf(ang) * radius, 0.f };
+            glm::vec4 c = m_perspVP * glm::vec4(w, 1.f);
+            if (c.w <= 0.f) { spine[i] = {{}, false}; continue; }
+            spine[i] = { w2s(w, m_perspVP, sw, sh), true };
+        }
 
-            float timeDiff = static_cast<float>(absT - m_songTime);
-            float travelT  = std::clamp(timeDiff / APPROACH_SECS, 0.f, 1.f);
-            float radius   = hitRadius - travelT * (hitRadius - (INNER_RADIUS * m_diskScale));
+        // Build inner/outer ribbon points by offsetting each spine sample
+        // perpendicular to its screen-space tangent. Constant pixel width.
+        const float coreHalfPx = 6.0f;
+        const float haloHalfPx = 13.0f;
+        struct Edge { glm::vec2 inC, outC, inH, outH; bool ok; };
+        std::vector<Edge> edges(N + 1);
+        for (int i = 0; i <= N; ++i) {
+            if (!spine[i].ok) { edges[i].ok = false; continue; }
+            // Tangent from neighbour samples (central difference).
+            int   ip = std::max(0, i - 1);
+            int   in = std::min(N, i + 1);
+            glm::vec2 a = spine[ip].ok ? spine[ip].c : spine[i].c;
+            glm::vec2 b = spine[in].ok ? spine[in].c : spine[i].c;
+            glm::vec2 t = b - a;
+            float len = std::hypot(t.x, t.y);
+            if (len < 1e-3f) { edges[i].ok = false; continue; }
+            t /= len;
+            glm::vec2 nrm{ -t.y, t.x };
+            edges[i].inC  = spine[i].c - nrm * coreHalfPx;
+            edges[i].outC = spine[i].c + nrm * coreHalfPx;
+            edges[i].inH  = spine[i].c - nrm * haloHalfPx;
+            edges[i].outH = spine[i].c + nrm * haloHalfPx;
+            edges[i].ok   = true;
+        }
 
-            float lane  = evalHoldLaneAt(h, tOff);
-            float angle = laneToAngle(lane) + m_rings.front().currentAngle
-                        - static_cast<float>(span - 1) * 0.5f * laneAngular;
-            float hA = halfAAt(tOff);
-
-            float aL = angle - hA;
-            float aR = angle + hA;
-            // Inner/outer edge of the arc tile
-            float radialHalf = (NOTE_WORLD_R * m_diskScale) * 0.55f;
-            float rIn  = radius - radialHalf;
-            float rOut = radius + radialHalf;
-
-            // Pick left/right points of the arc — this gives a ribbon that
-            // sweeps angularly along the hold path. Use the arc midpoint;
-            // ribbon thickness is purely radial here.
-            float ca = cosf(angle), sa = sinf(angle);
-            glm::vec3 wIn { ca * rIn,  sa * rIn,  0.f };
-            glm::vec3 wOut{ ca * rOut, sa * rOut, 0.f };
-            glm::vec4 cIn4  = m_perspVP * glm::vec4(wIn, 1.f);
-            glm::vec4 cOut4 = m_perspVP * glm::vec4(wOut, 1.f);
-            if (cIn4.w <= 0.f || cOut4.w <= 0.f) { havePrev = false; continue; }
-            glm::vec2 sIn  = w2s(wIn,  m_perspVP, sw, sh);
-            glm::vec2 sOut = w2s(wOut, m_perspVP, sw, sh);
-
-            // For rhomboid/angular width, also widen tangentially by offsetting
-            // the inner/outer points along the perpendicular direction.
-            glm::vec2 perp{-sa, ca};
-            float tangentOffset = hA * radius; // world-space arc length estimate
-            glm::vec3 wInL { wIn.x  + perp.x * tangentOffset, wIn.y  + perp.y * tangentOffset, 0.f };
-            glm::vec3 wOutL{ wOut.x + perp.x * tangentOffset, wOut.y + perp.y * tangentOffset, 0.f };
-            glm::vec3 wInR { wIn.x  - perp.x * tangentOffset, wIn.y  - perp.y * tangentOffset, 0.f };
-            glm::vec3 wOutR{ wOut.x - perp.x * tangentOffset, wOut.y - perp.y * tangentOffset, 0.f };
-            (void)sIn; (void)sOut;
-            glm::vec2 sInL  = w2s(wInL,  m_perspVP, sw, sh);
-            glm::vec2 sInR  = w2s(wInR,  m_perspVP, sw, sh);
-            glm::vec2 sOutL = w2s(wOutL, m_perspVP, sw, sh);
-            glm::vec2 sOutR = w2s(wOutR, m_perspVP, sw, sh);
-
-            // Midline used for the ribbon connection: average inner/outer
-            glm::vec2 centerL = (sInL + sOutL) * 0.5f;
-            glm::vec2 centerR = (sInR + sOutR) * 0.5f;
-
-            if (havePrev) {
+        // Halo pass first (dim/wide), then bright core on top.
+        auto drawRibbon = [&](float halfPx, glm::vec4 baseColor, bool isCore) {
+            (void)halfPx;
+            for (int i = 0; i + 1 <= N; ++i) {
+                if (!edges[i].ok || !edges[i + 1].ok) continue;
+                // Brightness ramps from dim tail to bright head.
+                float u = 1.f - (float)i / (float)N;   // 1 at head, 0 at tail
+                float fade = isCore ? (0.30f + 0.70f * (u * u))
+                                    : (0.18f + 0.50f * (u * u));
+                glm::vec4 col = baseColor;
+                col.a *= fade;
+                glm::vec2 inA  = isCore ? edges[i].inC     : edges[i].inH;
+                glm::vec2 outA = isCore ? edges[i].outC    : edges[i].outH;
+                glm::vec2 inB  = isCore ? edges[i + 1].inC : edges[i + 1].inH;
+                glm::vec2 outB = isCore ? edges[i + 1].outC: edges[i + 1].outH;
                 renderer.quads().drawQuadCorners(
-                    prevIn, prevOut, centerR, centerL,
-                    {0.3f, 0.8f, 1.f, 0.75f}, {0.f, 0.f, 1.f, 1.f},
+                    inA, outA, outB, inB,
+                    col, {0.f, 0.f, 1.f, 1.f},
                     renderer.whiteView(), renderer.whiteSampler(),
                     renderer.context(), renderer.descriptors());
             }
-            prevIn  = centerL;
-            prevOut = centerR;
-            havePrev = true;
+        };
+
+        const glm::vec4 haloColor = holdActive
+            ? glm::vec4{1.0f, 1.0f, 1.0f, 0.85f}
+            : glm::vec4{0.55f, 0.80f, 1.0f, 0.85f};
+        drawRibbon(haloHalfPx, haloColor, /*isCore=*/false);
+        drawRibbon(coreHalfPx, bodyColor, /*isCore=*/true);
+
+        // ── Head anchor: a small arc tile sitting on the rim where the
+        // beam meets the disk edge. Real Lanota holds keep this lens-shaped
+        // marker at the rim for the entire hold duration, so the player has
+        // a clear visual reference for the lane they must keep holding. The
+        // tile is built the same way as a tap-note arc tile: angularly
+        // tessellated curved sector that hugs the ring.
+        {
+            float headTOff = std::clamp(static_cast<float>(absStart - headT),
+                                        0.f, h.duration);
+            float headLane = evalHoldLaneSmoothLanota(h, headTOff);
+            float headAng  = laneToAngle(headLane) + m_rings.front().currentAngle
+                           - static_cast<float>(span - 1) * 0.5f * laneAngular;
+            float headHA   = 0.5f * span * laneAngular * 0.92f;
+            float headRad  = radiusForAbsT(absStart);   // travels with the note
+            float radHalf  = (NOTE_WORLD_R * m_diskScale) * 0.55f;
+            float innerR   = headRad - radHalf;
+            float outerR   = headRad + radHalf;
+            constexpr int HEAD_SEGS = 12;
+            glm::vec2 inPts[HEAD_SEGS + 1];
+            glm::vec2 outPts[HEAD_SEGS + 1];
+            bool      headOk = true;
+            for (int k = 0; k <= HEAD_SEGS && headOk; ++k) {
+                float t  = (float)k / (float)HEAD_SEGS;
+                float a  = headAng - headHA + t * (2.f * headHA);
+                float ca = cosf(a), sa = sinf(a);
+                glm::vec3 wIn { ca * innerR, sa * innerR, 0.f };
+                glm::vec3 wOut{ ca * outerR, sa * outerR, 0.f };
+                glm::vec4 cI = m_perspVP * glm::vec4(wIn,  1.f);
+                glm::vec4 cO = m_perspVP * glm::vec4(wOut, 1.f);
+                if (cI.w <= 0.f || cO.w <= 0.f) { headOk = false; break; }
+                inPts[k]  = w2s(wIn,  m_perspVP, sw, sh);
+                outPts[k] = w2s(wOut, m_perspVP, sw, sh);
+            }
+            if (headOk) {
+                glm::vec4 headCol = holdActive
+                    ? glm::vec4{1.6f, 2.2f, 2.8f, 1.0f}
+                    : glm::vec4{0.95f, 1.10f, 1.45f, 1.0f};
+                for (int k = 0; k < HEAD_SEGS; ++k) {
+                    renderer.quads().drawQuadCorners(
+                        inPts[k],  outPts[k],
+                        outPts[k + 1], inPts[k + 1],
+                        headCol, {0.f, 0.f, 1.f, 1.f},
+                        renderer.whiteView(), renderer.whiteSampler(),
+                        renderer.context(), renderer.descriptors());
+                }
+            }
         }
 
         // Sample-point markers
@@ -797,15 +946,15 @@ void LanotaRenderer::showJudgment(int lane, Judgment judgment) {
         case Judgment::Bad:     pColor = {1.f,  0.25f, 0.2f, 1.f}; pCount = 8;  break;
         default: return;
     }
-    // Position the burst on the innermost ring at the lane's angle — that's
-    // where the hold body is currently touching the hit line in Lanota mode.
+    // Position the burst on the outer hit ring at the lane's angle — that's
+    // where the hold head sits during the hold, on the close (large) disk.
     float sw = static_cast<float>(m_width);
     float sh = static_cast<float>(m_height);
-    // Use the first ring's angle offset so it matches the hold body drawn path.
     float ringAngleOffset = m_rings.empty() ? 0.f : m_rings.front().currentAngle;
+    float hitR            = m_rings.empty() ? 1.f : m_rings.front().radius;
     float angle = targetAngle + ringAngleOffset;
-    glm::vec3 world{cosf(angle) * (INNER_RADIUS * m_diskScale),
-                    sinf(angle) * (INNER_RADIUS * m_diskScale),
+    glm::vec3 world{cosf(angle) * hitR,
+                    sinf(angle) * hitR,
                     0.f};
     glm::vec4 clip = m_perspVP * glm::vec4(world, 1.f);
     if (clip.w <= 0.f) return;
