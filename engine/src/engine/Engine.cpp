@@ -534,6 +534,11 @@ void Engine::launchGameplay(const SongInfo& song, Difficulty difficulty,
     m_pendingAudioPath = audioPath;
     m_currentAudioPath = audioPath;
 
+    // If the previous gameplay exited via the pause menu the clock is still
+    // paused; without this resume tick() returns 0 forever, songTime stays
+    // at -leadIn, loadAudio never fires, and the new run looks frozen.
+    m_clock.resume();
+
     switchLayer(EditorLayer::GamePlay);
 
     std::cout << "[Engine] Gameplay started: " << song.name
@@ -563,6 +568,9 @@ void Engine::launchGameplayDirect(const SongInfo& song, const ChartData& chart,
     m_audioStarted = false;
     m_pendingAudioPath = song.audioFile.empty() ? "" : audioPath;
     m_currentAudioPath = m_pendingAudioPath;
+
+    // See launchGameplay — same clock-resume fix.
+    m_clock.resume();
 
     switchLayer(EditorLayer::GamePlay);
 

@@ -16,18 +16,22 @@ public:
 
 private:
     struct ArcMesh {
-        Mesh     mesh;
+        Mesh     mesh;        // hexagonal prism tracing the arc
+        Mesh     shadow;      // flat ribbon on the ground directly below
         ArcData  data;
         double   startTime;
     };
 
     Mesh buildDynamicArcMesh(Renderer& renderer);
+    Mesh buildDynamicArcShadowMesh(Renderer& renderer);
     Mesh buildGroundMesh(Renderer& renderer);
     Mesh buildTapMesh(Renderer& renderer);
     Mesh buildGateMesh(Renderer& renderer, float skyHeight);
     Mesh buildArcTapMesh(Renderer& renderer);
+    Mesh buildArcTapShadowMesh(Renderer& renderer);
     glm::vec2 evalArc(const ArcData& arc, float t) const;
     void writeArcVertices(ArcMesh& am, float tClip);
+    void writeArcShadowVertices(ArcMesh& am, float tClip);
 
     Renderer* m_renderer = nullptr;
     Camera    m_camera;
@@ -38,6 +42,7 @@ private:
     Mesh m_tapMesh;
     Mesh m_gateMesh;
     Mesh m_arcTapMesh;
+    Mesh m_arcTapShadowMesh;
 
     struct HitEvent {
         double    time;
@@ -62,4 +67,9 @@ private:
     static constexpr float LANE_FAR_Z        = -60.f; // lane back edge (far)
     static constexpr float JUDGMENT_Z        = 0.f;   // lane front edge / judgment plane
     static constexpr int   ARC_SEGMENTS      = 32;
+    // Arcs are drawn as hexagonal prisms (6-sided polygonal columns) tracing
+    // along the arc centerline. Per-segment cross-section is a regular hexagon
+    // of `ARC_RADIUS` in the xy plane, centered on the curve at each z sample.
+    static constexpr int   ARC_SIDES         = 6;
+    static constexpr float ARC_RADIUS        = 0.15f;
 };

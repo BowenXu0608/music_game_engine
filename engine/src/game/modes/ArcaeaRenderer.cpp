@@ -18,7 +18,9 @@ void ArcaeaRenderer::onInit(Renderer& renderer, const ChartData& chart,
             am.data      = std::get<ArcData>(note.data);
             am.startTime = note.time;
             am.mesh      = buildDynamicArcMesh(renderer);
+            am.shadow    = buildDynamicArcShadowMesh(renderer);
             writeArcVertices(am, 0.f);
+            writeArcShadowVertices(am, 0.f);
             m_arcs.push_back(std::move(am));
         } else if (note.type == NoteType::Tap || note.type == NoteType::Flick) {
             m_tapNotes.push_back(note);
@@ -41,7 +43,8 @@ void ArcaeaRenderer::onInit(Renderer& renderer, const ChartData& chart,
     m_groundMesh = buildGroundMesh(renderer);
     m_tapMesh    = buildTapMesh(renderer);
     m_gateMesh   = buildGateMesh(renderer, m_skyHeight);
-    m_arcTapMesh = buildArcTapMesh(renderer);
+    m_arcTapMesh       = buildArcTapMesh(renderer);
+    m_arcTapShadowMesh = buildArcTapShadowMesh(renderer);
 
     // Pre-compute a (time → sky world-position) table for sky-only events:
     // arctaps and arc start/end boundaries. Engine clamps arc/arctap lane
@@ -96,6 +99,7 @@ void ArcaeaRenderer::onUpdate(float dt, double songTime) {
         else if (songRel >= am.data.duration) tClip = 1.f;
         else                                   tClip = static_cast<float>(songRel / am.data.duration);
         writeArcVertices(am, tClip);
+        writeArcShadowVertices(am, tClip);
     }
 }
 
@@ -119,6 +123,87 @@ glm::vec2 ArcaeaRenderer::evalArc(const ArcData& arc, float t) const {
 Mesh ArcaeaRenderer::buildDynamicArcMesh(Renderer& renderer) {
     // Vertex buffer is host-mapped so we can memcpy a new shape every frame
     // without going through staging (staging uses vkQueueWaitIdle per upload).
+    //
+    // Hexagonal prism: (ARC_SEGMENTS + 1) rings, each with ARC_SIDES vertices
+    // around the cross-section. Each segment joins ring i to ring i+1 with
+    // ARC_SIDES side quads (2 triangles per quad).
+    const size_t vertCount = static_cast<size_t>(ARC_SEGMENTS + 1) * ARC_SIDES;
+    const size_t idxCount  = static_cast<size_t>(ARC_SEGMENTS) * ARC_SIDES * 6;
+
+    Mesh mesh;
+    mesh.indexCount   = static_cast<uint32_t>(idxCount);
+    mesh.vertexBuffer = renderer.buffers().createDynamicBuffer(
+        sizeof(MeshVertex) * vertCount, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
+    mesh.indexBuffer  = renderer.buffers().createDeviceBuffer(
+        sizeof(uint32_t) * idxCount, VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
+
+    // Per segment i, per side s: emit the quad between ring[i][s],
+    // ring[i][s+1], ring[i+1][s], ring[i+1][s+1]. Winding CCW viewed from
+    // outside so backface culling (if enabled upstream) keeps the outer
+    // hull visible.
+    std::vector<uint32_t> indices;
+    indices.reserve(idxCount);
+    for (int i = 0; i < ARC_SEGMENTS; ++i) {
+        uint32_t ringA = static_cast<uint32_t>(i)     * ARC_SIDES;
+        uint32_t ringB = static_cast<uint32_t>(i + 1) * ARC_SIDES;
+        for (int s = 0; s < ARC_SIDES; ++s) {
+            uint32_t sNext = (s + 1) % ARC_SIDES;
+            uint32_t a0 = ringA + s;
+            uint32_t a1 = ringA + sNext;
+            uint32_t b0 = ringB + s;
+            uint32_t b1 = ringB + sNext;
+            indices.insert(indices.end(), {a0, a1, b1, a0, b1, b0});
+        }
+    }
+    renderer.buffers().uploadToBuffer(renderer.context(), mesh.indexBuffer,
+                                      indices.data(), sizeof(uint32_t) * idxCount);
+    return mesh;
+}
+
+void ArcaeaRenderer::writeArcVertices(ArcMesh& am, float tClip) {
+    const glm::vec4 color = am.data.color == 0
+        ? glm::vec4{0.4f, 0.8f, 1.f, 0.9f}
+        : glm::vec4{1.f, 0.4f, 0.7f, 0.9f};
+
+    // Precompute hexagon cross-section offsets (local xy, unit radius).
+    glm::vec2 ringDir[ARC_SIDES];
+    for (int s = 0; s < ARC_SIDES; ++s) {
+        float a = (static_cast<float>(s) / ARC_SIDES) * 6.2831853f;
+        ringDir[s] = {std::cos(a), std::sin(a)};
+    }
+
+    std::vector<MeshVertex> verts;
+    verts.reserve(static_cast<size_t>(ARC_SEGMENTS + 1) * ARC_SIDES);
+    for (int i = 0; i <= ARC_SEGMENTS; ++i) {
+        float frac = static_cast<float>(i) / ARC_SEGMENTS;
+        float t    = tClip + (1.f - tClip) * frac;
+        float z    = -t * static_cast<float>(am.data.duration) * SCROLL_SPEED;
+        glm::vec2 xy = evalArc(am.data, t);
+
+        for (int s = 0; s < ARC_SIDES; ++s) {
+            MeshVertex v{};
+            v.pos = {xy.x + ringDir[s].x * ARC_RADIUS,
+                     xy.y + ringDir[s].y * ARC_RADIUS,
+                     z};
+            // Outward radial normal — mesh.frag's rim-glow (1 - |n.z|)^3 * 2
+            // picks up every side face, giving the tube its glowing-edge
+            // look. Because normals span xy rather than point at camera the
+            // lighting is uniform across the whole visible ring instead of
+            // flat, which reads as a 3D column rather than a ribbon.
+            v.normal = {ringDir[s].x, ringDir[s].y, 0.f};
+            v.color  = color;
+            v.uv     = {static_cast<float>(s) / ARC_SIDES, t};
+            verts.push_back(v);
+        }
+    }
+
+    std::memcpy(am.mesh.vertexBuffer.mapped, verts.data(),
+                sizeof(MeshVertex) * verts.size());
+}
+
+Mesh ArcaeaRenderer::buildDynamicArcShadowMesh(Renderer& renderer) {
+    // Flat 2-vertex-per-ring ribbon on the ground, same segment count as the
+    // arc so it can track the arc's xy projection sample-for-sample.
     const size_t vertCount = static_cast<size_t>(ARC_SEGMENTS + 1) * 2;
     const size_t idxCount  = static_cast<size_t>(ARC_SEGMENTS) * 6;
 
@@ -140,14 +225,19 @@ Mesh ArcaeaRenderer::buildDynamicArcMesh(Renderer& renderer) {
     return mesh;
 }
 
-void ArcaeaRenderer::writeArcVertices(ArcMesh& am, float tClip) {
-    const float width = 0.35f;
+void ArcaeaRenderer::writeArcShadowVertices(ArcMesh& am, float tClip) {
+    // Shadow color = dim arc-color tint on the ground. Camera-facing normal so
+    // the shader's rim glow stays at 0 and the shadow stays flat (dark) instead
+    // of lighting up like the tube above it.
     const glm::vec4 color = am.data.color == 0
-        ? glm::vec4{0.4f, 0.8f, 1.f, 0.9f}
-        : glm::vec4{1.f, 0.4f, 0.7f, 0.9f};
+        ? glm::vec4{0.08f, 0.22f, 0.35f, 0.55f}
+        : glm::vec4{0.30f, 0.08f, 0.22f, 0.55f};
+    const glm::vec3 n{0.f, 0.f, 1.f};
+    const float y      = GROUND_Y + 0.02f;          // tiny lift to dodge z-fight
+    const float hw     = ARC_RADIUS;                 // half-width of shadow band
 
     std::vector<MeshVertex> verts;
-    verts.reserve((ARC_SEGMENTS + 1) * 2);
+    verts.reserve(static_cast<size_t>(ARC_SEGMENTS + 1) * 2);
     for (int i = 0; i <= ARC_SEGMENTS; ++i) {
         float frac = static_cast<float>(i) / ARC_SEGMENTS;
         float t    = tClip + (1.f - tClip) * frac;
@@ -155,13 +245,9 @@ void ArcaeaRenderer::writeArcVertices(ArcMesh& am, float tClip) {
         glm::vec2 xy = evalArc(am.data, t);
 
         MeshVertex vL{}, vR{};
-        vL.pos    = {xy.x - width * 0.5f, xy.y, z};
-        vR.pos    = {xy.x + width * 0.5f, xy.y, z};
-        // Camera-facing normal: mesh.frag's rim-glow is 1 - |dot(n, {0,0,1})|,
-        // so {0,0,1} gives rim=0 and the base vertex color passes through
-        // unmodified. A {0,1,0} normal would push rim=1 and triple the color,
-        // saturating arcs (and the taps they're near) to pure white.
-        vL.normal = vR.normal = {0.f, 0.f, 1.f};
+        vL.pos = {xy.x - hw, y, z};
+        vR.pos = {xy.x + hw, y, z};
+        vL.normal = vR.normal = n;
         vL.color  = vR.color  = color;
         vL.uv     = {0.f, t};
         vR.uv     = {1.f, t};
@@ -169,7 +255,7 @@ void ArcaeaRenderer::writeArcVertices(ArcMesh& am, float tClip) {
         verts.push_back(vR);
     }
 
-    std::memcpy(am.mesh.vertexBuffer.mapped, verts.data(),
+    std::memcpy(am.shadow.vertexBuffer.mapped, verts.data(),
                 sizeof(MeshVertex) * verts.size());
 }
 
@@ -235,18 +321,54 @@ Mesh ArcaeaRenderer::buildGateMesh(Renderer& renderer, float skyHeight) {
 }
 
 Mesh ArcaeaRenderer::buildArcTapMesh(Renderer& renderer) {
-    // Thin horizontal bar in the XY plane, camera-facing — the Arcaea
-    // reference ArcTap is a glowing pill suspended in the sky. We center
-    // on (0, 0) so the draw-time translate places it at (arcX, arcY).
-    float hw = 0.32f;  // horizontal half-length
-    float hh = 0.08f;  // vertical half-thickness
-    const glm::vec3 n{0.f, 0.f, 1.f};   // camera-facing, no rim blowout
-    const glm::vec4 col{1.0f, 1.0f, 1.0f, 1.0f}; // white core
+    // Flat rectangular prism suspended in the sky — matches the Arcaea
+    // reference where the ArcTap reads as a thin horizontal slab (wide in x,
+    // thin in y, shallow in z). Centered on (0,0,0) so the draw-time translate
+    // places it at (arcX, arcY, z). Per-face outward normals give each face
+    // its own rim-glow contribution so the slab reads as 3D.
+    const float hw = 0.32f;   // half width  (x)
+    const float hh = 0.05f;   // half height (y)
+    const float hd = 0.12f;   // half depth  (z) — shallow so it stays flat
+    const glm::vec4 col{1.0f, 1.0f, 1.0f, 1.0f};
+
+    std::vector<MeshVertex> verts;
+    std::vector<uint32_t>   indices;
+    auto addFace = [&](glm::vec3 p0, glm::vec3 p1, glm::vec3 p2, glm::vec3 p3,
+                       glm::vec3 n) {
+        uint32_t b = static_cast<uint32_t>(verts.size());
+        verts.push_back({p0, n, {0,0}, col});
+        verts.push_back({p1, n, {1,0}, col});
+        verts.push_back({p2, n, {1,1}, col});
+        verts.push_back({p3, n, {0,1}, col});
+        indices.insert(indices.end(), {b, b+1, b+2, b+2, b+3, b});
+    };
+
+    // Front (+z) and Back (-z)
+    addFace({-hw,-hh, hd},{ hw,-hh, hd},{ hw, hh, hd},{-hw, hh, hd}, { 0, 0, 1});
+    addFace({ hw,-hh,-hd},{-hw,-hh,-hd},{-hw, hh,-hd},{ hw, hh,-hd}, { 0, 0,-1});
+    // Top (+y) and Bottom (-y)
+    addFace({-hw, hh, hd},{ hw, hh, hd},{ hw, hh,-hd},{-hw, hh,-hd}, { 0, 1, 0});
+    addFace({-hw,-hh,-hd},{ hw,-hh,-hd},{ hw,-hh, hd},{-hw,-hh, hd}, { 0,-1, 0});
+    // Right (+x) and Left (-x)
+    addFace({ hw,-hh, hd},{ hw,-hh,-hd},{ hw, hh,-hd},{ hw, hh, hd}, { 1, 0, 0});
+    addFace({-hw,-hh,-hd},{-hw,-hh, hd},{-hw, hh, hd},{-hw, hh,-hd}, {-1, 0, 0});
+
+    return renderer.meshes().createMesh(renderer.context(), renderer.buffers(), verts, indices);
+}
+
+Mesh ArcaeaRenderer::buildArcTapShadowMesh(Renderer& renderer) {
+    // Flat quad on the ground directly below where the arctap renders. Sized
+    // to roughly match the arctap's x/z footprint (not its thin y height).
+    const float hw = 0.36f;
+    const float hd = 0.14f;
+    const float y  = GROUND_Y + 0.02f;
+    const glm::vec3 n{0.f, 0.f, 1.f};
+    const glm::vec4 col{0.05f, 0.08f, 0.15f, 0.55f};
     std::vector<MeshVertex> verts = {
-        {{-hw, -hh, 0.f}, n, {0,0}, col},
-        {{ hw, -hh, 0.f}, n, {1,0}, col},
-        {{ hw,  hh, 0.f}, n, {1,1}, col},
-        {{-hw,  hh, 0.f}, n, {0,1}, col},
+        {{-hw, y, -hd}, n, {0,0}, col},
+        {{ hw, y, -hd}, n, {1,0}, col},
+        {{ hw, y,  hd}, n, {1,1}, col},
+        {{-hw, y,  hd}, n, {0,1}, col},
     };
     std::vector<uint32_t> indices = {0,1,2, 2,3,0};
     return renderer.meshes().createMesh(renderer.context(), renderer.buffers(), verts, indices);
@@ -307,9 +429,9 @@ void ArcaeaRenderer::onRender(Renderer& renderer) {
         renderer.meshes().drawMesh(m_tapMesh, model, tint);
     }
 
-    // ArcTaps — camera-facing glowing bars floating in the sky. Positioned
-    // at (arcX, arcY) in normalized [0,1] space, mapped to world coords
-    // through the same LANE_HALF_WIDTH / skyHeight transform the arcs use.
+    // ArcTaps — flat rectangular prisms floating in the sky at (arcX, arcY)
+    // in normalized [0,1] space. Also drop a flat shadow quad directly below
+    // the tap on the ground plane so the player has a depth cue.
     for (auto& note : m_arcTaps) {
         float z = static_cast<float>(note.time - m_songTime) * SCROLL_SPEED;
         if (z < 0.f || z > 30.f) continue;
@@ -317,6 +439,12 @@ void ArcaeaRenderer::onRender(Renderer& renderer) {
         if (!tap) continue;
         float wx = (tap->laneX * 2.f - 1.f) * LANE_HALF_WIDTH;
         float wy = GROUND_Y + tap->scanY * m_skyHeight;
+
+        // Shadow on the ground beneath the tap — same x/z, y locked to ground.
+        glm::mat4 shadowModel = glm::translate(glm::mat4(1.f),
+            {wx, 0.f, JUDGMENT_Z - z});
+        renderer.meshes().drawMesh(m_arcTapShadowMesh, shadowModel, {1, 1, 1, 1});
+
         glm::mat4 model = glm::translate(glm::mat4(1.f), {wx, wy, JUDGMENT_Z - z});
         renderer.meshes().drawMesh(m_arcTapMesh, model, {1, 1, 1, 1});
     }
@@ -333,7 +461,9 @@ void ArcaeaRenderer::onRender(Renderer& renderer) {
         float zOffset = static_cast<float>(am.startTime - m_songTime) * SCROLL_SPEED;
         if (zOffset > 30.f) continue;
         glm::mat4 model = glm::translate(glm::mat4(1.f), {0.f, 0.f, -zOffset});
-        renderer.meshes().drawMesh(am.mesh, model, {1,1,1,1});
+        // Shadow first so the bright tube draws on top.
+        renderer.meshes().drawMesh(am.shadow, model, {1,1,1,1});
+        renderer.meshes().drawMesh(am.mesh,   model, {1,1,1,1});
     }
 }
 
@@ -342,8 +472,11 @@ void ArcaeaRenderer::onShutdown(Renderer& renderer) {
     renderer.meshes().destroyMesh(renderer.buffers(), m_tapMesh);
     renderer.meshes().destroyMesh(renderer.buffers(), m_gateMesh);
     renderer.meshes().destroyMesh(renderer.buffers(), m_arcTapMesh);
-    for (auto& am : m_arcs)
+    renderer.meshes().destroyMesh(renderer.buffers(), m_arcTapShadowMesh);
+    for (auto& am : m_arcs) {
         renderer.meshes().destroyMesh(renderer.buffers(), am.mesh);
+        renderer.meshes().destroyMesh(renderer.buffers(), am.shadow);
+    }
     m_arcs.clear();
     m_tapNotes.clear();
     m_arcTaps.clear();
