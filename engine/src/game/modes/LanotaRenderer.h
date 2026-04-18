@@ -1,7 +1,9 @@
 #pragma once
 #include "GameModeRenderer.h"
+#include "renderer/Material.h"
 #include <vector>
 #include <unordered_set>
+#include <unordered_map>
 #include <optional>
 #include <glm/glm.hpp>
 
@@ -151,4 +153,8 @@ private:
     static constexpr float NOTE_WORLD_R   = 0.22f; // note visual radius in world units
     static constexpr float APPROACH_SECS  = 2.0f;  // seconds to travel inner → outer
     static constexpr float FOV_Y_DEG      = 60.f;
+
+    // Per-slot chart material overrides.
+    std::unordered_map<uint16_t, Material> m_chartMaterials;
+    glm::vec4 slotTint(uint16_t slot, glm::vec4 fallbackRGBA) const;
 };

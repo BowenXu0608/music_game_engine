@@ -1,7 +1,7 @@
 #version 450
 
-// NOTE: Superseded by quad_unlit.frag. Kept for backward-compat with any
-// leftover references. Identical to quad_unlit.frag.
+// Scroll: animates the sampled UV over time.
+//   params = [uSpeed, vSpeed, uTile, vTile]
 
 layout(set = 0, binding = 0) uniform FrameUBO {
     mat4  viewProj;
@@ -25,7 +25,10 @@ layout(location = 1) in vec4 fragColor;
 layout(location = 0) out vec4 outColor;
 
 void main() {
-    vec4 texColor = texture(texSampler, fragUV);
-    outColor = texColor * fragColor;
+    vec2 tile  = vec2(pc.params.z > 0.0 ? pc.params.z : 1.0,
+                      pc.params.w > 0.0 ? pc.params.w : 1.0);
+    vec2 uv    = fragUV * tile + ubo.time * pc.params.xy;
+    vec4 texC  = texture(texSampler, uv);
+    outColor = texC * fragColor;
     if (outColor.a < 0.01) discard;
 }

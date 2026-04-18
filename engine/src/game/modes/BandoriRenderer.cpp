@@ -1,10 +1,51 @@
 #include "BandoriRenderer.h"
 #include "renderer/Renderer.h"
+#include "renderer/Material.h"
 #include "ui/ProjectHub.h"
 #include <glm/gtc/matrix_transform.hpp>
 #include <cmath>
 #include <algorithm>
 #include <vector>
+
+namespace {
+constexpr float kActiveHoldGlowIntensity = 1.0f;
+
+// Slot ids mirror MaterialSlots.cpp::kBandoriSlots.
+enum BandoriSlot : uint16_t {
+    SlotTapNote        = 0,
+    SlotHoldBody       = 1,
+    SlotHoldBodyActive = 2,
+    SlotHoldHead       = 3,
+    SlotHoldHeadActive = 4,
+    SlotFlickNote      = 5,
+    SlotDragNote       = 6,
+    SlotSlideNote      = 7,
+    SlotSampleMarker   = 8,
+    SlotLaneDivider    = 9,
+    SlotHitZoneLine    = 10,
+    SlotHitZoneGlow    = 11,
+    SlotTrackSurface   = 12,
+};
+
+MaterialKind kindFromString(const std::string& s) {
+    if (s == "glow")     return MaterialKind::Glow;
+    if (s == "scroll")   return MaterialKind::Scroll;
+    if (s == "pulse")    return MaterialKind::Pulse;
+    if (s == "gradient") return MaterialKind::Gradient;
+    return MaterialKind::Unlit;
+}
+} // namespace
+
+Material BandoriRenderer::slotOrFallback(uint16_t slot, const Material& fallback) const {
+    auto it = m_chartMaterials.find(slot);
+    if (it == m_chartMaterials.end()) return fallback;
+    Material m = it->second;
+    // Texture/sampler come from the fallback (texture resolution by path is
+    // Phase 3 work — right now every chart material shares the white texture).
+    m.texture = fallback.texture;
+    m.sampler = fallback.sampler;
+    return m;
+}
 
 // Project world pos → screen coords (y=0 bottom, y=h top) using the perspective VP.
 // With Vulkan-corrected perspective (proj[1][1] *= -1):
@@ -30,6 +71,16 @@ void BandoriRenderer::onInit(Renderer& renderer, const ChartData& chart,
                              const GameModeConfig* config) {
     m_renderer = &renderer;
     m_notes = chart.notes;
+
+    // Import per-slot material overrides from the chart.
+    m_chartMaterials.clear();
+    for (const auto& md : chart.materials) {
+        Material mat;
+        mat.kind = kindFromString(md.kind);
+        mat.tint   = {md.tint[0],   md.tint[1],   md.tint[2],   md.tint[3]};
+        mat.params = {md.params[0], md.params[1], md.params[2], md.params[3]};
+        m_chartMaterials[md.slot] = mat;
+    }
 
     // Apply camera config
     if (config) {
@@ -95,12 +146,36 @@ void BandoriRenderer::onRender(Renderer& renderer) {
     float sw = static_cast<float>(m_width);
     float sh = static_cast<float>(m_height);
 
+    // Track surface — filled trapezoid behind the dividers, spanning from the
+    // leftmost lane edge to the rightmost, near plane to vanishing point.
+    {
+        float leftX  = -(m_laneCount * 0.5f) * m_laneSpacing;
+        float rightX =  (m_laneCount * 0.5f) * m_laneSpacing;
+        glm::vec2 sNL = w2s({leftX,  0.f, HIT_ZONE_Z}, m_perspVP, sw, sh);
+        glm::vec2 sNR = w2s({rightX, 0.f, HIT_ZONE_Z}, m_perspVP, sw, sh);
+        glm::vec2 sFR = w2s({rightX, 0.f, APPROACH_Z}, m_perspVP, sw, sh);
+        glm::vec2 sFL = w2s({leftX,  0.f, APPROACH_Z}, m_perspVP, sw, sh);
+        Material trackDefault;
+        trackDefault.kind    = MaterialKind::Unlit;
+        trackDefault.tint    = {0.08f, 0.10f, 0.18f, 0.8f};
+        trackDefault.texture = renderer.whiteView();
+        trackDefault.sampler = renderer.whiteSampler();
+        Material trackMat = slotOrFallback(SlotTrackSurface, trackDefault);
+        renderer.quads().drawQuadCorners(
+            sNL, sNR, sFR, sFL,
+            trackMat, {0.f, 0.f, 1.f, 1.f},
+            renderer.context(), renderer.descriptors());
+    }
+
     // Lane dividers converge to vanishing point — one edge line per boundary
+    Material laneDefault;
+    laneDefault.tint = {1.f, 1.f, 1.f, 0.2f};
+    glm::vec4 laneTint = slotOrFallback(SlotLaneDivider, laneDefault).tint;
     for (int i = 0; i <= m_laneCount; ++i) {
         float wx   = (i - m_laneCount * 0.5f) * m_laneSpacing;
         glm::vec2 nearPt = w2s({wx, 0.f, HIT_ZONE_Z}, m_perspVP, sw, sh);
         glm::vec2 farPt  = w2s({wx, 0.f, APPROACH_Z}, m_perspVP, sw, sh);
-        renderer.lines().drawLine(nearPt, farPt, 1.5f, {1.f, 1.f, 1.f, 0.2f});
+        renderer.lines().drawLine(nearPt, farPt, 1.5f, laneTint);
     }
 
     // Hit zone line across all lanes (bright, thick)
@@ -109,8 +184,12 @@ void BandoriRenderer::onRender(Renderer& renderer) {
         float rightX =  (m_laneCount * 0.5f) * m_laneSpacing;
         glm::vec2 l = w2s({leftX,  0.f, HIT_ZONE_Z}, m_perspVP, sw, sh);
         glm::vec2 r = w2s({rightX, 0.f, HIT_ZONE_Z}, m_perspVP, sw, sh);
-        renderer.lines().drawLine(l, r, 4.f, {1.f, 0.9f, 0.2f, 1.f});  // bright yellow
-        renderer.lines().drawLine(l, r, 8.f, {1.f, 0.9f, 0.2f, 0.3f}); // glow
+        Material hzLineDefault;  hzLineDefault.tint = {1.f, 0.9f, 0.2f, 1.f};
+        Material hzGlowDefault;  hzGlowDefault.tint = {1.f, 0.9f, 0.2f, 0.3f};
+        glm::vec4 hzLineTint = slotOrFallback(SlotHitZoneLine, hzLineDefault).tint;
+        glm::vec4 hzGlowTint = slotOrFallback(SlotHitZoneGlow, hzGlowDefault).tint;
+        renderer.lines().drawLine(l, r, 4.f, hzLineTint);  // bright yellow
+        renderer.lines().drawLine(l, r, 8.f, hzGlowTint);  // glow
     }
 
     // ── Hold bodies (draw before heads so the head marker sits on top) ──────
@@ -170,11 +249,22 @@ void BandoriRenderer::onRender(Renderer& renderer) {
             return baseHalf + tri * spread * 0.5f;
         };
 
-        // While the hold is actively being held, push RGB above 1.0 so the
-        // bloom post-process picks it up as a glow. Otherwise render normal.
-        const glm::vec4 holdBodyColor = holdActive
-            ? glm::vec4{0.6f, 2.4f, 3.0f, 0.95f}   // bright cyan → blooms
-            : glm::vec4{0.2f, 0.8f, 1.f, 0.85f};
+        // While the hold is actively being held, use the Glow material so the
+        // shader adds an emissive boost the bloom post-process picks up.
+        // Otherwise render plain Unlit. Chart overrides (if present) win.
+        Material holdBodyDefault;
+        holdBodyDefault.texture = renderer.whiteView();
+        holdBodyDefault.sampler = renderer.whiteSampler();
+        if (holdActive) {
+            holdBodyDefault.kind     = MaterialKind::Glow;
+            holdBodyDefault.tint     = {0.3f, 0.8f, 1.f, 0.95f};
+            holdBodyDefault.params.x = kActiveHoldGlowIntensity;
+        } else {
+            holdBodyDefault.kind = MaterialKind::Unlit;
+            holdBodyDefault.tint = {0.2f, 0.8f, 1.f, 0.85f};
+        }
+        Material holdBodyMat = slotOrFallback(
+            holdActive ? SlotHoldBodyActive : SlotHoldBody, holdBodyDefault);
 
         // Tessellate the *visible* portion of the hold uniformly. Previously
         // we sampled tOff in [0, dur] and culled out-of-window segments,
@@ -282,8 +372,7 @@ void BandoriRenderer::onRender(Renderer& renderer) {
                 glm::vec2 sL  = w2s(L,     m_perspVP, sw, sh);
                 renderer.quads().drawQuadCorners(
                     sPL, sPR, sR, sL,
-                    holdBodyColor, {0.f, 0.f, 1.f, 1.f},
-                    renderer.whiteView(), renderer.whiteSampler(),
+                    holdBodyMat, {0.f, 0.f, 1.f, 1.f},
                     renderer.context(), renderer.descriptors());
             }
             prevL = L; prevR = R; havePrev = true;
@@ -307,13 +396,18 @@ void BandoriRenderer::onRender(Renderer& renderer) {
             glm::vec3 wNR{wx + r, 0.f, wz + r};
             glm::vec3 wFR{wx + r, 0.f, wz - r};
             glm::vec3 wFL{wx - r, 0.f, wz - r};
+            Material sampleDefault;
+            sampleDefault.kind    = MaterialKind::Unlit;
+            sampleDefault.tint    = {1.f, 0.95f, 0.3f, 0.95f};
+            sampleDefault.texture = renderer.whiteView();
+            sampleDefault.sampler = renderer.whiteSampler();
+            Material sampleMat = slotOrFallback(SlotSampleMarker, sampleDefault);
             renderer.quads().drawQuadCorners(
                 w2s(wNL, m_perspVP, sw, sh),
                 w2s(wNR, m_perspVP, sw, sh),
                 w2s(wFR, m_perspVP, sw, sh),
                 w2s(wFL, m_perspVP, sw, sh),
-                {1.f, 0.95f, 0.3f, 0.95f}, {0.f, 0.f, 1.f, 1.f},
-                renderer.whiteView(), renderer.whiteSampler(),
+                sampleMat, {0.f, 0.f, 1.f, 1.f},
                 renderer.context(), renderer.descriptors());
         }
     }
@@ -363,20 +457,33 @@ void BandoriRenderer::onRender(Renderer& renderer) {
         float nearW = std::abs(sNR.x - sNL.x);
         if (nearW < 2.f) continue;
 
-        glm::vec4 color = {1.f, 0.8f, 0.2f, 1.f};          // Tap: yellow
-        if (note.type == NoteType::Hold)  color = m_activeHoldIds.count(note.id)
-                                              ? glm::vec4{0.6f, 2.4f, 3.0f, 1.f}   // active → bloom
-                                              : glm::vec4{0.2f, 0.8f, 1.f, 1.f};   // Hold: cyan
-        if (note.type == NoteType::Flick) color = {1.f, 0.3f, 0.3f, 1.f};   // Flick: red
-        if (note.type == NoteType::Drag)  color = {0.6f, 1.f, 0.4f, 0.85f}; // Drag: green
-        if (note.type == NoteType::Slide) color = {0.8f, 0.4f, 1.f, 1.f};   // Slide: purple
+        Material headDefault;
+        headDefault.kind    = MaterialKind::Unlit;
+        headDefault.texture = renderer.whiteView();
+        headDefault.sampler = renderer.whiteSampler();
+        headDefault.tint    = {1.f, 0.8f, 0.2f, 1.f};          // Tap: yellow
+        uint16_t headSlot = SlotTapNote;
+        if (note.type == NoteType::Hold) {
+            if (m_activeHoldIds.count(note.id)) {
+                headDefault.kind     = MaterialKind::Glow;
+                headDefault.tint     = {0.3f, 0.8f, 1.f, 1.f};
+                headDefault.params.x = kActiveHoldGlowIntensity;
+                headSlot = SlotHoldHeadActive;
+            } else {
+                headDefault.tint = {0.2f, 0.8f, 1.f, 1.f};     // Hold: cyan
+                headSlot = SlotHoldHead;
+            }
+        }
+        if (note.type == NoteType::Flick) { headDefault.tint = {1.f, 0.3f, 0.3f, 1.f};   headSlot = SlotFlickNote; }
+        if (note.type == NoteType::Drag)  { headDefault.tint = {0.6f, 1.f, 0.4f, 0.85f}; headSlot = SlotDragNote;  }
+        if (note.type == NoteType::Slide) { headDefault.tint = {0.8f, 0.4f, 1.f, 1.f};   headSlot = SlotSlideNote; }
+        Material headMat = slotOrFallback(headSlot, headDefault);
 
         // Order: NL, NR, FR, FL — matches drawQuad's BL,BR,TR,TL winding so the
         // existing index pattern (0,1,2, 2,3,0) tessellates correctly.
         renderer.quads().drawQuadCorners(
             sNL, sNR, sFR, sFL,
-            color, {0.f, 0.f, 1.f, 1.f},
-            renderer.whiteView(), renderer.whiteSampler(),
+            headMat, {0.f, 0.f, 1.f, 1.f},
             renderer.context(), renderer.descriptors());
     }
 

@@ -4,15 +4,37 @@
 #include "RenderTypes.h"
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
-#include <glm/gtc/matrix_transform.hpp>
 #include <cstring>
 #include <stdexcept>
 #include <array>
 
+namespace {
+
+// All material kinds that have a backing fragment shader.
+constexpr std::array<MaterialKind, 5> kAllKinds = {
+    MaterialKind::Unlit,
+    MaterialKind::Glow,
+    MaterialKind::Scroll,
+    MaterialKind::Pulse,
+    MaterialKind::Gradient,
+};
+
+const char* shaderNameForKind(MaterialKind k) {
+    switch (k) {
+        case MaterialKind::Unlit:    return "quad_unlit";
+        case MaterialKind::Glow:     return "quad_glow";
+        case MaterialKind::Scroll:   return "quad_scroll";
+        case MaterialKind::Pulse:    return "quad_pulse";
+        case MaterialKind::Gradient: return "quad_gradient";
+        default:                     return "quad_unlit";
+    }
+}
+
+} // namespace
+
 void QuadBatch::init(VulkanContext& ctx, BufferManager& bufMgr,
                      DescriptorManager& descMgr, VkRenderPass renderPass,
                      const std::string& shaderDir) {
-    // Per-frame vertex buffers (persistently mapped)
     m_vertexBuffers.resize(MAX_FRAMES_IN_FLIGHT);
     m_ubos.resize(MAX_FRAMES_IN_FLIGHT);
     m_frameSets.resize(MAX_FRAMES_IN_FLIGHT);
@@ -27,7 +49,7 @@ void QuadBatch::init(VulkanContext& ctx, BufferManager& bufMgr,
 
     buildIndexBuffer(ctx, bufMgr);
 
-    // Pipeline layout: set0=UBO, set1=texture, push=QuadPushConstants
+    // Shared pipeline layout across all material kinds.
     std::array<VkDescriptorSetLayout, 2> layouts = {
         descMgr.frameUBOLayout(), descMgr.textureLayout()
     };
@@ -48,15 +70,18 @@ void QuadBatch::init(VulkanContext& ctx, BufferManager& bufMgr,
     auto binding    = QuadVertex::binding();
     auto attributes = QuadVertex::attributes();
 
-    PipelineConfig cfg{};
-    cfg.renderPass       = renderPass;
-    cfg.layout           = m_pipelineLayout;
-    cfg.vertShaderPath   = shaderDir + "/quad.vert.spv";
-    cfg.fragShaderPath   = shaderDir + "/quad.frag.spv";
-    cfg.vertexBinding    = binding;
-    cfg.vertexAttributes = {attributes.begin(), attributes.end()};
-    cfg.blend            = PipelineConfig::Blend::Alpha;
-    m_pipeline.init(ctx, cfg);
+    // Create one pipeline per kind. Shared vertex shader, per-kind frag.
+    for (MaterialKind k : kAllKinds) {
+        PipelineConfig cfg{};
+        cfg.renderPass       = renderPass;
+        cfg.layout           = m_pipelineLayout;
+        cfg.vertShaderPath   = shaderDir + "/quad.vert.spv";
+        cfg.fragShaderPath   = shaderDir + "/" + shaderNameForKind(k) + ".frag.spv";
+        cfg.vertexBinding    = binding;
+        cfg.vertexAttributes = {attributes.begin(), attributes.end()};
+        cfg.blend            = PipelineConfig::Blend::Alpha;
+        m_pipelines[(size_t)k].init(ctx, cfg);
+    }
 }
 
 void QuadBatch::buildIndexBuffer(VulkanContext& ctx, BufferManager& bufMgr) {
@@ -73,13 +98,50 @@ void QuadBatch::buildIndexBuffer(VulkanContext& ctx, BufferManager& bufMgr) {
                           sizeof(uint32_t) * QUAD_INDICES);
 }
 
+void QuadBatch::pushBatch(const Material& mat, glm::vec4 uvTransform,
+                          uint32_t quadIdx,
+                          VulkanContext& ctx, DescriptorManager& descMgr) {
+    // Per-vertex tint + uvTransform are baked into vertices, so batching only
+    // breaks on (kind, texture, params) change. This matches the pre-material
+    // batching efficiency.
+    (void)uvTransform;
+    bool canCoalesce =
+        !m_batches.empty() &&
+        m_batches.back().kind    == mat.kind &&
+        m_batches.back().texture == mat.texture &&
+        m_batches.back().sampler == mat.sampler &&
+        m_batches.back().params  == mat.params;
+
+    if (canCoalesce) {
+        m_batches.back().indexCount += 6;
+        return;
+    }
+
+    Batch b{};
+    b.kind        = mat.kind;
+    b.texture     = mat.texture;
+    b.sampler     = mat.sampler;
+    b.tint        = glm::vec4(1.f);        // unused — per-vertex tint is live
+    b.params      = mat.params;
+    b.uvTransform = glm::vec4(0,0,1,1);    // unused — per-vertex UV is live
+    b.indexStart  = quadIdx * 6;
+    b.indexCount  = 6;
+
+    auto it = m_texSetCache.find(mat.texture);
+    if (it == m_texSetCache.end()) {
+        b.texSet = descMgr.allocateTextureSet(ctx, mat.texture, mat.sampler);
+        m_texSetCache[mat.texture] = b.texSet;
+    } else {
+        b.texSet = it->second;
+    }
+    m_batches.push_back(b);
+}
+
 void QuadBatch::drawQuad(glm::vec2 pos, glm::vec2 size, float rotation,
-                         glm::vec4 color, glm::vec4 uvTransform,
-                         VkImageView texture, VkSampler sampler,
+                         const Material& mat, glm::vec4 uvTransform,
                          VulkanContext& ctx, DescriptorManager& descMgr) {
     if (m_vertices.size() / 4 >= MAX_QUADS) return;
 
-    // Build 4 vertices in local space, then rotate
     float hw = size.x * 0.5f, hh = size.y * 0.5f;
     glm::vec2 corners[4] = {{-hw,-hh},{hw,-hh},{hw,hh},{-hw,hh}};
     glm::vec2 uvs[4] = {{0,0},{1,0},{1,1},{0,1}};
@@ -92,35 +154,16 @@ void QuadBatch::drawQuad(glm::vec2 pos, glm::vec2 size, float rotation,
         v.pos   = pos + r;
         v.uv    = uvs[i] * glm::vec2(uvTransform.z, uvTransform.w)
                          + glm::vec2(uvTransform.x, uvTransform.y);
-        v.color = color;
+        v.color = mat.tint;
         m_vertices.push_back(v);
     }
 
-    // Batch grouping by texture
     uint32_t quadIdx = static_cast<uint32_t>(m_vertices.size() / 4) - 1;
-    if (m_batches.empty() || m_batches.back().texture != texture) {
-        Batch b{};
-        b.texture    = texture;
-        b.sampler    = sampler;
-        b.indexStart = quadIdx * 6;
-        b.indexCount = 6;
-        // Get or create descriptor set for this texture
-        auto it = m_texSetCache.find(texture);
-        if (it == m_texSetCache.end()) {
-            b.texSet = descMgr.allocateTextureSet(ctx, texture, sampler);
-            m_texSetCache[texture] = b.texSet;
-        } else {
-            b.texSet = it->second;
-        }
-        m_batches.push_back(b);
-    } else {
-        m_batches.back().indexCount += 6;
-    }
+    pushBatch(mat, uvTransform, quadIdx, ctx, descMgr);
 }
 
 void QuadBatch::drawQuadCorners(glm::vec2 p0, glm::vec2 p1, glm::vec2 p2, glm::vec2 p3,
-                                glm::vec4 color, glm::vec4 uvTransform,
-                                VkImageView texture, VkSampler sampler,
+                                const Material& mat, glm::vec4 uvTransform,
                                 VulkanContext& ctx, DescriptorManager& descMgr) {
     if (m_vertices.size() / 4 >= MAX_QUADS) return;
 
@@ -132,38 +175,47 @@ void QuadBatch::drawQuadCorners(glm::vec2 p0, glm::vec2 p1, glm::vec2 p2, glm::v
         v.pos   = corners[i];
         v.uv    = uvs[i] * glm::vec2(uvTransform.z, uvTransform.w)
                          + glm::vec2(uvTransform.x, uvTransform.y);
-        v.color = color;
+        v.color = mat.tint;
         m_vertices.push_back(v);
     }
 
     uint32_t quadIdx = static_cast<uint32_t>(m_vertices.size() / 4) - 1;
-    if (m_batches.empty() || m_batches.back().texture != texture) {
-        Batch b{};
-        b.texture    = texture;
-        b.sampler    = sampler;
-        b.indexStart = quadIdx * 6;
-        b.indexCount = 6;
-        auto it = m_texSetCache.find(texture);
-        if (it == m_texSetCache.end()) {
-            b.texSet = descMgr.allocateTextureSet(ctx, texture, sampler);
-            m_texSetCache[texture] = b.texSet;
-        } else {
-            b.texSet = it->second;
-        }
-        m_batches.push_back(b);
-    } else {
-        m_batches.back().indexCount += 6;
-    }
+    pushBatch(mat, uvTransform, quadIdx, ctx, descMgr);
 }
+
+// ── Legacy overloads — forward as Unlit ─────────────────────────────────────
+
+void QuadBatch::drawQuad(glm::vec2 pos, glm::vec2 size, float rotation,
+                         glm::vec4 color, glm::vec4 uvTransform,
+                         VkImageView texture, VkSampler sampler,
+                         VulkanContext& ctx, DescriptorManager& descMgr) {
+    Material mat;
+    mat.kind    = MaterialKind::Unlit;
+    mat.tint    = color;
+    mat.texture = texture;
+    mat.sampler = sampler;
+    drawQuad(pos, size, rotation, mat, uvTransform, ctx, descMgr);
+}
+
+void QuadBatch::drawQuadCorners(glm::vec2 p0, glm::vec2 p1, glm::vec2 p2, glm::vec2 p3,
+                                glm::vec4 color, glm::vec4 uvTransform,
+                                VkImageView texture, VkSampler sampler,
+                                VulkanContext& ctx, DescriptorManager& descMgr) {
+    Material mat;
+    mat.kind    = MaterialKind::Unlit;
+    mat.tint    = color;
+    mat.texture = texture;
+    mat.sampler = sampler;
+    drawQuadCorners(p0, p1, p2, p3, mat, uvTransform, ctx, descMgr);
+}
+
+// ────────────────────────────────────────────────────────────────────────────
 
 void QuadBatch::flush(VkCommandBuffer cmd, VulkanContext& ctx, DescriptorManager& descMgr) {
     if (m_vertices.empty()) return;
 
-    // Upload vertices to current frame's buffer
     memcpy(m_vertexBuffers[m_currentFrame].mapped,
            m_vertices.data(), sizeof(QuadVertex) * m_vertices.size());
-
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipeline.handle());
 
     VkBuffer vb = m_vertexBuffers[m_currentFrame].handle;
     VkDeviceSize offset = 0;
@@ -173,18 +225,34 @@ void QuadBatch::flush(VkCommandBuffer cmd, VulkanContext& ctx, DescriptorManager
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                             m_pipelineLayout, 0, 1, &m_frameSets[m_currentFrame], 0, nullptr);
 
-    // Push default constants (identity model, white tint, full UV)
-    QuadPushConstants pc{};
-    pc.tint        = {1.f, 1.f, 1.f, 1.f};
-    pc.uvTransform = {0.f, 0.f, 1.f, 1.f};
-    pc.model       = glm::mat4(1.f);
-    vkCmdPushConstants(cmd, m_pipelineLayout,
-                       VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-                       0, sizeof(QuadPushConstants), &pc);
+    MaterialKind    lastKind   = MaterialKind::Count;   // force first bind
+    VkDescriptorSet lastTexSet = VK_NULL_HANDLE;
 
     for (auto& batch : m_batches) {
-        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                                m_pipelineLayout, 1, 1, &batch.texSet, 0, nullptr);
+        if (batch.kind != lastKind) {
+            VkPipeline pipe = m_pipelines[(size_t)batch.kind].handle();
+            // Fall back to Unlit if a kind isn't initialized yet (Phase 1).
+            if (pipe == VK_NULL_HANDLE)
+                pipe = m_pipelines[(size_t)MaterialKind::Unlit].handle();
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
+            lastKind = batch.kind;
+        }
+
+        QuadPushConstants pc{};
+        pc.model       = glm::mat4(1.f);
+        pc.tint        = glm::vec4(1.f);           // per-vertex tint is live
+        pc.uvTransform = glm::vec4(0.f, 0.f, 1.f, 1.f);
+        pc.params      = batch.params;
+        pc.kind        = (uint32_t)batch.kind;
+        vkCmdPushConstants(cmd, m_pipelineLayout,
+                           VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                           0, sizeof(QuadPushConstants), &pc);
+
+        if (batch.texSet != lastTexSet) {
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                    m_pipelineLayout, 1, 1, &batch.texSet, 0, nullptr);
+            lastTexSet = batch.texSet;
+        }
         vkCmdDrawIndexed(cmd, batch.indexCount, 1, batch.indexStart, 0, 0);
     }
 
@@ -201,7 +269,7 @@ void QuadBatch::updateFrameUBO(const glm::mat4& viewProj, float time, int frameI
 }
 
 void QuadBatch::shutdown(VulkanContext& ctx, BufferManager& bufMgr) {
-    m_pipeline.shutdown(ctx);
+    for (auto& p : m_pipelines) p.shutdown(ctx);
     vkDestroyPipelineLayout(ctx.device(), m_pipelineLayout, nullptr);
     for (auto& b : m_vertexBuffers) bufMgr.destroyBuffer(b);
     for (auto& b : m_ubos)         bufMgr.destroyBuffer(b);

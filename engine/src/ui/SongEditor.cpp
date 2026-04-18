@@ -3,6 +3,7 @@
 #include "game/chart/ChartLoader.h"
 #include "renderer/vulkan/VulkanContext.h"
 #include "renderer/vulkan/BufferManager.h"
+#include "renderer/MaterialSlots.h"
 #include <imgui.h>
 #include <filesystem>
 #include <algorithm>
@@ -375,6 +376,14 @@ void SongEditor::loadChartFile(Difficulty diff, const std::string& chartRel) {
             // Beat markers (saved per chart file for every mode).
             if (!chart.markers.empty())
                 m_diffMarkers[(int)diff] = chart.markers;
+
+            // Material overrides — keyed by slot so the panel can address
+            // entries directly. Duplicate slots in the file keep the last.
+            auto& slotMap = m_diffMaterials[(int)diff];
+            slotMap.clear();
+            for (const auto& md : chart.materials)
+                slotMap[md.slot] = md;
+
             m_laneMaskDirty = true;
             m_scanPhaseDirty = true;
             m_scanPageTableDirty = true;
@@ -393,6 +402,7 @@ void SongEditor::reloadChartsForCurrentMode() {
     // fresh (mode, difficulty) pair always starts from its own file or empty.
     m_diffNotes.clear();
     m_diffMarkers.clear();
+    m_diffMaterials.clear();
     m_diffDiskRot.clear();
     m_diffDiskMove.clear();
     m_diffDiskScale.clear();
@@ -1983,6 +1993,188 @@ void SongEditor::renderGameModeConfig() {
             if (ImGui::Button("Clear##bgClear"))
                 gm.backgroundImage.clear();
         }
+
+        ImGui::Spacing();
+    }
+
+
+    // ── Materials ──────────────────────────────────────────────────────────
+    // Per-slot, per-difficulty visual overrides. Defaults come from the mode's
+    // slot table (renderer/MaterialSlots.cpp). Overrides serialize into the
+    // chart JSON's "materials" array.
+    if (ImGui::CollapsingHeader("Materials")) {
+        ImGui::Spacing();
+
+        // Mode→slot-list mapping mirrors Engine::createRenderer so only slots
+        // relevant to the current game mode are shown.
+        MaterialModeKey modeKey = MaterialModeKey::Bandori;
+        switch (gm.type) {
+            case GameModeType::DropNotes:
+                modeKey = (gm.dimension == DropDimension::ThreeD)
+                          ? MaterialModeKey::Arcaea
+                          : MaterialModeKey::Bandori;
+                break;
+            case GameModeType::Circle:   modeKey = MaterialModeKey::Lanota; break;
+            case GameModeType::ScanLine: modeKey = MaterialModeKey::Cytus;  break;
+        }
+        const auto& slots = getMaterialSlotsForMode(modeKey);
+
+        if (slots.empty()) {
+            ImGui::TextDisabled("No materials defined for this game mode yet.");
+            ImGui::Spacing();
+        }
+
+        auto& overrides = m_diffMaterials[(int)m_currentDifficulty];
+
+        const char* kindLabels = "Unlit\0Glow\0Scroll\0Pulse\0Gradient\0\0";
+        const char* kindKeys[] = {"unlit", "glow", "scroll", "pulse", "gradient"};
+
+        // Number of params each kind actually reads from the slider row.
+        // Unused trailing sliders are hidden so users can't touch dead knobs.
+        auto paramCountForKind = [](int kindIdx) -> int {
+            switch ((MaterialKind)kindIdx) {
+                case MaterialKind::Unlit:    return 0;
+                case MaterialKind::Glow:     return 3;
+                case MaterialKind::Scroll:   return 4;
+                case MaterialKind::Pulse:    return 3;
+                case MaterialKind::Gradient: return 4;
+                default:                     return 0;
+            }
+        };
+
+        // Walk slots in declared order. When we enter a run that shares a
+        // group label, wrap that run in a nested collapsing header (closed
+        // by default). Slots with an empty group render flat at top level.
+        std::string currentGroup;
+        bool        inGroup = false;
+        bool        groupOpen = false;
+
+        auto endGroupIfAny = [&]() {
+            if (inGroup && groupOpen) ImGui::Unindent();
+            inGroup = false;
+            groupOpen = false;
+            currentGroup.clear();
+        };
+
+        for (const auto& slot : slots) {
+            std::string grp = slot.group ? slot.group : "";
+            if (grp != currentGroup) {
+                endGroupIfAny();
+                currentGroup = grp;
+                if (!grp.empty()) {
+                    inGroup = true;
+                    ImGui::Separator();
+                    groupOpen = ImGui::CollapsingHeader(grp.c_str());
+                    if (groupOpen) ImGui::Indent();
+                }
+            }
+            // Skip slot widgets for closed groups.
+            if (inGroup && !groupOpen) continue;
+
+            ImGui::PushID((int)slot.id);
+            ImGui::Separator();
+            ImGui::Text("%s", slot.displayName);
+
+            // Ensure an entry exists so UI widgets always bind to live memory.
+            auto it = overrides.find(slot.id);
+            bool hasOverride = (it != overrides.end());
+            ChartData::MaterialData md;
+            if (hasOverride) {
+                md = it->second;
+            } else {
+                md.slot = slot.id;
+                md.kind = kindKeys[(int)slot.defaultKind];
+                for (int i = 0; i < 4; ++i) md.tint[i]   = slot.defaultTint[i];
+                for (int i = 0; i < 4; ++i) md.params[i] = slot.defaultParams[i];
+            }
+
+            // Kind combo
+            int kindIdx = 0;
+            for (int i = 0; i < 5; ++i)
+                if (md.kind == kindKeys[i]) { kindIdx = i; break; }
+            if (ImGui::Combo("Kind", &kindIdx, kindLabels)) {
+                md.kind = kindKeys[kindIdx];
+                hasOverride = true;
+            }
+
+            if (ImGui::ColorEdit4("Tint", md.tint)) hasOverride = true;
+
+            const char* paramLabels[4] = {"", "", "", ""};
+            switch ((MaterialKind)kindIdx) {
+                case MaterialKind::Glow:
+                    paramLabels[0] = "Intensity";
+                    paramLabels[1] = "Falloff";
+                    paramLabels[2] = "HDR Cap";
+                    break;
+                case MaterialKind::Scroll:
+                    paramLabels[0] = "U Speed";
+                    paramLabels[1] = "V Speed";
+                    paramLabels[2] = "U Tile";
+                    paramLabels[3] = "V Tile";
+                    break;
+                case MaterialKind::Pulse:
+                    paramLabels[0] = "Last Hit Time";
+                    paramLabels[1] = "Decay";
+                    paramLabels[2] = "Peak Mult";
+                    break;
+                case MaterialKind::Gradient:
+                    paramLabels[0] = "Bottom R";
+                    paramLabels[1] = "Bottom G";
+                    paramLabels[2] = "Bottom B";
+                    paramLabels[3] = "Mode (0=vert 1=radial)";
+                    break;
+                default: break;
+            }
+            int pCount = paramCountForKind(kindIdx);
+            for (int i = 0; i < pCount; ++i) {
+                if (ImGui::SliderFloat(paramLabels[i], &md.params[i], -10.f, 10.f))
+                    hasOverride = true;
+            }
+
+            // Texture path + Browse button + drag-drop.
+            char texBuf[256];
+            strncpy(texBuf, md.texturePath.c_str(), 255); texBuf[255] = '\0';
+            ImGui::SetNextItemWidth(-70);
+            if (ImGui::InputText("##texPath", texBuf, 256)) {
+                md.texturePath = texBuf;
+                hasOverride = true;
+            }
+            if (ImGui::BeginDragDropTarget()) {
+                if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("ASSET_PATH")) {
+                    md.texturePath = std::string(static_cast<const char*>(payload->Data),
+                                                 payload->DataSize - 1);
+                    hasOverride = true;
+                }
+                ImGui::EndDragDropTarget();
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Browse")) {
+                std::string path = browseFile(
+                    L"Images\0*.png;*.jpg;*.jpeg;*.bmp\0All Files\0*.*\0", "textures");
+                if (!path.empty()) {
+                    md.texturePath = path;
+                    hasOverride = true;
+                }
+            }
+            if (!md.texturePath.empty()) {
+                ImGui::SameLine();
+                if (ImGui::Button("Clear")) {
+                    md.texturePath.clear();
+                    hasOverride = true;
+                }
+            }
+
+            if (ImGui::Button("Reset to Default")) {
+                overrides.erase(slot.id);
+                ImGui::PopID();
+                continue;
+            }
+
+            if (hasOverride) overrides[slot.id] = md;
+
+            ImGui::PopID();
+        }
+        endGroupIfAny();
 
         ImGui::Spacing();
     }
@@ -5177,6 +5369,27 @@ void SongEditor::exportAllCharts() {
             f << "]";
         }
 
+        // ── Per-slot material overrides for this difficulty ──────────
+        const auto& mats = m_diffMaterials[d];
+        if (!mats.empty()) {
+            f << ",\n \"materials\": [\n";
+            bool first = true;
+            for (const auto& [slot, md] : mats) {
+                if (!first) f << ",\n";
+                first = false;
+                f << "   {\"slot\": " << (int)slot
+                  << ", \"kind\": \"" << md.kind << "\""
+                  << ", \"tint\": ["   << md.tint[0]   << ", " << md.tint[1]
+                                << ", " << md.tint[2]   << ", " << md.tint[3]   << "]"
+                  << ", \"params\": [" << md.params[0] << ", " << md.params[1]
+                                << ", " << md.params[2] << ", " << md.params[3] << "]";
+                if (!md.texturePath.empty())
+                    f << ", \"texture\": \"" << md.texturePath << "\"";
+                f << "}";
+            }
+            f << "\n ]";
+        }
+
         f << "\n}\n";
         f.close();
 
@@ -5312,9 +5525,15 @@ void SongEditor::renderNoteToolbar() {
     toolBtn("Click",  NoteTool::Tap, ImVec4(0.2f, 0.5f, 0.8f, 1.f));
     toolBtn("Hold",   NoteTool::Hold, ImVec4(0.2f, 0.7f, 0.3f, 1.f));
 
-    // Slide: not available for ScanLine; always available for 2D, Circle, and 3D ground
-    // (3D sky restriction is handled at placement time)
-    if (gm.type != GameModeType::ScanLine) {
+    // Flick: authored in 2D drop (Bandori) and 3D drop (ground plane).
+    const bool twoDDrop = (gm.type == GameModeType::DropNotes
+                           && gm.dimension != DropDimension::ThreeD);
+    if (twoDDrop || is3D) {
+        toolBtn("Flick", NoteTool::Flick, ImVec4(0.8f, 0.3f, 0.3f, 1.f));
+    }
+
+    // Slide: Circle + 3D drop only. 2D drop and ScanLine intentionally omit it.
+    if (gm.type == GameModeType::Circle || is3D) {
         toolBtn("Slide", NoteTool::Slide, ImVec4(0.7f, 0.3f, 0.7f, 1.f));
     }
 

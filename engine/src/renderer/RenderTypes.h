@@ -76,12 +76,17 @@ struct FrameUBO {
     float     _pad[3];
 };
 
-// ── Push constants (96 bytes max) ────────────────────────────────────────────
+// ── Push constants (exactly 128 bytes — Vulkan guaranteed minimum) ───────────
+// WARNING: do not add fields. 128B is the spec floor (maxPushConstantsSize).
+// If more per-draw data is needed, switch to a per-instance SSBO.
 
 struct QuadPushConstants {
-    glm::vec4 tint;         // rgba multiplier
-    glm::vec4 uvTransform;  // xy=offset, zw=scale
-    glm::mat4 model;        // 64 bytes — total = 96
+    glm::mat4 model;        // 64 B  — first keeps mat4 16-aligned
+    glm::vec4 tint;         // 16 B  — rgba multiplier
+    glm::vec4 uvTransform;  // 16 B  — xy=offset, zw=scale
+    glm::vec4 params;       // 16 B  — meaning depends on material kind
+    uint32_t  kind;         //  4 B  — MaterialKind cast to uint
+    uint32_t  _pad[3];      // 12 B  → total 128 B
 };
 
 // ── Draw call descriptor ─────────────────────────────────────────────────────

@@ -1,8 +1,10 @@
 #pragma once
 #include "GameModeRenderer.h"
+#include "renderer/Material.h"
 #include <glm/glm.hpp>
 #include <vector>
 #include <utility>
+#include <unordered_map>
 #include <optional>
 
 class CytusRenderer : public GameModeRenderer {
@@ -107,4 +109,8 @@ private:
     std::vector<ScanNote>       m_notes;
     std::vector<ScanSpeedEvent> m_speedEvents;
     std::vector<PhaseEntry>     m_phaseTable;
+
+    // Per-slot chart material overrides, keyed by slot id.
+    std::unordered_map<uint16_t, Material> m_chartMaterials;
+    glm::vec4 slotTint(uint16_t slot, glm::vec4 fallbackRGBA) const;
 };

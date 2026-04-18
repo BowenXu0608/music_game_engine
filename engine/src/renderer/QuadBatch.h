@@ -1,10 +1,12 @@
 #pragma once
 #include "RenderTypes.h"
+#include "Material.h"
 #include "vulkan/BufferManager.h"
 #include "vulkan/DescriptorManager.h"
 #include "vulkan/Pipeline.h"
 #include <glm/glm.hpp>
 #include <vector>
+#include <array>
 #include <unordered_map>
 
 class VulkanContext;
@@ -20,15 +22,21 @@ public:
               const std::string& shaderDir);
     void shutdown(VulkanContext& ctx, BufferManager& bufMgr);
 
-    // Submit a quad for batched rendering
+    // ── New Material-aware overloads ────────────────────────────────────────
+    void drawQuad(glm::vec2 pos, glm::vec2 size, float rotation,
+                  const Material& mat, glm::vec4 uvTransform,
+                  VulkanContext& ctx, DescriptorManager& descMgr);
+
+    void drawQuadCorners(glm::vec2 p0, glm::vec2 p1, glm::vec2 p2, glm::vec2 p3,
+                         const Material& mat, glm::vec4 uvTransform,
+                         VulkanContext& ctx, DescriptorManager& descMgr);
+
+    // ── Legacy overloads — forward to Material-aware versions as Unlit ──────
     void drawQuad(glm::vec2 pos, glm::vec2 size, float rotation,
                   glm::vec4 color, glm::vec4 uvTransform,
                   VkImageView texture, VkSampler sampler,
                   VulkanContext& ctx, DescriptorManager& descMgr);
 
-    // Submit a quad defined by 4 explicit screen-space corners (any winding;
-    // vertex order is p0,p1,p2,p3 → triangles {p0,p1,p2} and {p2,p3,p0}).
-    // Use this to draw perspective-warped quads (e.g. ground-plane notes).
     void drawQuadCorners(glm::vec2 p0, glm::vec2 p1, glm::vec2 p2, glm::vec2 p3,
                          glm::vec4 color, glm::vec4 uvTransform,
                          VkImageView texture, VkSampler sampler,
@@ -39,20 +47,30 @@ public:
 
     void updateFrameUBO(const glm::mat4& viewProj, float time, int frameIndex);
 
-    Pipeline& pipeline() { return m_pipeline; }
+    // Access the pipeline for a given material kind (for integration/debug).
+    Pipeline& pipeline(MaterialKind k = MaterialKind::Unlit) {
+        return m_pipelines[(size_t)k];
+    }
 
 private:
     struct Batch {
+        MaterialKind    kind;
         VkImageView     texture;
         VkSampler       sampler;
         VkDescriptorSet texSet = VK_NULL_HANDLE;
+        glm::vec4       tint;
+        glm::vec4       params;
+        glm::vec4       uvTransform;
         uint32_t        indexStart;
         uint32_t        indexCount;
     };
 
     void buildIndexBuffer(VulkanContext& ctx, BufferManager& bufMgr);
+    void pushBatch(const Material& mat, glm::vec4 uvTransform,
+                   uint32_t quadIdx,
+                   VulkanContext& ctx, DescriptorManager& descMgr);
 
-    Pipeline    m_pipeline;
+    std::array<Pipeline, (size_t)MaterialKind::Count> m_pipelines{};
     VkPipelineLayout m_pipelineLayout = VK_NULL_HANDLE;
 
     // Per-frame dynamic VBOs (MAX_FRAMES_IN_FLIGHT)

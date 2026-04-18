@@ -403,6 +403,7 @@ void Engine::setupPreviewMode(const GameModeConfig& config, const ChartData& cha
         m_previewMode.reset();
     }
     m_previewMode = createRenderer(config);
+    m_previewMode->setEditorPreview(true);
     m_previewMode->onInit(m_renderer, chart, &config);
     m_previewMode->onResize(m_renderer.width(), m_renderer.height());
 

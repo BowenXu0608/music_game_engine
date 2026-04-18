@@ -175,11 +175,18 @@ private:
     std::unordered_map<int, std::vector<EditorNote>> m_diffNotes;   // key = (int)Difficulty
     std::unordered_map<int, std::vector<float>>      m_diffMarkers; // key = (int)Difficulty
 
+    // Per-difficulty material-slot overrides. Keyed by slot id; values carry
+    // the kind/tint/params/texture the user has set for that slot.
+    std::unordered_map<int, std::unordered_map<uint16_t, ChartData::MaterialData>> m_diffMaterials;
+
     // Convenience accessors for the current difficulty's data
     std::vector<EditorNote>& notes()         { return m_diffNotes[(int)m_currentDifficulty]; }
     std::vector<float>&      markers()       { return m_diffMarkers[(int)m_currentDifficulty]; }
     const std::vector<EditorNote>& notes()   const { return const_cast<SongEditor*>(this)->m_diffNotes[(int)m_currentDifficulty]; }
     const std::vector<float>&      markers() const { return const_cast<SongEditor*>(this)->m_diffMarkers[(int)m_currentDifficulty]; }
+    std::unordered_map<uint16_t, ChartData::MaterialData>& materialsForDiff() {
+        return m_diffMaterials[(int)m_currentDifficulty];
+    }
 
     // Default laneSpan for newly placed notes (Circle mode). 1, 2, or 3 lanes.
     int       m_defaultLaneSpan = 1;

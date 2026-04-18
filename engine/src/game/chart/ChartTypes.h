@@ -351,4 +351,16 @@ struct ChartData {
     // editor keeps in m_diffMarkers; persisted per chart file so reopening a
     // project restores AI-detected / hand-placed markers for every mode.
     std::vector<float>             markers;
+
+    // Per-chart material overrides. Each entry targets one named slot defined
+    // by the game-mode renderer (e.g. "tap_note", "hold_body"). At load time
+    // the renderer merges these over its built-in defaults.
+    struct MaterialData {
+        uint16_t    slot = 0;
+        std::string kind = "unlit";      // Unlit/Glow/Scroll/Pulse/Gradient
+        float       tint[4]   = {1.f, 1.f, 1.f, 1.f};
+        float       params[4] = {0.f, 0.f, 0.f, 0.f};
+        std::string texturePath;         // empty → whiteView
+    };
+    std::vector<MaterialData>      materials;
 };

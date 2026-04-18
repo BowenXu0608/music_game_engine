@@ -6,9 +6,12 @@ layout(set = 0, binding = 0) uniform FrameUBO {
 } ubo;
 
 layout(push_constant) uniform PushConstants {
-    vec4 tint;
-    vec4 uvTransform;  // xy=offset, zw=scale
-    mat4 model;
+    mat4  model;        // 64 B
+    vec4  tint;         // 16 B
+    vec4  uvTransform;  // 16 B — xy=offset, zw=scale
+    vec4  params;       // 16 B — per-kind
+    uint  kind;         //  4 B
+    uint  _pad[3];      // 12 B → total 128 B
 } pc;
 
 layout(location = 0) in vec2 inPos;

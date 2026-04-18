@@ -29,6 +29,14 @@ public:
         for (uint32_t id : ids) m_activeHoldIds.insert(id);
     }
 
+    // Engine sets this to `true` for the instance used as the editor preview,
+    // and leaves it `false` (default) for the gameplay instance. Renderers can
+    // use this to show authoring-only overlays (lane guides, snap rulers, ...)
+    // that must not appear during real play.
+    void setEditorPreview(bool v) { m_isEditorPreview = v; }
+    bool isEditorPreview() const { return m_isEditorPreview; }
+
 protected:
     std::unordered_set<uint32_t> m_activeHoldIds;
+    bool m_isEditorPreview = false;
 };

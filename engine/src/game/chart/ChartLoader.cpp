@@ -703,6 +703,87 @@ ChartData ChartLoader::loadUnified(const std::string& path) {
         }
     }
 
+    // "materials": [ { "slot":..., "kind":"...", "tint":[..], "params":[..], "texture":"..." }, ... ]
+    {
+        auto mKey = content.find("\"materials\"");
+        if (mKey != std::string::npos) {
+            auto arrStart = content.find('[', mKey);
+            if (arrStart != std::string::npos) {
+                auto arrEnd = findMatchingBracket(content, arrStart);
+                if (arrEnd != std::string::npos) {
+                    size_t p = arrStart + 1;
+                    while (p < arrEnd) {
+                        auto objStart = content.find('{', p);
+                        if (objStart == std::string::npos || objStart > arrEnd) break;
+                        auto objEnd = findMatchingBrace(content, objStart);
+                        if (objEnd == std::string::npos || objEnd > arrEnd) break;
+                        std::string obj = content.substr(objStart + 1, objEnd - objStart - 1);
+
+                        auto scanStr = [&](const char* k) -> std::string {
+                            std::string key = std::string("\"") + k + "\"";
+                            auto kp = obj.find(key);
+                            if (kp == std::string::npos) return "";
+                            auto cp = obj.find(':', kp);
+                            if (cp == std::string::npos) return "";
+                            auto qs = obj.find('"', cp + 1);
+                            if (qs == std::string::npos) return "";
+                            auto qe = obj.find('"', qs + 1);
+                            if (qe == std::string::npos) return "";
+                            return obj.substr(qs + 1, qe - qs - 1);
+                        };
+                        auto scanNum = [&](const char* k, float dflt) -> float {
+                            std::string key = std::string("\"") + k + "\"";
+                            auto kp = obj.find(key);
+                            if (kp == std::string::npos) return dflt;
+                            auto cp = obj.find(':', kp);
+                            if (cp == std::string::npos) return dflt;
+                            size_t nb = cp + 1;
+                            while (nb < obj.size() && (obj[nb] == ' ' || obj[nb] == '\t')) nb++;
+                            size_t ne = nb;
+                            while (ne < obj.size() && obj[ne] != ',' && obj[ne] != '}' && obj[ne] != '\n') ne++;
+                            try { return std::stof(obj.substr(nb, ne - nb)); }
+                            catch (...) { return dflt; }
+                        };
+                        auto scanArr4 = [&](const char* k, float* out4, float d0, float d1, float d2, float d3) {
+                            out4[0] = d0; out4[1] = d1; out4[2] = d2; out4[3] = d3;
+                            std::string key = std::string("\"") + k + "\"";
+                            auto kp = obj.find(key);
+                            if (kp == std::string::npos) return;
+                            auto ob = obj.find('[', kp);
+                            if (ob == std::string::npos) return;
+                            auto oe = findMatchingBracket(obj, ob);
+                            if (oe == std::string::npos) return;
+                            std::string inner = obj.substr(ob + 1, oe - ob - 1);
+                            size_t pos = 0; int idx = 0;
+                            while (pos < inner.size() && idx < 4) {
+                                while (pos < inner.size() && (inner[pos] == ' ' || inner[pos] == ',' ||
+                                                              inner[pos] == '\t' || inner[pos] == '\n')) pos++;
+                                if (pos >= inner.size()) break;
+                                size_t e = pos;
+                                while (e < inner.size() && inner[e] != ',' &&
+                                       inner[e] != ' ' && inner[e] != '\t' && inner[e] != '\n') e++;
+                                try { out4[idx++] = std::stof(inner.substr(pos, e - pos)); }
+                                catch (...) {}
+                                pos = e;
+                            }
+                        };
+
+                        ChartData::MaterialData md;
+                        md.slot        = (uint16_t)(int)scanNum("slot", 0.f);
+                        md.kind        = scanStr("kind");
+                        if (md.kind.empty()) md.kind = "unlit";
+                        md.texturePath = scanStr("texture");
+                        scanArr4("tint",   md.tint,   1.f, 1.f, 1.f, 1.f);
+                        scanArr4("params", md.params, 0.f, 0.f, 0.f, 0.f);
+                        chart.materials.push_back(md);
+
+                        p = objEnd + 1;
+                    }
+                }
+            }
+        }
+    }
+
     // If page overrides exist, rebuild scanSpeedEvents from them so the
     // runtime phase table reflects the authored per-page speeds.
     if (!chart.scanPageOverrides.empty()) {

@@ -80,7 +80,13 @@ if(GLSLC)
     file(MAKE_DIRECTORY ${SHADER_OUT})
 
     set(SHADER_SOURCES
-        ${SHADER_DIR}/quad.vert      ${SHADER_DIR}/quad.frag
+        ${SHADER_DIR}/quad.vert
+        ${SHADER_DIR}/quad.frag
+        ${SHADER_DIR}/quad_unlit.frag
+        ${SHADER_DIR}/quad_glow.frag
+        ${SHADER_DIR}/quad_scroll.frag
+        ${SHADER_DIR}/quad_pulse.frag
+        ${SHADER_DIR}/quad_gradient.frag
         ${SHADER_DIR}/line.vert      ${SHADER_DIR}/line.frag
         ${SHADER_DIR}/mesh.vert      ${SHADER_DIR}/mesh.frag
         ${SHADER_DIR}/composite.vert ${SHADER_DIR}/composite.frag

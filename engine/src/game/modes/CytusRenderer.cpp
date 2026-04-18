@@ -9,6 +9,36 @@ static constexpr float NOTE_RADIUS    = 30.f;
 static constexpr float NOTE_SIZE      = NOTE_RADIUS * 2.f;
 static constexpr float SCAN_THICKNESS = 4.f;
 
+namespace {
+// Slot ids mirror MaterialSlots.cpp::kCytusSlots.
+enum CytusSlot : uint16_t {
+    SlotTapNote      = 0,
+    SlotHoldBody     = 1,
+    SlotHoldHead     = 2,
+    SlotHoldTailCap  = 3,
+    SlotFlickNote    = 4,
+    SlotSlideHead    = 5,
+    SlotSlideNode    = 6,
+    SlotSlidePath    = 7,
+    SlotScanLineCore = 8,
+    SlotScanLineGlow = 9,
+    SlotHitRing      = 10,
+};
+MaterialKind cyKindFromString(const std::string& s) {
+    if (s == "glow")     return MaterialKind::Glow;
+    if (s == "scroll")   return MaterialKind::Scroll;
+    if (s == "pulse")    return MaterialKind::Pulse;
+    if (s == "gradient") return MaterialKind::Gradient;
+    return MaterialKind::Unlit;
+}
+} // namespace
+
+glm::vec4 CytusRenderer::slotTint(uint16_t slot, glm::vec4 fallbackRGBA) const {
+    auto it = m_chartMaterials.find(slot);
+    if (it == m_chartMaterials.end()) return fallbackRGBA;
+    return it->second.tint;
+}
+
 // ── Scan-line schedule ──────────────────────────────────────────────────────
 // Base period = 240/BPM (1 bar @ 4/4). With speed events, scanLineFrac()
 // uses a precomputed phase table so the line can speed up / slow down.
@@ -155,6 +185,17 @@ bool CytusRenderer::scanLineGoingUp(double t) const {
 void CytusRenderer::onInit(Renderer& renderer, const ChartData& chart,
                            const GameModeConfig* /*config*/) {
     m_renderer = &renderer;
+
+    // Import per-slot material overrides from the chart.
+    m_chartMaterials.clear();
+    for (const auto& md : chart.materials) {
+        Material mat;
+        mat.kind   = cyKindFromString(md.kind);
+        mat.tint   = {md.tint[0],   md.tint[1],   md.tint[2],   md.tint[3]};
+        mat.params = {md.params[0], md.params[1], md.params[2], md.params[3]};
+        m_chartMaterials[md.slot] = mat;
+    }
+
     // Dominant BPM from chart timing (editor always writes at least one
     // point). Fallback 120.
     m_bpm = chart.timingPoints.empty() ? 120.f
@@ -236,11 +277,27 @@ void CytusRenderer::onRender(Renderer& renderer) {
 
     const float scanY = scanLineFrac(m_songTime) * h;
 
-    // Scan line (glow + core)
-    renderer.lines().drawLine({0.f, scanY}, {w, scanY},
-                               24.f, {1.f, 1.f, 1.f, 0.07f});
-    renderer.lines().drawLine({0.f, scanY}, {w, scanY},
-                               SCAN_THICKNESS, {1.f, 1.f, 1.f, 0.9f});
+    // Scan line (glow + core). Both are LineBatch consumers — tint-only.
+    glm::vec4 scanGlowTint = slotTint(SlotScanLineGlow, {1.f, 1.f, 1.f, 0.07f});
+    glm::vec4 scanCoreTint = slotTint(SlotScanLineCore, {1.f, 1.f, 1.f, 0.9f});
+    renderer.lines().drawLine({0.f, scanY}, {w, scanY}, 24.f, scanGlowTint);
+    renderer.lines().drawLine({0.f, scanY}, {w, scanY}, SCAN_THICKNESS, scanCoreTint);
+
+    // Cache per-frame resolved tints for the remaining slots. Alpha is the
+    // slot's own alpha; per-note `alpha` is multiplied in at each call site.
+    const glm::vec4 tapTint       = slotTint(SlotTapNote,     {1.f, 1.f, 1.f, 1.f});
+    const glm::vec4 holdBodyTint  = slotTint(SlotHoldBody,    {0.3f, 0.7f, 1.f, 0.45f});
+    const glm::vec4 holdHeadTint  = slotTint(SlotHoldHead,    {0.3f, 0.7f, 1.f, 1.f});
+    const glm::vec4 holdTailTint  = slotTint(SlotHoldTailCap, {0.3f, 0.7f, 1.f, 0.8f});
+    const glm::vec4 flickTint     = slotTint(SlotFlickNote,   {1.f, 0.75f, 0.35f, 1.f});
+    const glm::vec4 slideHeadTint = slotTint(SlotSlideHead,   {0.85f, 0.5f, 1.f, 1.f});
+    const glm::vec4 slideNodeTint = slotTint(SlotSlideNode,   {1.f, 1.f, 1.f, 1.f});
+    const glm::vec4 slidePathTint = slotTint(SlotSlidePath,   {0.85f, 0.5f, 1.f, 0.55f});
+    const glm::vec4 hitRingTint   = slotTint(SlotHitRing,     {1.f, 1.f, 1.f, 0.85f});
+
+    auto withAlpha = [](const glm::vec4& base, float alphaMul) {
+        return glm::vec4{base.r, base.g, base.b, base.a * alphaMul};
+    };
 
     const auto whiteTex = std::tuple{renderer.whiteView(), renderer.whiteSampler()};
     auto drawQuadAt = [&](glm::vec2 c, glm::vec2 sz, glm::vec4 col) {
@@ -267,7 +324,7 @@ void CytusRenderer::onRender(Renderer& renderer) {
             float outerSz  = NOTE_SIZE * expand + 10.f;
             float innerSz  = NOTE_SIZE * expand - 10.f;
             glm::vec2 c(scanToScreenX(note.sx), scanToScreenY(note.sy));
-            drawQuadAt(c, {outerSz, outerSz}, {1.f, 1.f, 1.f, alpha * 0.85f});
+            drawQuadAt(c, {outerSz, outerSz}, withAlpha(hitRingTint, alpha));
             if (innerSz > 0.f)
                 drawQuadAt(c, {innerSz, innerSz}, {0.f, 0.f, 0.f, alpha});
             continue;
@@ -325,9 +382,8 @@ void CytusRenderer::onRender(Renderer& renderer) {
                 const glm::vec2 end(scanToScreenX(note.sx), scanToScreenY(note.endY));
                 const float bodyH = std::abs(end.y - head.y);
                 const glm::vec2 mid(head.x, (head.y + end.y) * 0.5f);
-                drawQuadAt(mid, {holdW, bodyH}, {0.3f, 0.7f, 1.f, alpha * 0.45f});
-                drawQuadAt(end, {NOTE_RADIUS, NOTE_RADIUS},
-                           {0.3f, 0.7f, 1.f, alpha * 0.8f});
+                drawQuadAt(mid, {holdW, bodyH}, withAlpha(holdBodyTint, alpha));
+                drawQuadAt(end, {NOTE_RADIUS, NOTE_RADIUS}, withAlpha(holdTailTint, alpha));
             } else {
                 // Multi-sweep hold: draw body segments through each sweep
                 bool sweepUp = note.goingUpAtTime;
@@ -344,17 +400,16 @@ void CytusRenderer::onRender(Renderer& renderer) {
                     float bodyH = std::abs(segEndY - segStartY);
                     float midY  = (segStartY + segEndY) * 0.5f;
                     drawQuadAt({head.x, midY}, {holdW, bodyH},
-                               {0.3f, 0.7f, 1.f, alpha * 0.45f});
+                               withAlpha(holdBodyTint, alpha));
                     segStartY = segEndY;
                     sweepUp = !sweepUp;
                 }
                 // Tail cap
                 glm::vec2 end(scanToScreenX(note.sx), scanToScreenY(note.endY));
-                drawQuadAt(end, {NOTE_RADIUS, NOTE_RADIUS},
-                           {0.3f, 0.7f, 1.f, alpha * 0.8f});
+                drawQuadAt(end, {NOTE_RADIUS, NOTE_RADIUS}, withAlpha(holdTailTint, alpha));
             }
             // Head
-            drawQuadAt(head, {sz, sz}, {0.3f, 0.7f, 1.f, alpha});
+            drawQuadAt(head, {sz, sz}, withAlpha(holdHeadTint, alpha));
             continue;
         }
 
@@ -367,34 +422,32 @@ void CytusRenderer::onRender(Renderer& renderer) {
                     glm::vec2 cur(scanToScreenX(note.path[i].first),
                                   scanToScreenY(note.path[i].second));
                     renderer.lines().drawLine(prev, cur, NOTE_RADIUS * 0.4f,
-                                              {0.85f, 0.5f, 1.f, alpha * 0.55f});
+                                              withAlpha(slidePathTint, alpha));
                     prev = cur;
                 }
             }
             // Head marker
-            drawQuadAt(head, {sz, sz}, {0.85f, 0.5f, 1.f, alpha});
+            drawQuadAt(head, {sz, sz}, withAlpha(slideHeadTint, alpha));
             // Node markers at each control point after the head
             for (size_t i = 1; i < note.path.size(); ++i) {
                 glm::vec2 pp(scanToScreenX(note.path[i].first),
                              scanToScreenY(note.path[i].second));
                 drawQuadAt(pp, {NOTE_RADIUS * 0.6f, NOTE_RADIUS * 0.6f},
-                           {1.f, 1.f, 1.f, alpha});
+                           withAlpha(slideNodeTint, alpha));
             }
             continue;
         }
 
         if (note.isFlick) {
-            // Draw an arrow-like quad; direction = sweep direction at note.time
-            drawQuadAt(head, {sz * 0.9f, sz * 1.2f},
-                       {1.f, 0.75f, 0.35f, alpha});
-            drawQuadAt(head, {sz * 0.4f, sz * 0.4f},
-                       {1.f, 1.f, 1.f, alpha});
+            // Arrow body uses the Flick tint; inner accent is a derived white.
+            drawQuadAt(head, {sz * 0.9f, sz * 1.2f}, withAlpha(flickTint, alpha));
+            drawQuadAt(head, {sz * 0.4f, sz * 0.4f}, {1.f, 1.f, 1.f, alpha});
             continue;
         }
 
-        // Plain Tap: outer dark ring + inner fill
+        // Plain Tap: outer dark ring + inner fill (ring stays hardcoded).
         drawQuadAt(head, {sz + 8.f, sz + 8.f}, {0.f, 0.f, 0.f, alpha * 0.6f});
-        drawQuadAt(head, {sz, sz}, {1.f, 1.f, 1.f, alpha});
+        drawQuadAt(head, {sz, sz}, withAlpha(tapTint, alpha));
     }
 }
 

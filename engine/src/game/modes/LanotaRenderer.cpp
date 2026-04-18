@@ -11,6 +11,34 @@
 static constexpr float TWO_PI = 6.28318530717958f;
 static constexpr float PI     = 3.14159265358979f;
 
+namespace {
+// Slot ids mirror MaterialSlots.cpp::kLanotaSlots.
+enum LanotaSlot : uint16_t {
+    SlotArcTile         = 0,
+    SlotArcHalo         = 1,
+    SlotHoldBody        = 5,
+    SlotHoldBodyActive  = 6,
+    SlotHoldHead        = 7,
+    SlotHoldHeadActive  = 8,
+    SlotSampleMarker    = 9,
+    SlotInnerSpawnDisk  = 10,
+    SlotOuterHitRing    = 11,
+};
+MaterialKind laKindFromString(const std::string& s) {
+    if (s == "glow")     return MaterialKind::Glow;
+    if (s == "scroll")   return MaterialKind::Scroll;
+    if (s == "pulse")    return MaterialKind::Pulse;
+    if (s == "gradient") return MaterialKind::Gradient;
+    return MaterialKind::Unlit;
+}
+} // namespace
+
+glm::vec4 LanotaRenderer::slotTint(uint16_t slot, glm::vec4 fallbackRGBA) const {
+    auto it = m_chartMaterials.find(slot);
+    if (it == m_chartMaterials.end()) return fallbackRGBA;
+    return it->second.tint;
+}
+
 // Project world pos → screen coords (y=0 bottom, y=h top).
 // Vulkan-corrected perspective: NDC Y=+1 → y=0 (bottom), NDC Y=-1 → y=h (top).
 glm::vec2 LanotaRenderer::w2s(glm::vec3 pos, const glm::mat4& vp, float sw, float sh) {
@@ -25,6 +53,16 @@ glm::vec2 LanotaRenderer::w2s(glm::vec3 pos, const glm::mat4& vp, float sw, floa
 void LanotaRenderer::onInit(Renderer& renderer, const ChartData& chart,
                             const GameModeConfig* config) {
     m_renderer = &renderer;
+
+    // Per-slot chart material overrides.
+    m_chartMaterials.clear();
+    for (const auto& md : chart.materials) {
+        Material mat;
+        mat.kind   = laKindFromString(md.kind);
+        mat.tint   = {md.tint[0],   md.tint[1],   md.tint[2],   md.tint[3]};
+        mat.params = {md.params[0], md.params[1], md.params[2], md.params[3]};
+        m_chartMaterials[md.slot] = mat;
+    }
 
     // Seed disk layout from the per-song config (falls back to defaults).
     if (config) {
@@ -279,14 +317,14 @@ void LanotaRenderer::onRender(Renderer& renderer) {
     {
         std::vector<glm::vec2> inner;
         buildRingPolyline((INNER_RADIUS * m_diskScale), inner);
-        renderer.lines().drawPolyline(inner, 2.f, {0.35f, 0.55f, 0.9f, 0.6f}, true);
+        renderer.lines().drawPolyline(inner, 2.f,
+            slotTint(SlotInnerSpawnDisk, {0.35f, 0.55f, 0.9f, 0.6f}), true);
     }
 
     // ── Lane dividers + first-lane marker ────────────────────────────────────
-    // Radial guides from the inner disk out to — but not past — the outer
-    // hit disk, so nothing bleeds outside the large ring. Lane 0 sits at
-    // the top (12 o'clock); lane numbers increase clockwise.
-    if (m_trackCount > 0 && !m_rings.empty()) {
+    // Authoring guides only — drawn in the editor preview so the user can see
+    // where lane boundaries sit while placing notes. Hidden during gameplay.
+    if (m_isEditorPreview && m_trackCount > 0 && !m_rings.empty()) {
         float outermost = 0.f;
         for (auto& r : m_rings) outermost = std::max(outermost, r.radius);
         // Keep the divider's inner/outer endpoints strictly between the two
@@ -325,11 +363,12 @@ void LanotaRenderer::onRender(Renderer& renderer) {
     // Draw cross-lane hold bodies before note heads so heads render on top.
     drawHoldBodies(renderer);
 
+    glm::vec4 outerRingTint = slotTint(SlotOuterHitRing, {0.5f, 0.7f, 1.f, 0.8f});
     for (auto& ring : m_rings) {
         // Outer hit ring circle at Z=0
         std::vector<glm::vec2> pts;
         buildRingPolyline(ring.radius, pts);
-        renderer.lines().drawPolyline(pts, 2.f, {0.5f, 0.7f, 1.f, 0.8f}, true);
+        renderer.lines().drawPolyline(pts, 2.f, outerRingTint, true);
 
         for (auto& note : ring.notes) {
             // Skip already-consumed notes (touch picked them, or showJudgment hit them).
@@ -376,9 +415,10 @@ void LanotaRenderer::onRender(Renderer& renderer) {
                 ? std::max(0.f, 1.f + timeDiff / 0.3f)
                 : 0.4f + 0.6f * std::max(0.f, 1.f - timeDiff / APPROACH_SECS);
 
-            glm::vec4 color = (note.type == NoteType::Flick)
-                ? glm::vec4{1.f, 0.35f, 0.35f, alpha}
-                : glm::vec4{1.f, 0.85f, 0.3f,  alpha};
+            glm::vec4 baseTint = (note.type == NoteType::Flick)
+                ? slotTint(SlotArcTile, {1.f, 0.35f, 0.35f, 1.f})   // Flick falls back to red
+                : slotTint(SlotArcTile, {1.f, 0.85f, 0.3f,  1.f});
+            glm::vec4 color = {baseTint.r, baseTint.g, baseTint.b, baseTint.a * alpha};
 
             // ── Curved arc tile, foreshortened by m_perspVP ──────────────────
             // The note is a tile on the disk (a plane parallel to z=0 at z=noteZ)
@@ -439,7 +479,8 @@ void LanotaRenderer::onRender(Renderer& renderer) {
                 haloOut[i] = w2s(wOut, m_perspVP, sw, sh);
             }
 
-            glm::vec4 haloColor{0.f, 0.f, 0.f, alpha * 0.5f};
+            glm::vec4 haloBase = slotTint(SlotArcHalo, {0.f, 0.f, 0.f, 0.5f});
+            glm::vec4 haloColor{haloBase.r, haloBase.g, haloBase.b, haloBase.a * alpha};
 
             // Halo first (drawn behind the bright fill).
             if (haloOk) {
@@ -579,10 +620,10 @@ void LanotaRenderer::drawHoldBodies(Renderer& renderer) {
         // current radius. Adjacent slices connect into a curved sector that
         // follows the ring even when the hold stays in a single lane.
         const bool holdActive = m_activeHoldIds.count(hb.noteId) > 0;
-        // Bright white-cyan core that blooms when the player is holding.
+        // Core: Glow slot when active (brighter + bloom-ready), Unlit otherwise.
         const glm::vec4 bodyColor = holdActive
-            ? glm::vec4{1.6f, 2.4f, 3.0f, 0.95f}
-            : glm::vec4{0.85f, 1.05f, 1.35f, 0.95f};
+            ? slotTint(SlotHoldBodyActive, {0.4f, 0.9f, 1.f, 0.95f})
+            : slotTint(SlotHoldBody,       {0.85f, 1.05f, 1.35f, 0.95f});
 
         // ── Lanota-style hold body ─────────────────────────────────────────
         // In real Lanota a hold body is a curved 2D track laid out on the
@@ -683,9 +724,11 @@ void LanotaRenderer::drawHoldBodies(Renderer& renderer) {
             }
         };
 
+        // Halo ribbon reuses the hold-body slot alpha at reduced brightness —
+        // same tint family, just the "wide and dim" variant of the beam.
         const glm::vec4 haloColor = holdActive
-            ? glm::vec4{1.0f, 1.0f, 1.0f, 0.85f}
-            : glm::vec4{0.55f, 0.80f, 1.0f, 0.85f};
+            ? slotTint(SlotHoldBodyActive, {1.0f, 1.0f, 1.0f, 0.85f})
+            : slotTint(SlotHoldBody,       {0.55f, 0.80f, 1.0f, 0.85f});
         drawRibbon(haloHalfPx, haloColor, /*isCore=*/false);
         drawRibbon(coreHalfPx, bodyColor, /*isCore=*/true);
 
@@ -724,8 +767,8 @@ void LanotaRenderer::drawHoldBodies(Renderer& renderer) {
             }
             if (headOk) {
                 glm::vec4 headCol = holdActive
-                    ? glm::vec4{1.6f, 2.2f, 2.8f, 1.0f}
-                    : glm::vec4{0.95f, 1.10f, 1.45f, 1.0f};
+                    ? slotTint(SlotHoldHeadActive, {0.4f, 0.9f, 1.f, 1.f})
+                    : slotTint(SlotHoldHead,       {0.8f, 0.95f, 1.f, 1.f});
                 for (int k = 0; k < HEAD_SEGS; ++k) {
                     renderer.quads().drawQuadCorners(
                         inPts[k],  outPts[k],
@@ -760,9 +803,10 @@ void LanotaRenderer::drawHoldBodies(Renderer& renderer) {
             glm::vec2 sBR = w2s({wA.x + perp.x, wA.y + perp.y, 0.f}, m_perspVP, sw, sh);
             glm::vec2 sTR = w2s({wB.x + perp.x, wB.y + perp.y, 0.f}, m_perspVP, sw, sh);
             glm::vec2 sTL = w2s({wB.x - perp.x, wB.y - perp.y, 0.f}, m_perspVP, sw, sh);
+            glm::vec4 sampleCol = slotTint(SlotSampleMarker, {1.f, 0.95f, 0.3f, 0.95f});
             renderer.quads().drawQuadCorners(
                 sBL, sBR, sTR, sTL,
-                {1.f, 0.95f, 0.3f, 0.95f}, {0.f, 0.f, 1.f, 1.f},
+                sampleCol, {0.f, 0.f, 1.f, 1.f},
                 renderer.whiteView(), renderer.whiteSampler(),
                 renderer.context(), renderer.descriptors());
         }

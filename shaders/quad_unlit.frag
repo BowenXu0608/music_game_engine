@@ -1,8 +1,5 @@
 #version 450
 
-// NOTE: Superseded by quad_unlit.frag. Kept for backward-compat with any
-// leftover references. Identical to quad_unlit.frag.
-
 layout(set = 0, binding = 0) uniform FrameUBO {
     mat4  viewProj;
     float time;

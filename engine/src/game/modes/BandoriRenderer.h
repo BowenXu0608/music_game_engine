@@ -1,7 +1,9 @@
 #pragma once
 #include "GameModeRenderer.h"
 #include "gameplay/JudgmentDisplay.h"
+#include "renderer/Material.h"
 #include <vector>
+#include <unordered_map>
 #include <unordered_set>
 #include <glm/glm.hpp>
 
@@ -48,4 +50,11 @@ private:
     static constexpr float SCROLL_SPEED = 14.f;
     // Note width = full lane (set from m_laneSpacing in onResize)
     float m_noteWorldW = 1.2f;
+
+    // Per-slot material overrides loaded from chart.materials at onInit.
+    // Empty → fall back to the per-slot default in MaterialSlots.cpp.
+    std::unordered_map<uint16_t, Material> m_chartMaterials;
+
+    // Returns the chart override for `slot` if present, else `fallback`.
+    Material slotOrFallback(uint16_t slot, const Material& fallback) const;
 };
