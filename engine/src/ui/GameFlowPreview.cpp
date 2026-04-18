@@ -1,4 +1,5 @@
 #include "GameFlowPreview.h"
+#include "SettingsPageUI.h"
 #include "engine/Engine.h"
 #include <imgui.h>
 #include <algorithm>
@@ -96,8 +97,21 @@ void GameFlowPreview::renderControls(ImVec2 origin, float width, float controlH,
     ImGui::TextDisabled("Effect: %s (%.1fs)", effectName, m_transitionDur);
 
     ImGui::SameLine();
-    const char* pageName = (m_currentPage == FlowPage::StartScreen) ? "Start Screen" : "Music Selection";
+    const char* pageName = "Start Screen";
+    switch (m_currentPage) {
+        case FlowPage::StartScreen:    pageName = "Start Screen";    break;
+        case FlowPage::MusicSelection: pageName = "Music Selection"; break;
+        case FlowPage::Settings:       pageName = "Settings";        break;
+    }
     ImGui::TextDisabled("| Page: %s", pageName);
+
+    // Jump directly to any page (preview only — no transitions).
+    ImGui::SameLine();
+    if (ImGui::SmallButton("Start")) { m_currentPage = FlowPage::StartScreen; m_transitioning = false; }
+    ImGui::SameLine();
+    if (ImGui::SmallButton("Music")) { m_currentPage = FlowPage::MusicSelection; m_transitioning = false; }
+    ImGui::SameLine();
+    if (ImGui::SmallButton("Settings")) { m_currentPage = FlowPage::Settings; m_transitioning = false; }
 
     if (m_transitioning) {
         ImGui::SameLine();
@@ -114,9 +128,28 @@ void GameFlowPreview::renderPage(FlowPage page, ImVec2 origin, ImVec2 size, Engi
         case FlowPage::StartScreen:
             engine->startScreenEditor().renderGamePreview(origin, size);
             break;
-        case FlowPage::MusicSelection:
+        case FlowPage::MusicSelection: {
             engine->musicSelectionEditor().renderGamePreview(origin, size);
+
+            // Overlay in-game Settings button in the top-right corner.
+            // Simulates what the shipped Android game shows on music select.
+            const float btnW = 110.f, btnH = 32.f, pad = 12.f;
+            ImGui::SetCursorScreenPos(ImVec2(origin.x + size.x - btnW - pad,
+                                             origin.y + pad));
+            if (ImGui::Button("Settings", ImVec2(btnW, btnH))) {
+                m_currentPage = FlowPage::Settings;
+                m_transitioning = false;
+            }
             break;
+        }
+        case FlowPage::Settings: {
+            SettingsPageUI::Host host{};
+            host.onBack = [this]() { m_currentPage = FlowPage::MusicSelection; };
+            // Allow live interaction in preview so the engine user can test
+            // the page — nothing is persisted since there's no audio hook.
+            SettingsPageUI::render(origin, size, m_previewSettings, host, /*readOnly=*/false);
+            break;
+        }
     }
 }
 

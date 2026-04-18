@@ -430,6 +430,10 @@ void Engine::render() {
         case EditorLayer::MusicSelection:
             m_musicSelectionEditor.render(this);
             break;
+        case EditorLayer::Settings:
+            m_settingsEditor.render(this);
+            applyPlayerSettings();
+            break;
         case EditorLayer::SongEditor:
             m_songEditor.render(this);
             break;
@@ -609,10 +613,22 @@ void Engine::launchGameplay(const SongInfo& song, Difficulty difficulty,
     // at -leadIn, loadAudio never fires, and the new run looks frozen.
     m_clock.resume();
 
+    // Push player settings into the fresh renderer + detector.
+    applyPlayerSettings();
+
     switchLayer(EditorLayer::GamePlay);
 
     std::cout << "[Engine] Gameplay started: " << song.name
               << " (offset=" << song.gameMode.audioOffset << "s, leadIn=" << leadIn << "s)\n";
+}
+
+void Engine::applyPlayerSettings() {
+    m_audio.setMusicVolume   (m_playerSettings.musicVolume);
+    m_audio.setSfxVolume     (m_playerSettings.hitSoundVolume);
+    m_audio.setHitSoundEnabled(m_playerSettings.hitSoundEnabled);
+    m_hitDetector.setAudioOffset(m_playerSettings.audioOffsetMs / 1000.f);
+    const float mul = m_playerSettings.noteSpeed / 5.f;
+    if (m_activeMode) m_activeMode->setNoteSpeedMultiplier(mul);
 }
 
 void Engine::launchGameplayDirect(const SongInfo& song, const ChartData& chart,

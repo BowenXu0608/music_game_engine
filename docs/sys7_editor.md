@@ -165,3 +165,28 @@ Three related fixes shipped with it:
 - `rebuildLaneMaskTimeline` now multiplies the sampled keyframe scale by `gm.diskInitialScale`, so the `Initial scale` slider is an actual base multiplier in the editor's reachability sampling (previously the base was hardcoded to 1.0 in `sampleDiskScale`).
 - `LanotaRenderer` was doing the same thing at runtime — `onInit` seeded `m_diskScale` from `diskInitialScale`, but `onUpdate` overwrote it every frame with `getDiskScale()` (base 1.0). Now stores `m_diskInitialScale` and applies it as `m_diskScale = m_diskInitialScale * getDiskScale(...)` each frame, so the slider actually enlarges the disk in gameplay.
 - Raised the scale slider caps: `Target scale` keyframe slider 3.0 → 5.0, `Initial scale` slider 2.0 → 5.0. Previously you couldn't push the disk far enough past the viewport to see meaningful gating.
+
+### Player Settings page (2026-04-18)
+
+Added `EditorLayer::Settings` as the fourth layer alongside `ProjectHub → StartScreen → MusicSelection → SongEditor`. It hosts the player-facing settings screen shipped in the final Android game; from the engine user's perspective it's a read-and-tweak preview, live-bound to `Engine::playerSettings()`.
+
+**Layer navigation:** `MusicSelectionEditor`'s nav bar gained a **Next: Settings >** button at the bottom-right (mirrors the "Next: Music Selection >" pattern from `StartScreenEditor`). `SettingsEditor::render` just wraps `SettingsPageUI::render` with a host that hands it `engine->audio()` and an `onBack` lambda that calls `engine->applyPlayerSettings()` then `switchLayer(MusicSelection)`.
+
+**Settings exposed (8 only):**
+
+| Setting | Type | Applied via |
+|---|---|---|
+| Music volume | slider 0–1 | `AudioEngine::setMusicVolume` → `ma_sound_set_volume` |
+| Hit-sound volume | slider 0–1 | `AudioEngine::setSfxVolume` (used by `playClickSfx` amplitude) |
+| Hit-sound enabled | checkbox | `AudioEngine::setHitSoundEnabled` (early-exit in `playClickSfx`) |
+| Audio offset (ms) | slider ±200 + **tap-to-calibrate** wizard | `HitDetector::setAudioOffset` applied across every timing check |
+| Note speed | slider 1–10 (5 = 1.0×) | `GameModeRenderer::setNoteSpeedMultiplier` — Bandori/Arcaea multiply `SCROLL_SPEED`, Lanota divides `APPROACH_SECS`. Cytus (Scan Line) + Phigros ignore it |
+| Background dim | slider 0–1 | Semi-transparent black overlay via `ImGui::GetBackgroundDrawList()` during gameplay |
+| FPS counter | checkbox | Top-left text using `ImGui::GetIO().Framerate` during gameplay |
+| Language | combo (en/zh/ja/ko) | **Store-only** — persisted, not wired to a localization system yet |
+
+**Shared UI:** `SettingsPageUI::render(origin, size, PlayerSettings&, Host, readOnly)` in `engine/src/ui/SettingsPageUI.{h,cpp}` — one source for three call sites: `SettingsEditor`, `MusicSelectionEditor`'s Test Game gear modal, and `AndroidEngine::renderSettings` in the shipped game. Layout is a full-screen opaque scrim window + centered 640 px card (via `BeginChild` with `ChildBg`). `ImGui::BringWindowToDisplayFront(window)` is called each frame so the scrim stays above any caller's windows without touching ImGui's active-item state (which `SetNextWindowFocus` would reset and break slider drags).
+
+**Test Game gear button:** In-game music-select screen (the wheel-based `MusicSelectionEditor::renderGamePreview`) got a floating **⚙ Settings** button top-right. It's rendered as its own top-level ImGui window after `##test_musicsel` closes, and the test window uses `ImGuiWindowFlags_NoBringToFrontOnFocus` so clicking a song card doesn't push the gear behind. Clicking the gear sets `m_showSettings = true`, which opens the same `SettingsPageUI` modal bound to `engine->playerSettings()`. Settings are applied every frame while the modal is open so slider drags take effect live — volume is audibly changing as the slider moves, note-speed is visible on the next PLAY.
+
+**Persistence:** `PlayerSettings` struct + JSON I/O lives in `engine/src/game/PlayerSettings.{h,cpp}`, using the same hand-rolled `jsonString / jsonDouble / jsonBool` scanner `AndroidEngine.cpp` already uses for `music_selection.json`. On Android the file is `<internal_storage>/player_settings.json`, loaded during `AndroidEngine::init` and saved on `onBack` from the Settings screen.

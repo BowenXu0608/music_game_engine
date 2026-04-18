@@ -1,7 +1,9 @@
 #include "MusicSelectionEditor.h"
+#include "SettingsPageUI.h"
 #include "engine/Engine.h"
 #include "renderer/vulkan/VulkanContext.h"
 #include "renderer/vulkan/BufferManager.h"
+#include <imgui_internal.h>
 #include <imgui.h>
 #include <nlohmann/json.hpp>
 #include <fstream>
@@ -342,7 +344,8 @@ void MusicSelectionEditor::render(Engine* engine) {
         ImGui::SetNextWindowSize(displaySz);
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
         ImGui::Begin("##test_musicsel", nullptr,
-            ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove);
+            ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
+            ImGuiWindowFlags_NoBringToFrontOnFocus);
 
         ImVec2 origin = ImGui::GetCursorScreenPos();
         renderGamePreview(origin, displaySz);
@@ -362,6 +365,48 @@ void MusicSelectionEditor::render(Engine* engine) {
 
         ImGui::End();
         ImGui::PopStyleVar();
+
+        // ── Settings page overlay — drawn FIRST so the gear button below is
+        // always on top of it, giving the player a single consistent point
+        // of interaction.
+        if (m_showSettings) {
+            PlayerSettings& settings =
+                m_engine ? m_engine->playerSettings() : m_previewSettings;
+            SettingsPageUI::Host host;
+            host.audio  = m_engine ? &m_engine->audio() : nullptr;
+            host.onSave = [this]() { if (m_engine) m_engine->applyPlayerSettings(); };
+            host.onBack = [this]() {
+                if (m_engine) m_engine->applyPlayerSettings();
+                m_showSettings = false;
+            };
+            SettingsPageUI::render(ImVec2(0, 0), displaySz,
+                                   settings, host, /*readOnly=*/false);
+            // Live-apply every frame while the modal is open so slider drags
+            // update the active renderer / audio engine immediately.
+            if (m_engine) m_engine->applyPlayerSettings();
+        }
+
+        // ── Gear/Settings button — independent top-level window submitted
+        // LAST so its default z-order is above both the music-select test
+        // window and (when present) the settings modal scrim. ─────────────
+        {
+            const float gearW = 160.f, gearH = 44.f, gearPad = 16.f;
+            ImGui::SetNextWindowPos(ImVec2(displaySz.x - gearW - gearPad, gearPad),
+                                    ImGuiCond_Always);
+            ImGui::SetNextWindowSize(ImVec2(gearW, gearH), ImGuiCond_Always);
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(2, 2));
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.f);
+            ImGui::Begin("##settings_gear_btn", nullptr,
+                ImGuiWindowFlags_NoDecoration  | ImGuiWindowFlags_NoMove |
+                ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoScrollbar);
+            if (ImGui::Button("\xE2\x9A\x99  Settings",
+                              ImVec2(gearW - 4.f, gearH - 4.f))) {
+                m_showSettings = true;
+            }
+            ImGui::End();
+            ImGui::PopStyleVar(2);
+        }
+
         return;
     }
 
@@ -442,6 +487,13 @@ void MusicSelectionEditor::render(Engine* engine) {
         ImGui::TextColored(ImVec4(0.4f, 1.f, 0.4f, 1.f), "%s", m_statusMsg.c_str());
     }
 
+    // Bottom-right: switch to the dedicated Settings editor layer.
+    ImGui::SameLine();
+    ImGui::SetCursorPosX(contentSize.x - 200.f);
+    if (ImGui::Button("Next: Settings >")) {
+        if (engine) engine->switchLayer(EditorLayer::Settings);
+    }
+
     ImGui::End();
 }
 
@@ -510,6 +562,12 @@ void MusicSelectionEditor::renderGamePreview(ImVec2 p, ImVec2 size) {
 
     float playY = diffY + 50.f;
     renderPlayButton(ImVec2(centerX, playY), centerW);
+
+    // Gear/Settings button + modal overlay are rendered by the caller (see
+    // MusicSelectionEditor::render and GameFlowPreview) AFTER this window
+    // closes so ImGui can treat them as independent top-level windows. That
+    // guarantees the button hit-test isn't blocked by the wheel cards'
+    // InvisibleButtons inside this window.
 }
 
 // ── Set wheel (left) ─────────────────────────────────────────────────────────

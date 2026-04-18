@@ -45,8 +45,15 @@ public:
     void setMaterialLibrary(MaterialAssetLibrary* lib) { m_materialLibrary = lib; }
     MaterialAssetLibrary* materialLibrary() const { return m_materialLibrary; }
 
+    // Player-facing note-speed multiplier (1.0 = default). Drop modes and
+    // Circle (Lanota) scale scroll speed / approach time by this value;
+    // ScanLine (Cytus) and Phigros ignore it entirely.
+    void setNoteSpeedMultiplier(float m) { m_noteSpeedMul = (m > 0.01f) ? m : 0.01f; }
+    float noteSpeedMultiplier() const { return m_noteSpeedMul; }
+
 protected:
     std::unordered_set<uint32_t> m_activeHoldIds;
     bool m_isEditorPreview = false;
     MaterialAssetLibrary* m_materialLibrary = nullptr;
+    float m_noteSpeedMul = 1.f;
 };

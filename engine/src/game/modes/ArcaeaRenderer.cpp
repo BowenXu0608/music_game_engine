@@ -232,7 +232,7 @@ void ArcaeaRenderer::writeArcVertices(ArcMesh& am, float tClip) {
     for (int i = 0; i <= ARC_SEGMENTS; ++i) {
         float frac = static_cast<float>(i) / ARC_SEGMENTS;
         float t    = tClip + (1.f - tClip) * frac;
-        float z    = -t * static_cast<float>(am.data.duration) * SCROLL_SPEED;
+        float z    = -t * static_cast<float>(am.data.duration) * (SCROLL_SPEED * m_noteSpeedMul);
         glm::vec2 xy = evalArc(am.data, t);
 
         for (int s = 0; s < ARC_SIDES; ++s) {
@@ -292,7 +292,7 @@ void ArcaeaRenderer::writeArcShadowVertices(ArcMesh& am, float tClip) {
     for (int i = 0; i <= ARC_SEGMENTS; ++i) {
         float frac = static_cast<float>(i) / ARC_SEGMENTS;
         float t    = tClip + (1.f - tClip) * frac;
-        float z    = -t * static_cast<float>(am.data.duration) * SCROLL_SPEED;
+        float z    = -t * static_cast<float>(am.data.duration) * (SCROLL_SPEED * m_noteSpeedMul);
         glm::vec2 xy = evalArc(am.data, t);
 
         MeshVertex vL{}, vR{};
@@ -478,7 +478,7 @@ void ArcaeaRenderer::onRender(Renderer& renderer) {
     Material clickMat = withWhite(slotOrFallback(SlotClickNote, clickDefault));
     Material flickMat = withWhite(slotOrFallback(SlotFlickNote, flickDefault));
     for (auto& note : m_tapNotes) {
-        float z = static_cast<float>(note.time - m_songTime) * SCROLL_SPEED;
+        float z = static_cast<float>(note.time - m_songTime) * (SCROLL_SPEED * m_noteSpeedMul);
         if (z < 0.f || z > 30.f) continue;
         float laneX = 0.f;
         if (auto* tap = std::get_if<TapData>(&note.data))       laneX = tap->laneX;
@@ -503,7 +503,7 @@ void ArcaeaRenderer::onRender(Renderer& renderer) {
     Material arcTapTileMat   = withWhite(slotOrFallback(SlotArcTapTile,   arcTapTileDefault));
     Material arcTapShadowMat = withWhite(slotOrFallback(SlotArcTapShadow, arcTapShadowDefault));
     for (auto& note : m_arcTaps) {
-        float z = static_cast<float>(note.time - m_songTime) * SCROLL_SPEED;
+        float z = static_cast<float>(note.time - m_songTime) * (SCROLL_SPEED * m_noteSpeedMul);
         if (z < 0.f || z > 30.f) continue;
         auto* tap = std::get_if<TapData>(&note.data);
         if (!tap) continue;
@@ -541,7 +541,7 @@ void ArcaeaRenderer::onRender(Renderer& renderer) {
         if (am.data.isVoid) continue;
         double songRel = m_songTime - am.startTime;
         if (songRel >= am.data.duration) continue;
-        float zOffset = static_cast<float>(am.startTime - m_songTime) * SCROLL_SPEED;
+        float zOffset = static_cast<float>(am.startTime - m_songTime) * (SCROLL_SPEED * m_noteSpeedMul);
         if (zOffset > 30.f) continue;
         glm::mat4 model = glm::translate(glm::mat4(1.f), {0.f, 0.f, -zOffset});
         const bool isRed = am.data.color != 0;

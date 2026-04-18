@@ -13,6 +13,7 @@
 #include "gameplay/ScoreTracker.h"
 #include "game/chart/ChartLoader.h"
 #include "game/chart/ChartTypes.h"
+#include "game/PlayerSettings.h"
 #include "ui/ProjectHub.h"  // for GameModeConfig, GameModeType, DropDimension
 #include "game/modes/GameModeRenderer.h"
 #include "game/modes/BandoriRenderer.h"
@@ -32,7 +33,7 @@ struct ANativeWindow;
 extern void androidSetNativeWindow(ANativeWindow* win);
 extern void androidSetSwapchainWindow(ANativeWindow* win);
 
-enum class GameScreen { StartScreen, MusicSelection, Gameplay, Results };
+enum class GameScreen { StartScreen, MusicSelection, Settings, Gameplay, Results };
 
 class AndroidEngine {
 public:
@@ -55,9 +56,13 @@ private:
     void renderGameplayHUD();
     void renderResultsHUD();
     void renderMusicSelection();
+    void renderSettings();
 
     void loadProject();
     void loadStartScreen();
+    void loadPlayerSettingsFile();   // reads player_settings.json + applies live
+    void savePlayerSettingsFile();
+    void applyPlayerSettings();      // push values into audio + active renderer
     void startGameplay(int songIndex);
     void exitGameplay();
 
@@ -107,4 +112,9 @@ private:
     };
     std::vector<SongEntry> m_songs;
     int m_selectedSong = 0;
+
+    // Player-facing runtime settings (persisted to player_settings.json in
+    // app internal storage). See game/PlayerSettings.h.
+    PlayerSettings m_playerSettings;
+    std::string    m_settingsPath;
 };

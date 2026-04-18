@@ -27,10 +27,11 @@ void HitDetector::init(const ChartData& chart) {
 
 std::vector<MissedNote> HitDetector::update(double songTime) {
     std::vector<MissedNote> missed;
+    const double adj = songTime - static_cast<double>(m_audioOffset);
 
     auto it = std::remove_if(m_activeNotes.begin(), m_activeNotes.end(),
-        [this, songTime, &missed](const NoteEvent& note) {
-            if (note.time < songTime - 0.1) {
+        [this, adj, &missed](const NoteEvent& note) {
+            if (note.time < adj - 0.1) {
                 MissedNote m;
                 m.noteId = note.id;
                 m.noteType = note.type;
@@ -50,8 +51,9 @@ std::vector<MissedNote> HitDetector::update(double songTime) {
 }
 
 std::optional<HitResult> HitDetector::checkHit(int lane, double songTime) {
+    const double adj = songTime - static_cast<double>(m_audioOffset);
     for (auto it = m_activeNotes.begin(); it != m_activeNotes.end(); ++it) {
-        float timingDelta = static_cast<float>(it->time - songTime);
+        float timingDelta = static_cast<float>(it->time - adj);
         if (std::abs(timingDelta) <= 0.1f) {
             int noteLane = -1;
             if (std::holds_alternative<TapData>(it->data)) {
@@ -76,10 +78,11 @@ std::optional<HitResult> HitDetector::checkHit(int lane, double songTime) {
 
 std::vector<HitResult> HitDetector::consumeDrags(int lane, double songTime) {
     std::vector<HitResult> results;
+    const double adj = songTime - static_cast<double>(m_audioOffset);
     // Wider window than checkHit: ±0.15s so drags feel forgiving
     for (auto it = m_activeNotes.begin(); it != m_activeNotes.end(); ) {
         if (it->type != NoteType::Drag) { ++it; continue; }
-        float timingDelta = static_cast<float>(it->time - songTime);
+        float timingDelta = static_cast<float>(it->time - adj);
         if (std::abs(timingDelta) > 0.15f) { ++it; continue; }
         int noteLane = -1;
         if (std::holds_alternative<TapData>(it->data))
@@ -168,9 +171,10 @@ std::vector<HitDetector::AutoHit> HitDetector::autoPlayTick(double songTime) {
 }
 
 std::optional<HitResult> HitDetector::consumeNoteById(uint32_t noteId, double songTime) {
+    const double adj = songTime - static_cast<double>(m_audioOffset);
     for (auto it = m_activeNotes.begin(); it != m_activeNotes.end(); ++it) {
         if (it->id != noteId) continue;
-        float timingDelta = static_cast<float>(it->time - songTime);
+        float timingDelta = static_cast<float>(it->time - adj);
         if (std::abs(timingDelta) > 0.15f) return std::nullopt; // outside window
         HitResult result{it->id, timingDelta, it->type};
         m_activeNotes.erase(it);
@@ -182,8 +186,9 @@ std::optional<HitResult> HitDetector::consumeNoteById(uint32_t noteId, double so
 std::optional<HitResult> HitDetector::checkHitPosition(glm::vec2 screenPos,
                                                          glm::vec2 screenSize,
                                                          double songTime) {
+    const double adj = songTime - static_cast<double>(m_audioOffset);
     for (auto it = m_activeNotes.begin(); it != m_activeNotes.end(); ++it) {
-        float timingDelta = static_cast<float>(it->time - songTime);
+        float timingDelta = static_cast<float>(it->time - adj);
         if (std::abs(timingDelta) > 0.1f) continue;
 
         if (std::holds_alternative<TapData>(it->data)) {
@@ -214,9 +219,10 @@ std::optional<HitResult> HitDetector::checkHitPhigros(glm::vec2 screenPos,
     if (perpDist > HIT_RADIUS_PX) return std::nullopt;
 
     float alongDist = glm::dot(delta, lineDir);
+    const double adj = songTime - static_cast<double>(m_audioOffset);
 
     for (auto it = m_activeNotes.begin(); it != m_activeNotes.end(); ++it) {
-        float timingDelta = static_cast<float>(it->time - songTime);
+        float timingDelta = static_cast<float>(it->time - adj);
         if (std::abs(timingDelta) > 0.1f) continue;
 
         if (std::holds_alternative<PhigrosNoteData>(it->data)) {
@@ -232,8 +238,9 @@ std::optional<HitResult> HitDetector::checkHitPhigros(glm::vec2 screenPos,
 }
 
 std::optional<uint32_t> HitDetector::beginHold(int lane, double songTime) {
+    const double adj = songTime - static_cast<double>(m_audioOffset);
     for (auto it = m_activeNotes.begin(); it != m_activeNotes.end(); ++it) {
-        float timingDelta = static_cast<float>(it->time - songTime);
+        float timingDelta = static_cast<float>(it->time - adj);
         if (std::abs(timingDelta) > 0.1f) continue;
 
         if (std::holds_alternative<HoldData>(it->data)) {
@@ -263,9 +270,10 @@ std::optional<uint32_t> HitDetector::beginHold(int lane, double songTime) {
 }
 
 std::optional<HitResult> HitDetector::beginHoldById(uint32_t noteId, double songTime) {
+    const double adj = songTime - static_cast<double>(m_audioOffset);
     for (auto it = m_activeNotes.begin(); it != m_activeNotes.end(); ++it) {
         if (it->id != noteId) continue;
-        float timingDelta = static_cast<float>(it->time - songTime);
+        float timingDelta = static_cast<float>(it->time - adj);
         if (std::abs(timingDelta) > 0.15f) return std::nullopt;
 
         ActiveHold hold{};
@@ -304,8 +312,9 @@ std::optional<HitResult> HitDetector::beginHoldById(uint32_t noteId, double song
 std::optional<uint32_t> HitDetector::beginHoldPosition(glm::vec2 screenPos,
                                                          glm::vec2 screenSize,
                                                          double songTime) {
+    const double adj = songTime - static_cast<double>(m_audioOffset);
     for (auto it = m_activeNotes.begin(); it != m_activeNotes.end(); ++it) {
-        float timingDelta = static_cast<float>(it->time - songTime);
+        float timingDelta = static_cast<float>(it->time - adj);
         if (std::abs(timingDelta) > 0.1f) continue;
 
         if (std::holds_alternative<ArcData>(it->data)) {
@@ -336,8 +345,9 @@ std::optional<HitResult> HitDetector::endHold(uint32_t noteId, double releaseTim
     if (holdIt == m_activeHolds.end()) return std::nullopt;
 
     const ActiveHold& hold = holdIt->second;
+    const double adjRelease = releaseTime - static_cast<double>(m_audioOffset);
     float expectedEnd  = static_cast<float>(hold.noteStartTime + hold.noteDuration);
-    float timingDelta  = static_cast<float>(releaseTime) - expectedEnd;
+    float timingDelta  = static_cast<float>(adjRelease) - expectedEnd;
 
     HitResult result{noteId, timingDelta, hold.noteType};
 

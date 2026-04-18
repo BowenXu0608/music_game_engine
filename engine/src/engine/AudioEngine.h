@@ -41,6 +41,14 @@ public:
     // Play a short synthesized click sound (for editor note placement).
     void playClickSfx();
 
+    // Player-settings hooks.
+    void setMusicVolume(float v);       // 0..1
+    void setSfxVolume(float v);         // 0..1
+    void setHitSoundEnabled(bool on);
+    float musicVolume() const { return m_musicVolume; }
+    float sfxVolume()   const { return m_sfxVolume; }
+    bool  hitSoundEnabled() const { return m_hitSoundEnabled; }
+
     // Decode audio file into a multi-LOD waveform envelope.
     // bucketCount sets the finest LOD; 3 coarser levels are derived automatically.
     static WaveformData decodeWaveform(const std::string& path,
@@ -50,4 +58,7 @@ private:
     struct Impl;
     Impl* m_impl = nullptr;
     bool  m_playing = false;
+    float m_musicVolume     = 1.f;
+    float m_sfxVolume       = 1.f;
+    bool  m_hitSoundEnabled = true;
 };

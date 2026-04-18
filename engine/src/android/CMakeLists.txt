@@ -52,6 +52,12 @@ set(SHARED_GAME_SOURCES
     ${ENGINE_SRC}/game/modes/ArcaeaRenderer.cpp
     ${ENGINE_SRC}/game/modes/LanotaRenderer.cpp
     ${ENGINE_SRC}/game/chart/ChartLoader.cpp
+    ${ENGINE_SRC}/game/PlayerSettings.cpp
+)
+
+# UI sources that the Android runtime uses (most ui/ editors stay desktop-only).
+set(SHARED_UI_SOURCES
+    ${ENGINE_SRC}/ui/SettingsPageUI.cpp
 )
 
 set(SHARED_GAMEPLAY_SOURCES
@@ -100,6 +106,7 @@ add_library(musicgame SHARED
     ${SHARED_CORE_SOURCES}
     ${SHARED_ENGINE_SOURCES}
     ${SHARED_INPUT_SOURCES}
+    ${SHARED_UI_SOURCES}
     ${IMGUI_SOURCES}
 )
 

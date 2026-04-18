@@ -34,6 +34,10 @@ public:
 
     void init(const ChartData& chart);
     void setTrackCount(int count) { m_trackCount = count; }
+    // Player-facing offset (seconds). Positive = songTime is effectively advanced
+    // (notes feel later / the player taps later to land in the window).
+    void setAudioOffset(float seconds) { m_audioOffset = seconds; }
+    float audioOffset() const { return m_audioOffset; }
     std::vector<MissedNote> update(double songTime);
 
     // Pop any sample-point ticks that have elapsed since the last call.
@@ -141,4 +145,5 @@ private:
     std::unordered_map<uint32_t, ActiveHold>  m_activeHolds;
     size_t m_nextNoteIndex = 0;
     int    m_trackCount    = 7;
+    float  m_audioOffset   = 0.f;
 };

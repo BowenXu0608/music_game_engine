@@ -1,10 +1,11 @@
 #pragma once
 #include "StartScreenEditor.h"
+#include "game/PlayerSettings.h"
 #include <imgui.h>
 
 class Engine;
 
-enum class FlowPage { StartScreen, MusicSelection };
+enum class FlowPage { StartScreen, MusicSelection, Settings };
 
 class GameFlowPreview {
 public:
@@ -24,4 +25,6 @@ private:
     float            m_transitionProgress = 0.f;
     float            m_transitionDur      = 0.5f;
     TransitionEffect m_activeEffect  = TransitionEffect::Fade;
+    // Dummy settings struct so the editor preview has state to bind sliders to.
+    PlayerSettings   m_previewSettings;
 };

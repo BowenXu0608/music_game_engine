@@ -267,9 +267,9 @@ void BandoriRenderer::onRender(Renderer& renderer) {
         // so the visible ribbon is always continuous from the very moment
         // any part of the hold enters the highway.
         //
-        //   wz = -(absT - songTime) * SCROLL_SPEED
+        //   wz = -(absT - songTime) * (SCROLL_SPEED * m_noteSpeedMul)
         //   absT = note.time + tOff
-        //   ⇒ tOff = (-wz / SCROLL_SPEED) - (note.time - songTime)
+        //   ⇒ tOff = (-wz / (SCROLL_SPEED * m_noteSpeedMul)) - (note.time - songTime)
         // While actively holding, hide everything past the judgement line
         // (wz > 0). Before the hold is started, allow a small +12 of past
         // overshoot so the head doesn't pop out the moment it crosses the
@@ -277,8 +277,8 @@ void BandoriRenderer::onRender(Renderer& renderer) {
         const float zNear = holdActive ? 0.f : 12.f;
         const float zFar  = APPROACH_Z - 2.f;
         const float dt    = static_cast<float>(note.time - m_songTime);
-        const float tOffAtZNear = (-zNear / SCROLL_SPEED) - dt;
-        const float tOffAtZFar  = (-zFar  / SCROLL_SPEED) - dt;
+        const float tOffAtZNear = (-zNear / (SCROLL_SPEED * m_noteSpeedMul)) - dt;
+        const float tOffAtZFar  = (-zFar  / (SCROLL_SPEED * m_noteSpeedMul)) - dt;
         const float tOffLo = std::max(0.f,  std::min(tOffAtZNear, tOffAtZFar));
         const float tOffHi = std::min(dur,  std::max(tOffAtZNear, tOffAtZFar));
         if (tOffHi <= tOffLo + 1e-4f) continue;
@@ -352,7 +352,7 @@ void BandoriRenderer::onRender(Renderer& renderer) {
 
             float lane = evalHoldLaneAt(*hold, tOff);
             float wx   = laneToWorldX(lane);
-            float wz   = -static_cast<float>(absT - m_songTime) * SCROLL_SPEED;
+            float wz   = -static_cast<float>(absT - m_songTime) * (SCROLL_SPEED * m_noteSpeedMul);
 
             float hw = halfWAt(tOff);
             glm::vec3 L{wx - hw, 0.f, wz};
@@ -380,7 +380,7 @@ void BandoriRenderer::onRender(Renderer& renderer) {
 
             float lane = evalHoldLaneAt(*hold, tOff);
             float wx   = laneToWorldX(lane);
-            float wz   = -static_cast<float>(absT - m_songTime) * SCROLL_SPEED;
+            float wz   = -static_cast<float>(absT - m_songTime) * (SCROLL_SPEED * m_noteSpeedMul);
             if (wz > 12.f || wz < APPROACH_Z - 1.f) continue;
 
             float r = m_noteWorldW * 0.25f;
@@ -413,7 +413,7 @@ void BandoriRenderer::onRender(Renderer& renderer) {
         else continue;
 
         float timeDiff = static_cast<float>(note.time - m_songTime);
-        float noteZ    = -timeDiff * SCROLL_SPEED;
+        float noteZ    = -timeDiff * (SCROLL_SPEED * m_noteSpeedMul);
         // Only render notes on the visible highway section. Holds keep their
         // head quad visible longer so the reference stays on screen while
         // the player is still tracking the body.

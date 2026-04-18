@@ -22,6 +22,7 @@ file(GLOB_RECURSE ENGINE_SOURCES
     engine/src/core/*.cpp
     engine/src/renderer/*.cpp
     engine/src/renderer/vulkan/*.cpp
+    engine/src/game/*.cpp
     engine/src/game/modes/*.cpp
     engine/src/game/chart/*.cpp
     engine/src/gameplay/*.cpp

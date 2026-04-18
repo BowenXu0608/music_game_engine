@@ -42,6 +42,7 @@ bool AudioEngine::load(const std::string& path) {
                                  &m_impl->sound) != MA_SUCCESS)
         return false;
     m_impl->soundLoaded = true;
+    ma_sound_set_volume(&m_impl->sound, m_musicVolume);
     return true;
 }
 
@@ -71,6 +72,24 @@ void AudioEngine::stop() {
     m_playing = false;
 }
 
+void AudioEngine::setMusicVolume(float v) {
+    if (v < 0.f) v = 0.f;
+    if (v > 1.f) v = 1.f;
+    m_musicVolume = v;
+    if (m_impl && m_impl->soundLoaded)
+        ma_sound_set_volume(&m_impl->sound, v);
+}
+
+void AudioEngine::setSfxVolume(float v) {
+    if (v < 0.f) v = 0.f;
+    if (v > 1.f) v = 1.f;
+    m_sfxVolume = v;
+}
+
+void AudioEngine::setHitSoundEnabled(bool on) {
+    m_hitSoundEnabled = on;
+}
+
 double AudioEngine::positionSeconds() const {
     if (!m_impl || !m_impl->soundLoaded || !m_playing) return -1.0;
     float pos = 0.f;
@@ -80,19 +99,21 @@ double AudioEngine::positionSeconds() const {
 
 void AudioEngine::playClickSfx() {
     if (!m_impl) return;
+    if (!m_hitSoundEnabled || m_sfxVolume <= 0.f) return;
 
     // Generate a very short click: 30ms of a 1200 Hz sine wave with fast decay.
     const ma_uint32 sampleRate = 44100;
     const ma_uint32 numFrames  = sampleRate * 30 / 1000; // 30ms
     const float freq = 1200.f;
     const float twoPiF = 2.f * 3.14159265f * freq;
+    const float amp = 0.35f * m_sfxVolume;
 
     std::vector<float> samples(numFrames);
     for (ma_uint32 i = 0; i < numFrames; i++) {
         float t = (float)i / sampleRate;
         float envelope = 1.f - (float)i / numFrames; // linear decay
         envelope *= envelope; // quadratic decay for snappier click
-        samples[i] = sinf(twoPiF * t) * envelope * 0.35f;
+        samples[i] = sinf(twoPiF * t) * envelope * amp;
     }
 
     // Play via a one-shot inline sound from memory buffer using ma_engine

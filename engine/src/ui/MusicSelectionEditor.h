@@ -2,6 +2,7 @@
 #include "ProjectHub.h"  // GameModeConfig, GameModeType, DropDimension
 #include "AssetBrowser.h"
 #include "ImageEditor.h"
+#include "game/PlayerSettings.h"
 #include "renderer/vulkan/TextureManager.h"
 #include <vulkan/vulkan.h>
 #include <GLFW/glfw3.h>
@@ -126,4 +127,8 @@ private:
     // ── Status ───────────────────────────────────────────────────────────────
     std::string m_statusMsg;
     float       m_statusTimer = 0.f;
+
+    // ── Settings overlay (player-facing page opened from the gear button) ────
+    bool           m_showSettings = false;
+    PlayerSettings m_previewSettings;
 };

@@ -11,7 +11,9 @@
 #include "ui/StartScreenEditor.h"
 #include "ui/MusicSelectionEditor.h"
 #include "ui/SongEditor.h"
+#include "ui/SettingsEditor.h"
 #include "ui/GameFlowPreview.h"
+#include "game/PlayerSettings.h"
 #include "input/InputManager.h"
 #include "gameplay/HitDetector.h"
 #include "gameplay/JudgmentSystem.h"
@@ -22,7 +24,7 @@
 #include <unordered_map>
 
 enum class GameMode { Bandori, Cytus, Phigros, Arcaea, Lanota };
-enum class EditorLayer { ProjectHub, StartScreen, MusicSelection, SongEditor, GamePlay };
+enum class EditorLayer { ProjectHub, StartScreen, MusicSelection, Settings, SongEditor, GamePlay };
 
 class Engine {
 public:
@@ -49,7 +51,13 @@ public:
     StartScreenEditor& startScreenEditor() { return m_startScreenEditor; }
     MusicSelectionEditor& musicSelectionEditor() { return m_musicSelectionEditor; }
     SongEditor& songEditor() { return m_songEditor; }
+    SettingsEditor& settingsEditor() { return m_settingsEditor; }
     GameFlowPreview& gameFlowPreview() { return m_gameFlowPreview; }
+    PlayerSettings& playerSettings() { return m_playerSettings; }
+    // Push m_playerSettings into the live audio engine, hit detector, and
+    // active game-mode renderer. Safe to call at any time — applies what's
+    // currently available.
+    void applyPlayerSettings();
     ProjectHub& hub() { return m_hub; }
     AudioEngine& audio() { return m_audio; }
     Renderer& renderer() { return m_renderer; }
@@ -106,7 +114,9 @@ private:
     StartScreenEditor                  m_startScreenEditor;
     MusicSelectionEditor               m_musicSelectionEditor;
     SongEditor                         m_songEditor;
+    SettingsEditor                     m_settingsEditor;
     GameFlowPreview                    m_gameFlowPreview;
+    PlayerSettings                     m_playerSettings;
     EditorLayer                        m_currentLayer = EditorLayer::ProjectHub;
     GameClock                          m_clock;
     AudioEngine                        m_audio;

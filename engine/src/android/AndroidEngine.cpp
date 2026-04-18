@@ -3,9 +3,11 @@
 // ============================================================================
 #include "AndroidEngine.h"
 #include "AndroidFileIO.h"
+#include "ui/SettingsPageUI.h"
 #include <android/log.h>
 #include <android/input.h>
 #include <imgui.h>
+#include <algorithm>
 #include <chrono>
 #include <cstdlib>
 #include <stdexcept>
@@ -45,6 +47,8 @@ void AndroidEngine::init(android_app* app, const std::string& shaderDir) {
 
     loadStartScreen();
     loadProject();
+    loadPlayerSettingsFile();
+    applyPlayerSettings();
     LOGI("AndroidEngine initialized");
 }
 
@@ -306,6 +310,9 @@ void AndroidEngine::render() {
         case GameScreen::MusicSelection:
             renderMusicSelection();
             break;
+        case GameScreen::Settings:
+            renderSettings();
+            break;
         case GameScreen::Gameplay:
             renderGameplayHUD();
             break;
@@ -322,6 +329,26 @@ void AndroidEngine::render() {
 
 void AndroidEngine::renderGameplayHUD() {
     ImVec2 displaySz = ImGui::GetIO().DisplaySize;
+
+    // Background dim overlay (under the HUD, over the rendered scene).
+    if (m_playerSettings.backgroundDim > 0.f) {
+        const float a = std::min(m_playerSettings.backgroundDim, 1.f) * 0.75f;
+        ImU32 dim = IM_COL32(0, 0, 0, (int)(a * 255.f));
+        ImGui::GetBackgroundDrawList()->AddRectFilled(
+            ImVec2(0, 0), displaySz, dim);
+    }
+
+    // FPS counter (top-left corner).
+    if (m_playerSettings.fpsCounter) {
+        ImGui::SetNextWindowPos(ImVec2(10, 10));
+        ImGui::SetNextWindowSize(ImVec2(80, 28));
+        ImGui::Begin("##fps", nullptr,
+            ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoBackground |
+            ImGuiWindowFlags_NoInputs);
+        ImGui::TextColored(ImVec4(0.2f, 1.f, 0.4f, 1.f),
+                           "%.0f fps", ImGui::GetIO().Framerate);
+        ImGui::End();
+    }
 
     // Combo display
     ImGui::SetNextWindowPos(ImVec2(displaySz.x * 0.5f - 50, 20));
@@ -453,11 +480,25 @@ void AndroidEngine::renderMusicSelection() {
     ImGui::Separator();
     ImGui::Spacing();
 
+    if (ImGui::Button("SETTINGS", ImVec2(-1, 44))) {
+        m_screen = GameScreen::Settings;
+    }
+    ImGui::Spacing();
+
     if (!m_songs.empty() && ImGui::Button("PLAY", ImVec2(-1, 60))) {
         startGameplay(m_selectedSong);
     }
 
     ImGui::End();
+}
+
+void AndroidEngine::renderSettings() {
+    ImVec2 displaySz = ImGui::GetIO().DisplaySize;
+    SettingsPageUI::Host host;
+    host.audio  = &m_audio;
+    host.onSave = [this]() { savePlayerSettingsFile(); applyPlayerSettings(); };
+    host.onBack = [this]() { m_screen = GameScreen::MusicSelection; };
+    SettingsPageUI::render(ImVec2(0, 0), displaySz, m_playerSettings, host, /*readOnly=*/false);
 }
 
 // Minimal JSON string extractor: find "key":"value" and return value.
@@ -619,6 +660,9 @@ void AndroidEngine::startGameplay(int songIndex) {
     m_showResults = false;
     m_gameplayPaused = false;
 
+    // Apply player settings to the freshly-created renderer / hit detector.
+    applyPlayerSettings();
+
     m_screen = GameScreen::Gameplay;
     LOGI("Starting gameplay: %s", song.name.c_str());
 }
@@ -633,6 +677,35 @@ void AndroidEngine::exitGameplay() {
     m_showResults = false;
     m_gameplayPaused = false;
     m_screen = GameScreen::MusicSelection;
+}
+
+void AndroidEngine::loadPlayerSettingsFile() {
+    m_settingsPath = AndroidFileIO::internalPath() + "player_settings.json";
+    if (!loadPlayerSettings(m_settingsPath, m_playerSettings)) {
+        LOGI("No player_settings.json yet — using defaults");
+    } else {
+        LOGI("Loaded player settings from %s", m_settingsPath.c_str());
+    }
+}
+
+void AndroidEngine::savePlayerSettingsFile() {
+    if (m_settingsPath.empty())
+        m_settingsPath = AndroidFileIO::internalPath() + "player_settings.json";
+    if (!savePlayerSettings(m_settingsPath, m_playerSettings))
+        LOGE("Failed to save player settings to %s", m_settingsPath.c_str());
+}
+
+void AndroidEngine::applyPlayerSettings() {
+    m_audio.setMusicVolume(m_playerSettings.musicVolume);
+    m_audio.setSfxVolume(m_playerSettings.hitSoundVolume);
+    m_audio.setHitSoundEnabled(m_playerSettings.hitSoundEnabled);
+
+    // Convert ms → seconds for the hit detector.
+    m_hitDetector.setAudioOffset(m_playerSettings.audioOffsetMs / 1000.f);
+
+    // Note speed slider 1..10 maps to multiplier slider/5 (5 = 1.0x).
+    const float mul = m_playerSettings.noteSpeed / 5.f;
+    if (m_activeMode) m_activeMode->setNoteSpeedMultiplier(mul);
 }
 
 std::unique_ptr<GameModeRenderer> AndroidEngine::createRenderer(const GameModeConfig& config) {

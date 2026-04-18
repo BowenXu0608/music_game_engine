@@ -366,7 +366,7 @@ void LanotaRenderer::onRender(Renderer& renderer) {
             if (m_hitNotes.count(note.id)) continue;
 
             float timeDiff = static_cast<float>(note.time - m_songTime);
-            if (timeDiff < -0.3f || timeDiff > APPROACH_SECS) continue;
+            if (timeDiff < -0.3f || timeDiff > (APPROACH_SECS / m_noteSpeedMul)) continue;
 
             auto* rd = std::get_if<LanotaRingData>(&note.data);
             if (!rd) continue;
@@ -389,9 +389,9 @@ void LanotaRenderer::onRender(Renderer& renderer) {
             float angle       = rd->angle + ring.currentAngle
                               - static_cast<float>(span - 1) * 0.5f * laneAngular;
             // Notes fly radially outward across a flat disk: at timeDiff ==
-            // APPROACH_SECS the note spawns on the small inner disk, and at
+            // (APPROACH_SECS / m_noteSpeedMul) the note spawns on the small inner disk, and at
             // timeDiff == 0 it reaches the large hit ring at ring.radius.
-            float travelT    = std::clamp(timeDiff / APPROACH_SECS, 0.f, 1.f);
+            float travelT    = std::clamp(timeDiff / (APPROACH_SECS / m_noteSpeedMul), 0.f, 1.f);
             float noteRadius = ring.radius - travelT * (ring.radius - (INNER_RADIUS * m_diskScale));
             float noteZ      = 0.f;
 
@@ -404,7 +404,7 @@ void LanotaRenderer::onRender(Renderer& renderer) {
 
             float alpha = timeDiff < 0.f
                 ? std::max(0.f, 1.f + timeDiff / 0.3f)
-                : 0.4f + 0.6f * std::max(0.f, 1.f - timeDiff / APPROACH_SECS);
+                : 0.4f + 0.6f * std::max(0.f, 1.f - timeDiff / (APPROACH_SECS / m_noteSpeedMul));
 
             glm::vec4 baseTint = (note.type == NoteType::Flick)
                 ? slotTint(SlotArcTile, {1.f, 0.35f, 0.35f, 1.f})   // Flick falls back to red
@@ -567,7 +567,7 @@ void LanotaRenderer::drawHoldBodies(Renderer& renderer) {
         const double headT = hb.startTime;
         const double tailT = headT + h.duration;
         if (tailT < m_songTime - 0.3) continue;
-        if (headT > m_songTime + APPROACH_SECS) continue;
+        if (headT > m_songTime + (APPROACH_SECS / m_noteSpeedMul)) continue;
         if (h.duration <= 0.f) continue;
 
         // Tessellate the hold body along its duration. Each sample gives an
@@ -638,7 +638,7 @@ void LanotaRenderer::drawHoldBodies(Renderer& renderer) {
         // disk instead of teleporting to the rim.
         auto radiusForAbsT = [&](double absT) {
             float td = static_cast<float>(absT - m_songTime);
-            float u  = std::clamp(td / APPROACH_SECS, 0.f, 1.f);
+            float u  = std::clamp(td / (APPROACH_SECS / m_noteSpeedMul), 0.f, 1.f);
             return hitRadius - u * (hitRadius - innerEdge);
         };
 
@@ -647,7 +647,7 @@ void LanotaRenderer::drawHoldBodies(Renderer& renderer) {
         // so the deepest visible sample sits just inside the inner disk.
         const double absStart = std::max(static_cast<double>(headT), m_songTime);
         const double absEnd   = std::min(static_cast<double>(tailT),
-                                         m_songTime + APPROACH_SECS);
+                                         m_songTime + (APPROACH_SECS / m_noteSpeedMul));
         if (absEnd <= absStart + 1e-6) continue;
 
         // Sample the spine of the beam first. Centres are kept in screen
@@ -776,10 +776,10 @@ void LanotaRenderer::drawHoldBodies(Renderer& renderer) {
             float tOff = sp.tOffset;
             if (tOff < 0.f || tOff > h.duration) continue;
             double absT = headT + tOff;
-            if (absT < m_songTime - 0.05 || absT > m_songTime + APPROACH_SECS) continue;
+            if (absT < m_songTime - 0.05 || absT > m_songTime + (APPROACH_SECS / m_noteSpeedMul)) continue;
 
             float timeDiff = static_cast<float>(absT - m_songTime);
-            float travelT  = std::clamp(timeDiff / APPROACH_SECS, 0.f, 1.f);
+            float travelT  = std::clamp(timeDiff / (APPROACH_SECS / m_noteSpeedMul), 0.f, 1.f);
             float radius   = hitRadius - travelT * (hitRadius - (INNER_RADIUS * m_diskScale));
 
             float lane  = evalHoldLaneAt(h, tOff);
@@ -830,7 +830,7 @@ bool LanotaRenderer::projectNoteScreen(uint32_t noteId, glm::vec2& outScreen) co
             float angle    = rd->angle + ring.currentAngle
                            - static_cast<float>(span - 1) * 0.5f * laneAngular;
             float timeDiff = static_cast<float>(note.time - m_songTime);
-            float travelT    = std::clamp(timeDiff / APPROACH_SECS, 0.f, 1.f);
+            float travelT    = std::clamp(timeDiff / (APPROACH_SECS / m_noteSpeedMul), 0.f, 1.f);
             float noteRadius = ring.radius - travelT * (ring.radius - (INNER_RADIUS * m_diskScale));
             glm::vec3 world{cosf(angle) * noteRadius,
                             sinf(angle) * noteRadius,
@@ -869,7 +869,7 @@ LanotaRenderer::pickNoteAt(glm::vec2 screenPx, double songTime, float pixelTol) 
             float laneAngular = (m_trackCount > 0 ? TWO_PI / m_trackCount : TWO_PI / 7.f);
             float angle      = rd->angle + ring.currentAngle
                              - static_cast<float>(span - 1) * 0.5f * laneAngular;
-            float travelT    = std::clamp(timeDiff / APPROACH_SECS, 0.f, 1.f);
+            float travelT    = std::clamp(timeDiff / (APPROACH_SECS / m_noteSpeedMul), 0.f, 1.f);
             float noteRadius = ring.radius - travelT * (ring.radius - (INNER_RADIUS * m_diskScale));
             glm::vec3 world{cosf(angle) * noteRadius,
                             sinf(angle) * noteRadius,

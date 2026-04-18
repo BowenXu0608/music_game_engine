@@ -845,3 +845,57 @@ Solution: stage a pruned copy before handing off to `build_apk.bat`.
 - `docs/sys8_android.md` — Packaging-time chart prune section + APK Contents annotation
 
 Clean Debug build.
+
+---
+
+## 2026-04-18 — Player Settings page (4th editor layer)
+
+### Goal
+
+Add a player-facing **Settings** page to the shipped Android music game: audio volumes, audio offset, note-speed, background dim, FPS counter, language. A lightweight runtime screen — not an engine-user authoring tool. Reached from the music-selection screen via a gear button. Same UI also appears as a dedicated editor layer (`EditorLayer::Settings`) so the engine user can preview and live-tune settings without launching the game.
+
+### Scope decisions (locked with user)
+
+- **8 settings only**: music/hit-sound volume, hit-sound on/off, audio offset (ms), note speed (1–10), background dim, FPS counter, language. Everything else (FOV, sky height, keybinds, resolution, colorblind palette, etc.) is engine-user territory or out of scope for v1.
+- **Note speed is shared** across 2D drop / 3D drop / Circle. Scan Line (Cytus) is chart-pace driven and ignores the setting. Phigros ignores it too (the renderer just inherits the base-class no-op).
+- **Language is store-only** — the chosen string is persisted, but no localization wiring. Placeholder for a future string table.
+- **Audio offset includes tap-to-calibrate** — a 4-beat metronome wizard that captures tap deltas and averages them into the stored offset.
+- **Shared UI, two call sites**: one `SettingsPageUI::render(origin, size, settings, host)` is consumed by both `AndroidEngine::renderSettings` (runtime) and `SettingsEditor::render` / music-selection modal (editor).
+
+### Wiring (make the settings actually do something)
+
+- `AudioEngine::setMusicVolume / setSfxVolume / setHitSoundEnabled` — music volume goes through `ma_sound_set_volume` and is re-applied on every `load()` so a freshly loaded track respects the stored preference. `playClickSfx` early-exits when the SFX toggle is off.
+- `HitDetector::setAudioOffset(seconds)` — subtracted from `songTime` inside every timing function (`checkHit`, `consumeDrags`, `consumeNoteById`, `checkHitPosition`, `checkHitPhigros`, `beginHold`/`beginHoldById`/`beginHoldPosition`, `endHold`, `update`'s miss sweep). Positive offset = player taps later → the perfect window shifts later to compensate.
+- `GameModeRenderer` base class gained `setNoteSpeedMultiplier(float)` + `m_noteSpeedMul = 1.0f`. `BandoriRenderer` and `ArcaeaRenderer` multiply `SCROLL_SPEED` by the mul at every usage site; `LanotaRenderer` divides `APPROACH_SECS` by the mul. `CytusRenderer` and `PhigrosRenderer` leave the default untouched. Slider 1–10 maps to `mul = slider / 5.0` (5 = 1.0×).
+- `PlayerSettings` struct + JSON I/O under `engine/src/game/PlayerSettings.{h,cpp}` using the same hand-rolled string-scan parser `AndroidEngine.cpp` already uses for `music_selection.json`.
+- Background dim: semi-transparent black fullscreen rect drawn via `ImGui::GetBackgroundDrawList()` during gameplay. FPS counter: `ImGui::GetIO().Framerate` text in the top-left during gameplay.
+
+### Editor integration (dedicated 4th layer)
+
+- `EditorLayer::Settings` added to `Engine.h`. New `SettingsEditor` class in `engine/src/ui/SettingsEditor.{h,cpp}` — just calls `SettingsPageUI::render` against the full display with `host.audio = engine->audio()` and `onBack` / `onSave` lambdas that call `Engine::applyPlayerSettings()` then `switchLayer(MusicSelection)`.
+- `MusicSelectionEditor` nav bar got a **Next: Settings >** button at the bottom-right (mirrors the pattern from the start-page editor's "Next: Music Selection >").
+- `Engine` gained `m_playerSettings` + `applyPlayerSettings()`. `launchGameplay` calls it once after the renderer is created so Test Game respects the stored note speed / volume / offset.
+
+### Test Game mode (music-selection gear button)
+
+In-game music-select screen (the wheel-based `renderGamePreview` layout that Test Game uses) got a floating **⚙ Settings** button top-right, which opens the full-screen settings modal via `m_showSettings` flag. Settings are bound directly to `engine->playerSettings()` and `applyPlayerSettings()` is called every frame while the modal is open so slider drags take effect live (audio volume changes audibly while the slider is moving; speed change is visible the moment you hit PLAY).
+
+### Debugging the gear button (the long way round)
+
+The gear button took four iterations to make clickable and persistent through song-card clicks:
+
+1. **First attempt**: plain `ImGui::Button` inside the test-mode `##test_musicsel` window. Click regions were being eaten by the song wheel's `InvisibleButton` cards that registered first in-frame — ImGui gives hit-test priority to the earlier-submitted overlapping widget.
+2. **Second attempt**: moved the button into its own top-level window nested inside `renderGamePreview`. Visible, but when the user clicked a song card the test window got `BringToFront` on focus and pushed the gear behind. Fixed by adding `ImGuiWindowFlags_NoBringToFrontOnFocus` to `##test_musicsel`.
+3. **Third attempt**: gear visible but clicks dead. Cause was a stray fallback click handler — `Button` fires on mouse-up and toggled `m_showSettings`, while the fallback `IsMouseClicked` fired on mouse-down and set it to true. Net result after a complete click: state ended up flipped back to false. Removed the fallback.
+4. **Fourth attempt**: modal wasn't appearing because the settings scrim window's z-order drifted below the gear window. Fixed with `ImGui::BringWindowToDisplayFront(window)` inside `SettingsPageUI::render` every frame. First tried `SetNextWindowFocus()` but that resets the active item every frame and broke slider drags — `BringWindowToDisplayFront` reorders z without touching focus/active state.
+
+### Files touched
+
+- **New**: `engine/src/game/PlayerSettings.{h,cpp}`, `engine/src/ui/SettingsPageUI.{h,cpp}`, `engine/src/ui/SettingsEditor.{h,cpp}`
+- **Wiring**: `engine/src/engine/AudioEngine.{h,cpp}`, `engine/src/gameplay/HitDetector.{h,cpp}`, `engine/src/game/modes/GameModeRenderer.h`, `engine/src/game/modes/{Bandori,Arcaea,Lanota}Renderer.cpp` (Cytus & Phigros untouched)
+- **Editor**: `engine/src/engine/Engine.{h,cpp}` (`EditorLayer::Settings`, `m_playerSettings`, `applyPlayerSettings`), `engine/src/ui/MusicSelectionEditor.{h,cpp}` (nav-bar button + Test Game gear + modal), `engine/src/ui/GameFlowPreview.{h,cpp}` (Settings FlowPage preview)
+- **Runtime**: `engine/src/android/AndroidEngine.{h,cpp}` (GameScreen::Settings, music-select SETTINGS button, `renderSettings`, load/save/apply)
+- **Build**: `CMakeLists.txt` (glob `engine/src/game/*.cpp`), `engine/src/android/CMakeLists.txt` (add `PlayerSettings.cpp` + `SettingsPageUI.cpp`)
+- **Docs**: `docs/sys7_editor.md`, `docs/devlog.md` (this entry)
+
+Clean Debug build. Verified in Test Game mode: gear button stays through song selection, modal opens, sliders drag live, note-speed change visible on PLAY.
