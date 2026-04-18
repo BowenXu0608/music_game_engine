@@ -1,6 +1,7 @@
 #include "CytusRenderer.h"
 #include "renderer/Renderer.h"
 #include "renderer/ParticleSystem.h"
+#include "renderer/MaterialAssetLibrary.h"
 #include <glm/glm.hpp>
 #include <cmath>
 #include <algorithm>
@@ -24,13 +25,6 @@ enum CytusSlot : uint16_t {
     SlotScanLineGlow = 9,
     SlotHitRing      = 10,
 };
-MaterialKind cyKindFromString(const std::string& s) {
-    if (s == "glow")     return MaterialKind::Glow;
-    if (s == "scroll")   return MaterialKind::Scroll;
-    if (s == "pulse")    return MaterialKind::Pulse;
-    if (s == "gradient") return MaterialKind::Gradient;
-    return MaterialKind::Unlit;
-}
 } // namespace
 
 glm::vec4 CytusRenderer::slotTint(uint16_t slot, glm::vec4 fallbackRGBA) const {
@@ -186,14 +180,11 @@ void CytusRenderer::onInit(Renderer& renderer, const ChartData& chart,
                            const GameModeConfig* /*config*/) {
     m_renderer = &renderer;
 
-    // Import per-slot material overrides from the chart.
+    // Import per-slot material overrides — asset or legacy inline, picked by
+    // resolveMaterial() based on which form the entry populates.
     m_chartMaterials.clear();
     for (const auto& md : chart.materials) {
-        Material mat;
-        mat.kind   = cyKindFromString(md.kind);
-        mat.tint   = {md.tint[0],   md.tint[1],   md.tint[2],   md.tint[3]};
-        mat.params = {md.params[0], md.params[1], md.params[2], md.params[3]};
-        m_chartMaterials[md.slot] = mat;
+        m_chartMaterials[md.slot] = resolveMaterial(md, m_materialLibrary);
     }
 
     // Dominant BPM from chart timing (editor always writes at least one

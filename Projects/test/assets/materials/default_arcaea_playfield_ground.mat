@@ -1,0 +1,8 @@
+{
+  "name": "default_arcaea_playfield_ground",
+  "kind": "gradient",
+  "tint": [0.15, 0.15, 0.25, 1],
+  "params": [0.05, 0.05, 0.15, 0],
+  "targetMode": "arcaea",
+  "targetSlot": "playfield_ground"
+}

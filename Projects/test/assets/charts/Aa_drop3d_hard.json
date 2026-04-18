@@ -22,8 +22,8 @@
     {"time": 5.59, "type": "arc", "lane": 0, "startX": 0.636364, "startY": 0.0789474, "endX": 0.545455, "endY": 0.684211, "duration": 0.73, "easeX": 0, "easeY": 0, "color": 0, "void": false},
     {"time": 5.99, "type": "arc", "lane": 0, "startX": 0.181818, "startY": 0.842105, "endX": 0.363636, "endY": 0.0921053, "duration": 0.639997, "easeX": 0, "easeY": 0, "color": 1, "void": false},
     {"time": 6.32, "type": "arc", "lane": 0, "startX": 0.545455, "startY": 0.684211, "endX": 0.454545, "endY": 0.5, "duration": 1.05, "easeX": 0, "easeY": 0, "color": 0, "void": false},
-    {"time": 6.63, "type": "arc", "lane": 0, "startX": 0.363636, "startY": 0.0921053, "endX": 0.181818, "endY": 0.5, "duration": 0.430123, "easeX": 0, "easeY": 0, "color": 1, "void": false},
-    {"time": 7.06012, "type": "arc", "lane": 0, "startX": 0.181818, "startY": 0.5, "endX": 0.181818, "endY": 0.960526, "duration": 0.83988, "easeX": 0, "easeY": 0, "color": 1, "void": false},
+    {"time": 6.63, "type": "arc", "lane": 0, "startX": 0.363636, "startY": 0.0921053, "endX": 0.181818, "endY": 0.5, "duration": 0.43015, "easeX": 0, "easeY": 0, "color": 1, "void": false},
+    {"time": 7.06015, "type": "arc", "lane": 0, "startX": 0.181818, "startY": 0.5, "endX": 0.181818, "endY": 0.960526, "duration": 0.839853, "easeX": 0, "easeY": 0, "color": 1, "void": false},
     {"time": 7.37, "type": "arc", "lane": 0, "startX": 0.454545, "startY": 0.5, "endX": 0.545455, "endY": 0, "duration": 0.23, "easeX": 0, "easeY": 0, "color": 0, "void": false},
     {"time": 7.6, "type": "arc", "lane": 0, "startX": 0.545455, "startY": 0, "endX": 0.545455, "endY": 0, "duration": 1.63, "easeX": 0, "easeY": 0, "color": 0, "void": false},
     {"time": 7.9, "type": "arc", "lane": 0, "startX": 0.181818, "startY": 0.960526, "endX": 0.181818, "endY": 0.473684, "duration": 1.4, "easeX": 0, "easeY": 0, "color": 1, "void": false},
@@ -35,5 +35,20 @@
     {"time": 11.7744, "type": "arc", "lane": 0, "startX": 0.5, "startY": 0.6, "endX": 0.5, "endY": 0.6, "duration": 0.5, "easeX": 0, "easeY": 0, "color": 0, "void": true},
     {"time": 11.7744, "type": "arctap", "lane": 0.5, "scan": {"x": 0, "y": 0.6}, "arcX": 0.5, "arcY": 0.6},
     {"time": 13.02, "type": "arc", "lane": 0, "startX": 0.545455, "startY": 1, "endX": 0.545455, "endY": 1, "duration": 3.49, "easeX": 0, "easeY": 0, "color": 0, "void": false}
-  ]
+  ],
+ "markers": [1.05, 0.36, 1.04, 2.25, 1.45, 1.38],
+ "materials": [
+   {"slot": 0, "asset": "default_arcaea_click_note"},
+   {"slot": 8, "asset": "Aa_drop3d_hard__playfield_ground"},
+   {"slot": 3, "asset": "default_arcaea_arctap_note_shadow"},
+   {"slot": 11, "asset": "default_arcaea_playfield_side_posts"},
+   {"slot": 1, "asset": "default_arcaea_flick_note"},
+   {"slot": 2, "asset": "default_arcaea_arctap_note_tile"},
+   {"slot": 4, "asset": "default_arcaea_arc_note_blue"},
+   {"slot": 5, "asset": "default_arcaea_arc_note_red"},
+   {"slot": 6, "asset": "default_arcaea_arc_note_blue_shadow"},
+   {"slot": 7, "asset": "default_arcaea_arc_note_red_shadow"},
+   {"slot": 9, "asset": "default_arcaea_playfield_judgment_bar"},
+   {"slot": 10, "asset": "default_arcaea_playfield_sky_line"}
+ ]
 }

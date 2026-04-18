@@ -1,0 +1,8 @@
+{
+  "name": "default_lanota_click_note_fill",
+  "kind": "unlit",
+  "tint": [1, 0.85, 0.3, 1],
+  "params": [0, 0, 0, 0],
+  "targetMode": "lanota",
+  "targetSlot": "click_note_fill"
+}

@@ -1,16 +1,55 @@
 #include "ArcaeaRenderer.h"
 #include "renderer/Renderer.h"
+#include "renderer/MaterialAssetLibrary.h"
 #include "ui/ProjectHub.h"   // GameModeConfig definition
 #include <glm/gtc/matrix_transform.hpp>
 #include <cmath>
 #include <cstring>
 #include <algorithm>
 
+namespace {
+
+// Slot ids mirror MaterialSlots.cpp::kArcaeaSlots.
+enum ArcaeaSlot : uint16_t {
+    SlotClickNote    = 0,
+    SlotFlickNote    = 1,
+    SlotArcTapTile   = 2,
+    SlotArcTapShadow = 3,
+    SlotArcBlue      = 4,
+    SlotArcRed       = 5,
+    SlotArcBlueShdw  = 6,
+    SlotArcRedShdw   = 7,
+    SlotGround       = 8,
+    SlotJudgmentBar  = 9,
+    SlotSkyLine      = 10,
+    SlotSidePosts    = 11,
+};
+
+} // namespace
+
+Material ArcaeaRenderer::slotOrFallback(uint16_t slot, const Material& fallback) const {
+    auto it = m_chartMaterials.find(slot);
+    if (it == m_chartMaterials.end()) return fallback;
+    Material m = it->second;
+    // Texture/sampler resolution by path is Phase-later; every chart material
+    // currently rides the white fallback texture.
+    m.texture = fallback.texture;
+    m.sampler = fallback.sampler;
+    return m;
+}
+
 void ArcaeaRenderer::onInit(Renderer& renderer, const ChartData& chart,
                             const GameModeConfig* config) {
     m_renderer = &renderer;
     if (config && config->trackCount > 0) m_laneCount = config->trackCount;
     if (config)                            m_skyHeight = config->skyHeight;
+
+    // Import per-slot material overrides from the chart. resolveMaterial()
+    // picks whichever form the entry uses (asset reference or legacy inline).
+    m_chartMaterials.clear();
+    for (const auto& md : chart.materials) {
+        m_chartMaterials[md.slot] = resolveMaterial(md, m_materialLibrary);
+    }
 
     for (auto& note : chart.notes) {
         if (note.type == NoteType::Arc) {
@@ -42,7 +81,23 @@ void ArcaeaRenderer::onInit(Renderer& renderer, const ChartData& chart,
     // Build ground plane mesh
     m_groundMesh = buildGroundMesh(renderer);
     m_tapMesh    = buildTapMesh(renderer);
-    m_gateMesh   = buildGateMesh(renderer, m_skyHeight);
+
+    // Gate — split into four independently-materialized bars. Geometry
+    // identical to the old single-mesh version so the near-edge alignment with
+    // the ground is preserved.
+    {
+        const float xL    = -LANE_HALF_WIDTH;
+        const float xR    =  LANE_HALF_WIDTH;
+        const float y0    = GROUND_Y;
+        const float y1    = GROUND_Y + m_skyHeight;
+        const float tMain = 0.08f;
+        const float tRef  = 0.035f;
+        m_gateBottom    = buildGateBar(renderer, xL,           y0,               xR,           y0 + tMain);
+        m_gateSky       = buildGateBar(renderer, xL,           y1 - tRef * 0.5f, xR,           y1 + tRef * 0.5f);
+        m_gateLeftPost  = buildGateBar(renderer, xL,           y0,               xL + tRef,    y1);
+        m_gateRightPost = buildGateBar(renderer, xR - tRef,    y0,               xR,           y1);
+    }
+
     m_arcTapMesh       = buildArcTapMesh(renderer);
     m_arcTapShadowMesh = buildArcTapShadowMesh(renderer);
 
@@ -161,9 +216,9 @@ Mesh ArcaeaRenderer::buildDynamicArcMesh(Renderer& renderer) {
 }
 
 void ArcaeaRenderer::writeArcVertices(ArcMesh& am, float tClip) {
-    const glm::vec4 color = am.data.color == 0
-        ? glm::vec4{0.4f, 0.8f, 1.f, 0.9f}
-        : glm::vec4{1.f, 0.4f, 0.7f, 0.9f};
+    // Vertex colour is white — actual arc colour comes from the Material
+    // selected in onRender (SlotArcBlue or SlotArcRed) via Material.tint.
+    const glm::vec4 color{1.f, 1.f, 1.f, 1.f};
 
     // Precompute hexagon cross-section offsets (local xy, unit radius).
     glm::vec2 ringDir[ARC_SIDES];
@@ -185,11 +240,9 @@ void ArcaeaRenderer::writeArcVertices(ArcMesh& am, float tClip) {
             v.pos = {xy.x + ringDir[s].x * ARC_RADIUS,
                      xy.y + ringDir[s].y * ARC_RADIUS,
                      z};
-            // Outward radial normal — mesh.frag's rim-glow (1 - |n.z|)^3 * 2
-            // picks up every side face, giving the tube its glowing-edge
-            // look. Because normals span xy rather than point at camera the
-            // lighting is uniform across the whole visible ring instead of
-            // flat, which reads as a 3D column rather than a ribbon.
+            // Outward radial normal — Glow kind's rim-glow term picks up every
+            // side face so the tube reads as a glowing 3D column instead of a
+            // flat ribbon.
             v.normal = {ringDir[s].x, ringDir[s].y, 0.f};
             v.color  = color;
             v.uv     = {static_cast<float>(s) / ARC_SIDES, t};
@@ -226,12 +279,10 @@ Mesh ArcaeaRenderer::buildDynamicArcShadowMesh(Renderer& renderer) {
 }
 
 void ArcaeaRenderer::writeArcShadowVertices(ArcMesh& am, float tClip) {
-    // Shadow color = dim arc-color tint on the ground. Camera-facing normal so
-    // the shader's rim glow stays at 0 and the shadow stays flat (dark) instead
-    // of lighting up like the tube above it.
-    const glm::vec4 color = am.data.color == 0
-        ? glm::vec4{0.08f, 0.22f, 0.35f, 0.55f}
-        : glm::vec4{0.30f, 0.08f, 0.22f, 0.55f};
+    // Vertex colour is white — shadow tint comes from the Material chosen in
+    // onRender (SlotArcBlueShdw or SlotArcRedShdw). Camera-facing normal keeps
+    // any Glow rim at 0 so the shadow reads flat even if a user picks Glow.
+    const glm::vec4 color{1.f, 1.f, 1.f, 1.f};
     const glm::vec3 n{0.f, 0.f, 1.f};
     const float y      = GROUND_Y + 0.02f;          // tiny lift to dodge z-fight
     const float hw     = ARC_RADIUS;                 // half-width of shadow band
@@ -262,61 +313,36 @@ void ArcaeaRenderer::writeArcShadowVertices(ArcMesh& am, float tClip) {
 Mesh ArcaeaRenderer::buildGroundMesh(Renderer& renderer) {
     // Ground quad in XZ plane, spanning the full lane width at the near edge
     // and the full lane depth from JUDGMENT_Z (near) to LANE_FAR_Z (far).
+    // UV v runs 0 at the near edge → 1 at the far edge so the Gradient default
+    // material fades from tint (near) to params.rgb (far).
     const float w = LANE_HALF_WIDTH;
+    const glm::vec4 white{1.f, 1.f, 1.f, 1.f};
     std::vector<MeshVertex> verts = {
-        {{-w, GROUND_Y, JUDGMENT_Z}, {0,1,0}, {0,0}, {0.15f, 0.15f, 0.25f, 1.f}},
-        {{ w, GROUND_Y, JUDGMENT_Z}, {0,1,0}, {1,0}, {0.15f, 0.15f, 0.25f, 1.f}},
-        {{ w, GROUND_Y, LANE_FAR_Z}, {0,1,0}, {1,1}, {0.05f, 0.05f, 0.15f, 1.f}},
-        {{-w, GROUND_Y, LANE_FAR_Z}, {0,1,0}, {0,1}, {0.05f, 0.05f, 0.15f, 1.f}},
+        {{-w, GROUND_Y, JUDGMENT_Z}, {0,1,0}, {0,0}, white},
+        {{ w, GROUND_Y, JUDGMENT_Z}, {0,1,0}, {1,0}, white},
+        {{ w, GROUND_Y, LANE_FAR_Z}, {0,1,0}, {1,1}, white},
+        {{-w, GROUND_Y, LANE_FAR_Z}, {0,1,0}, {0,1}, white},
     };
     std::vector<uint32_t> indices = {0,1,2, 2,3,0};
     return renderer.meshes().createMesh(renderer.context(), renderer.buffers(), verts, indices);
 }
 
-Mesh ArcaeaRenderer::buildGateMesh(Renderer& renderer, float skyHeight) {
-    // The gate frames the NEAR (front) edge of the ground lane. Its four bottom
-    // corners coincide exactly with the ground mesh's near-edge corners:
-    //     bottom-left  = (-LANE_HALF_WIDTH, GROUND_Y, JUDGMENT_Z)
-    //     bottom-right = (+LANE_HALF_WIDTH, GROUND_Y, JUDGMENT_Z)
-    // The top corners offset upward by skyHeight. All 4 bars live on z =
-    // JUDGMENT_Z so they are coplanar with the lane's near edge.
-    //
-    // Visual hierarchy per Arcaea convention:
-    //   * bottom bar (ground judgment line) — brightest + thickest
-    //   * sky bar and vertical posts         — dimmer reference lines
-    const float xL    = -LANE_HALF_WIDTH;
-    const float xR    =  LANE_HALF_WIDTH;
-    const float y0    = GROUND_Y;
-    const float y1    = GROUND_Y + skyHeight;
-    const float z     = JUDGMENT_Z;
-    const float tMain = 0.08f;  // bottom bar thickness (thicker, emphasized)
-    const float tRef  = 0.035f; // reference-line thickness (posts + sky bar)
-    const glm::vec4 bottomCol{1.00f, 0.95f, 0.55f, 1.00f}; // bright warm — the hit line
-    const glm::vec4 skyCol   {0.55f, 0.80f, 1.00f, 0.55f}; // dim cool — sky reference
-    const glm::vec4 postCol  {0.80f, 0.82f, 0.92f, 0.50f}; // dim neutral — side reference
+Mesh ArcaeaRenderer::buildGateBar(Renderer& renderer,
+                                  float x0, float y0, float x1, float y1) {
+    // Single flat quad on the judgment plane (z = JUDGMENT_Z) spanning
+    // (x0,y0)→(x1,y1). Vertex colour is white — the caller's Material provides
+    // the actual bar colour. Camera-facing normal so Glow's rim stays at 0
+    // even if a user picks Glow for a bar.
+    const float z = JUDGMENT_Z;
     const glm::vec3 n{0.f, 0.f, 1.f};
-
-    std::vector<MeshVertex> verts;
-    std::vector<uint32_t>   indices;
-    auto addBar = [&](float x0, float yy0, float x1, float yy1, const glm::vec4& c) {
-        uint32_t base = static_cast<uint32_t>(verts.size());
-        verts.push_back({{x0, yy0, z}, n, {0.f, 0.f}, c});
-        verts.push_back({{x1, yy0, z}, n, {1.f, 0.f}, c});
-        verts.push_back({{x1, yy1, z}, n, {1.f, 1.f}, c});
-        verts.push_back({{x0, yy1, z}, n, {0.f, 1.f}, c});
-        indices.insert(indices.end(), {base, base+1, base+2, base+2, base+3, base});
+    const glm::vec4 white{1.f, 1.f, 1.f, 1.f};
+    std::vector<MeshVertex> verts = {
+        {{x0, y0, z}, n, {0.f, 0.f}, white},
+        {{x1, y0, z}, n, {1.f, 0.f}, white},
+        {{x1, y1, z}, n, {1.f, 1.f}, white},
+        {{x0, y1, z}, n, {0.f, 1.f}, white},
     };
-
-    // Bottom (judgment) bar: thicker, grown UPWARD from y0 so its bottom edge
-    // still matches the ground's near edge exactly.
-    addBar(xL,                y0,               xR,                y0 + tMain,       bottomCol);
-    // Sky bar
-    addBar(xL,                y1 - tRef * 0.5f, xR,                y1 + tRef * 0.5f, skyCol);
-    // Left post — grown INWARD from xL so its outer edge stays at xL.
-    addBar(xL,                y0,               xL + tRef,         y1,               postCol);
-    // Right post — grown INWARD from xR so its outer edge stays at xR.
-    addBar(xR - tRef,         y0,               xR,                y1,               postCol);
-
+    std::vector<uint32_t> indices = {0, 1, 2, 2, 3, 0};
     return renderer.meshes().createMesh(renderer.context(), renderer.buffers(), verts, indices);
 }
 
@@ -325,7 +351,8 @@ Mesh ArcaeaRenderer::buildArcTapMesh(Renderer& renderer) {
     // reference where the ArcTap reads as a thin horizontal slab (wide in x,
     // thin in y, shallow in z). Centered on (0,0,0) so the draw-time translate
     // places it at (arcX, arcY, z). Per-face outward normals give each face
-    // its own rim-glow contribution so the slab reads as 3D.
+    // its own rim-glow contribution so the slab reads as 3D under the Glow
+    // material kind.
     const float hw = 0.32f;   // half width  (x)
     const float hh = 0.05f;   // half height (y)
     const float hd = 0.12f;   // half depth  (z) — shallow so it stays flat
@@ -359,11 +386,12 @@ Mesh ArcaeaRenderer::buildArcTapMesh(Renderer& renderer) {
 Mesh ArcaeaRenderer::buildArcTapShadowMesh(Renderer& renderer) {
     // Flat quad on the ground directly below where the arctap renders. Sized
     // to roughly match the arctap's x/z footprint (not its thin y height).
+    // Vertex colour is white; the "ArcTap Shadow" Material provides the tint.
     const float hw = 0.36f;
     const float hd = 0.14f;
     const float y  = GROUND_Y + 0.02f;
     const glm::vec3 n{0.f, 0.f, 1.f};
-    const glm::vec4 col{0.05f, 0.08f, 0.15f, 0.55f};
+    const glm::vec4 col{1.f, 1.f, 1.f, 1.f};
     std::vector<MeshVertex> verts = {
         {{-hw, y, -hd}, n, {0,0}, col},
         {{ hw, y, -hd}, n, {1,0}, col},
@@ -381,9 +409,10 @@ Mesh ArcaeaRenderer::buildTapMesh(Renderer& renderer) {
     float hw = std::min(0.4f, slotHalf * 0.9f);
     float hh = 0.05f;
     float hd = std::min(0.4f, slotHalf * 0.9f);
-    glm::vec4 col = {1.f, 0.9f, 0.5f, 1.f};
-    // Camera-facing normal (see writeArcVertices comment) so the bright tap
-    // color doesn't get tripled and saturate to pure white via the rim glow.
+    // Vertex colour is white — the per-note Material (Click or Flick slot)
+    // provides the tint. Camera-facing normal keeps any Glow rim at 0 so
+    // bright base colours don't saturate to pure white.
+    const glm::vec4 col = {1.f, 1.f, 1.f, 1.f};
     const glm::vec3 n{0.f, 0.f, 1.f};
     std::vector<MeshVertex> verts = {
         {{-hw, GROUND_Y+hh, -hd}, n, {0,0}, col},
@@ -398,40 +427,81 @@ Mesh ArcaeaRenderer::buildTapMesh(Renderer& renderer) {
 void ArcaeaRenderer::onRender(Renderer& renderer) {
     renderer.setCamera(m_camera);
 
-    // Ground
-    renderer.meshes().drawMesh(m_groundMesh, glm::mat4(1.f), {1,1,1,1});
+    auto& ctx  = renderer.context();
+    auto& desc = renderer.descriptors();
+    VkImageView whiteV = renderer.whiteView();
+    VkSampler   whiteS = renderer.whiteSampler();
+    auto withWhite = [&](Material m) {
+        m.texture = whiteV;
+        m.sampler = whiteS;
+        return m;
+    };
 
-    // Judgment gate (bottom bar + sky line + two vertical posts at z=0)
-    renderer.meshes().drawMesh(m_gateMesh, glm::mat4(1.f), {1,1,1,1});
+    // Ground — defaults to Gradient (near→far fade).
+    {
+        Material groundDefault;
+        groundDefault.kind   = MaterialKind::Gradient;
+        groundDefault.tint   = {0.15f, 0.15f, 0.25f, 1.f};
+        groundDefault.params = {0.05f, 0.05f, 0.15f, 0.f};
+        Material mat = withWhite(slotOrFallback(SlotGround, groundDefault));
+        renderer.meshes().drawMesh(m_groundMesh, glm::mat4(1.f), mat, ctx, desc);
+    }
 
-    // Tap notes — cull the moment they cross the judgment plane so they
-    // never render past the lane's near edge (they'd otherwise fall through
-    // the foreground for ~0.25s before being culled).
+    // Judgment gate — four bars, each with its own slot.
+    {
+        Material bottomDefault;
+        bottomDefault.kind = MaterialKind::Unlit;
+        bottomDefault.tint = {1.f, 0.95f, 0.55f, 1.f};
+        Material skyDefault;
+        skyDefault.kind = MaterialKind::Unlit;
+        skyDefault.tint = {0.55f, 0.80f, 1.f, 0.55f};
+        Material postDefault;
+        postDefault.kind = MaterialKind::Unlit;
+        postDefault.tint = {0.80f, 0.82f, 0.92f, 0.50f};
+        Material bottomMat = withWhite(slotOrFallback(SlotJudgmentBar, bottomDefault));
+        Material skyMat    = withWhite(slotOrFallback(SlotSkyLine,     skyDefault));
+        Material postMat   = withWhite(slotOrFallback(SlotSidePosts,   postDefault));
+        renderer.meshes().drawMesh(m_gateBottom,    glm::mat4(1.f), bottomMat, ctx, desc);
+        renderer.meshes().drawMesh(m_gateSky,       glm::mat4(1.f), skyMat,    ctx, desc);
+        renderer.meshes().drawMesh(m_gateLeftPost,  glm::mat4(1.f), postMat,   ctx, desc);
+        renderer.meshes().drawMesh(m_gateRightPost, glm::mat4(1.f), postMat,   ctx, desc);
+    }
+
+    // Tap/Flick notes — cull the moment they cross the judgment plane so they
+    // never render past the lane's near edge.
+    Material clickDefault;
+    clickDefault.kind = MaterialKind::Unlit;
+    clickDefault.tint = {1.f, 0.9f, 0.5f, 1.f};
+    Material flickDefault;
+    flickDefault.kind = MaterialKind::Unlit;
+    flickDefault.tint = {1.f, 0.35f, 0.35f, 1.f};
+    Material clickMat = withWhite(slotOrFallback(SlotClickNote, clickDefault));
+    Material flickMat = withWhite(slotOrFallback(SlotFlickNote, flickDefault));
     for (auto& note : m_tapNotes) {
         float z = static_cast<float>(note.time - m_songTime) * SCROLL_SPEED;
         if (z < 0.f || z > 30.f) continue;
         float laneX = 0.f;
-        if (auto* tap = std::get_if<TapData>(&note.data))     laneX = tap->laneX;
+        if (auto* tap = std::get_if<TapData>(&note.data))       laneX = tap->laneX;
         else if (auto* fl = std::get_if<FlickData>(&note.data)) laneX = fl->laneX;
         else continue;
 
-        // Map lane index [0, m_laneCount-1] into N equal slots across the
-        // ground's near edge. Each lane center sits half-a-slot inside the
-        // edge, so a tap sized to fit its slot never crosses the lane
-        // boundary. (Bandori-style; earlier (N-1)-based mapping put lane 0
-        // *on* the edge, so even a slightly-wide tap bled outside.)
         float laneSpacing = (2.f * LANE_HALF_WIDTH) / static_cast<float>(std::max(1, m_laneCount));
         float wx = (laneX - (m_laneCount - 1) * 0.5f) * laneSpacing;
         glm::mat4 model = glm::translate(glm::mat4(1.f), {wx, 0.f, JUDGMENT_Z - z});
-        glm::vec4 tint = (note.type == NoteType::Flick)
-            ? glm::vec4{1.f, 0.35f, 0.35f, 1.f}
-            : glm::vec4{1.f, 1.f,   1.f,   1.f};
-        renderer.meshes().drawMesh(m_tapMesh, model, tint);
+        const Material& mat = (note.type == NoteType::Flick) ? flickMat : clickMat;
+        renderer.meshes().drawMesh(m_tapMesh, model, mat, ctx, desc);
     }
 
     // ArcTaps — flat rectangular prisms floating in the sky at (arcX, arcY)
-    // in normalized [0,1] space. Also drop a flat shadow quad directly below
-    // the tap on the ground plane so the player has a depth cue.
+    // in normalized [0,1] space. Shadow drops directly below on the ground.
+    Material arcTapTileDefault;
+    arcTapTileDefault.kind = MaterialKind::Glow;
+    arcTapTileDefault.tint = {1.f, 1.f, 1.f, 1.f};
+    Material arcTapShadowDefault;
+    arcTapShadowDefault.kind = MaterialKind::Unlit;
+    arcTapShadowDefault.tint = {0.05f, 0.08f, 0.15f, 0.55f};
+    Material arcTapTileMat   = withWhite(slotOrFallback(SlotArcTapTile,   arcTapTileDefault));
+    Material arcTapShadowMat = withWhite(slotOrFallback(SlotArcTapShadow, arcTapShadowDefault));
     for (auto& note : m_arcTaps) {
         float z = static_cast<float>(note.time - m_songTime) * SCROLL_SPEED;
         if (z < 0.f || z > 30.f) continue;
@@ -440,20 +510,33 @@ void ArcaeaRenderer::onRender(Renderer& renderer) {
         float wx = (tap->laneX * 2.f - 1.f) * LANE_HALF_WIDTH;
         float wy = GROUND_Y + tap->scanY * m_skyHeight;
 
-        // Shadow on the ground beneath the tap — same x/z, y locked to ground.
         glm::mat4 shadowModel = glm::translate(glm::mat4(1.f),
             {wx, 0.f, JUDGMENT_Z - z});
-        renderer.meshes().drawMesh(m_arcTapShadowMesh, shadowModel, {1, 1, 1, 1});
+        renderer.meshes().drawMesh(m_arcTapShadowMesh, shadowModel, arcTapShadowMat, ctx, desc);
 
         glm::mat4 model = glm::translate(glm::mat4(1.f), {wx, wy, JUDGMENT_Z - z});
-        renderer.meshes().drawMesh(m_arcTapMesh, model, {1, 1, 1, 1});
+        renderer.meshes().drawMesh(m_arcTapMesh, model, arcTapTileMat, ctx, desc);
     }
 
     // Arc ribbons — head vertex already sits on the judgment line (z=0) thanks
-    // to the per-frame rebuild in onUpdate. Skip arcs that have been fully
-    // consumed so we don't draw a degenerate collapsed mesh. Void arcs are
-    // invisible carriers for ArcTaps (per Arcaea convention) — skip them
-    // entirely rather than drawing semi-transparent gray ribbons.
+    // to the per-frame rebuild in onUpdate. Void arcs are invisible carriers
+    // for ArcTaps (per Arcaea convention) — skip them.
+    Material blueArcDefault;
+    blueArcDefault.kind = MaterialKind::Glow;
+    blueArcDefault.tint = {0.4f, 0.8f, 1.f, 0.9f};
+    Material redArcDefault;
+    redArcDefault.kind = MaterialKind::Glow;
+    redArcDefault.tint = {1.f, 0.4f, 0.7f, 0.9f};
+    Material blueShadowDefault;
+    blueShadowDefault.kind = MaterialKind::Unlit;
+    blueShadowDefault.tint = {0.08f, 0.22f, 0.35f, 0.55f};
+    Material redShadowDefault;
+    redShadowDefault.kind = MaterialKind::Unlit;
+    redShadowDefault.tint = {0.30f, 0.08f, 0.22f, 0.55f};
+    Material blueArcMat    = withWhite(slotOrFallback(SlotArcBlue,     blueArcDefault));
+    Material redArcMat     = withWhite(slotOrFallback(SlotArcRed,      redArcDefault));
+    Material blueShadowMat = withWhite(slotOrFallback(SlotArcBlueShdw, blueShadowDefault));
+    Material redShadowMat  = withWhite(slotOrFallback(SlotArcRedShdw,  redShadowDefault));
     for (auto& am : m_arcs) {
         if (am.data.isVoid) continue;
         double songRel = m_songTime - am.startTime;
@@ -461,16 +544,21 @@ void ArcaeaRenderer::onRender(Renderer& renderer) {
         float zOffset = static_cast<float>(am.startTime - m_songTime) * SCROLL_SPEED;
         if (zOffset > 30.f) continue;
         glm::mat4 model = glm::translate(glm::mat4(1.f), {0.f, 0.f, -zOffset});
-        // Shadow first so the bright tube draws on top.
-        renderer.meshes().drawMesh(am.shadow, model, {1,1,1,1});
-        renderer.meshes().drawMesh(am.mesh,   model, {1,1,1,1});
+        const bool isRed = am.data.color != 0;
+        const Material& arcMat    = isRed ? redArcMat    : blueArcMat;
+        const Material& shadowMat = isRed ? redShadowMat : blueShadowMat;
+        renderer.meshes().drawMesh(am.shadow, model, shadowMat, ctx, desc);
+        renderer.meshes().drawMesh(am.mesh,   model, arcMat,    ctx, desc);
     }
 }
 
 void ArcaeaRenderer::onShutdown(Renderer& renderer) {
     renderer.meshes().destroyMesh(renderer.buffers(), m_groundMesh);
     renderer.meshes().destroyMesh(renderer.buffers(), m_tapMesh);
-    renderer.meshes().destroyMesh(renderer.buffers(), m_gateMesh);
+    renderer.meshes().destroyMesh(renderer.buffers(), m_gateBottom);
+    renderer.meshes().destroyMesh(renderer.buffers(), m_gateSky);
+    renderer.meshes().destroyMesh(renderer.buffers(), m_gateLeftPost);
+    renderer.meshes().destroyMesh(renderer.buffers(), m_gateRightPost);
     renderer.meshes().destroyMesh(renderer.buffers(), m_arcTapMesh);
     renderer.meshes().destroyMesh(renderer.buffers(), m_arcTapShadowMesh);
     for (auto& am : m_arcs) {

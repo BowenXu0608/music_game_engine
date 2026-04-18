@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <vector>
 #include <string>
+#include <unordered_set>
 #include <glm/glm.hpp>
 #include <filesystem>
 #ifdef _WIN32
@@ -173,6 +174,55 @@ void Engine::shutdown() {
     m_renderer.shutdown();
     glfwDestroyWindow(m_window);
     glfwTerminate();
+}
+
+void Engine::openProject(const std::string& projectPath) {
+    if (projectPath.empty()) {
+        m_currentProjectPath = projectPath;
+        return;
+    }
+    // Reload the material asset library for the new project. Idempotent —
+    // calling with the same path just re-scans the materials dir, which is
+    // cheap and covers the editor-adds-a-new-mat-file case.
+    m_materialLibrary.loadFromProject(projectPath);
+
+    // Determine which modes the project actually uses (from chart filenames)
+    // so we only seed shared defaults for modes in play. Then migrate each
+    // chart's legacy inline materials, either into a shared default or a
+    // per-chart override depending on whether the inline values matched.
+    std::filesystem::path chartsDir = std::filesystem::path(projectPath) / "assets" / "charts";
+    std::error_code ec;
+    std::vector<std::pair<std::filesystem::path, MaterialModeKey>> chartMode;
+    std::unordered_set<int> modesSeen;
+    if (std::filesystem::is_directory(chartsDir, ec)) {
+        for (auto& entry : std::filesystem::directory_iterator(chartsDir, ec)) {
+            if (ec) break;
+            if (!entry.is_regular_file()) continue;
+            if (entry.path().extension() != ".json") continue;
+            MaterialModeKey mode = detectChartMode(entry.path().stem().string());
+            chartMode.emplace_back(entry.path(), mode);
+            modesSeen.insert((int)mode);
+        }
+    }
+    for (int m : modesSeen)
+        m_materialLibrary.seedDefaultMaterials((MaterialModeKey)m);
+
+    std::vector<std::string> chartStems;
+    for (auto& [chartPath, mode] : chartMode) {
+        chartStems.push_back(chartPath.stem().string());
+        try {
+            ChartData chart = ChartLoader::load(chartPath.string());
+            m_materialLibrary.migrateChartToAssets(chart, chartStems.back(), mode);
+        } catch (...) {
+            // Malformed chart — skip rather than halt project open.
+        }
+    }
+
+    // Final sweep — remove any Phase-A cryptic files whose chart stems we
+    // recognize. Unknown-prefix files are left alone.
+    m_materialLibrary.pruneOldCrypticFiles(chartStems);
+
+    m_currentProjectPath = projectPath;
 }
 
 void Engine::run() {
@@ -404,6 +454,7 @@ void Engine::setupPreviewMode(const GameModeConfig& config, const ChartData& cha
     }
     m_previewMode = createRenderer(config);
     m_previewMode->setEditorPreview(true);
+    m_previewMode->setMaterialLibrary(&m_materialLibrary);
     m_previewMode->onInit(m_renderer, chart, &config);
     m_previewMode->onResize(m_renderer.width(), m_renderer.height());
 
@@ -467,6 +518,7 @@ void Engine::setMode(GameModeRenderer* renderer, const ChartData& chart,
     if (m_activeMode) m_activeMode->onShutdown(m_renderer);
 
     m_activeMode.reset(renderer);
+    m_activeMode->setMaterialLibrary(&m_materialLibrary);
     m_activeMode->onInit(m_renderer, chart, config);
     m_hitDetector.init(chart);
     if (config) m_hitDetector.setTrackCount(config->trackCount);
@@ -511,7 +563,25 @@ void Engine::launchGameplay(const SongInfo& song, Difficulty difficulty,
     std::string chartPath = projectPath + "/" + chartRel;
     std::string audioPath = projectPath + "/" + song.audioFile;
 
+    openProject(projectPath);                          // (re)load asset library
     ChartData chart = ChartLoader::load(chartPath);
+    // Turn any legacy inline material entries into on-disk assets so the
+    // renderer can resolve them by name. The mode picks the right slot
+    // table + default-file prefix.
+    std::string chartStem = std::filesystem::path(chartPath).stem().string();
+    MaterialModeKey chartMode;
+    switch (song.gameMode.type) {
+        case GameModeType::DropNotes:
+            chartMode = (song.gameMode.dimension == DropDimension::ThreeD)
+                        ? MaterialModeKey::Arcaea
+                        : MaterialModeKey::Bandori;
+            break;
+        case GameModeType::Circle:   chartMode = MaterialModeKey::Lanota; break;
+        case GameModeType::ScanLine: chartMode = MaterialModeKey::Cytus;  break;
+        default:                     chartMode = MaterialModeKey::Bandori; break;
+    }
+    m_materialLibrary.migrateChartToAssets(chart, chartStem, chartMode);
+
     auto renderer = createRenderer(song.gameMode);
     setMode(renderer.release(), chart, &song.gameMode);
     m_currentProjectPath = projectPath;
@@ -548,6 +618,12 @@ void Engine::launchGameplay(const SongInfo& song, Difficulty difficulty,
 void Engine::launchGameplayDirect(const SongInfo& song, const ChartData& chart,
                                   const std::string& projectPath) {
     std::string audioPath = projectPath + "/" + song.audioFile;
+
+    // Caller already owns the ChartData — migration should have happened at
+    // load time (SongEditor / main.cpp call migrateChartToAssets right after
+    // ChartLoader::load). All we do here is make sure the library matches the
+    // project the caller says we're in.
+    openProject(projectPath);
 
     auto renderer = createRenderer(song.gameMode);
     setMode(renderer.release(), chart, &song.gameMode);

@@ -4,6 +4,7 @@
 #include "renderer/vulkan/VulkanContext.h"
 #include "renderer/vulkan/BufferManager.h"
 #include "renderer/MaterialSlots.h"
+#include "renderer/MaterialAssetLibrary.h"
 #include <imgui.h>
 #include <filesystem>
 #include <algorithm>
@@ -569,7 +570,7 @@ void SongEditor::render(Engine* engine) {
     {
         renderProperties();
         ImGui::Spacing();
-        renderGameModeConfig();
+        renderGameModeConfig(engine);
         ImGui::Spacing();
 
         ImGui::Separator();
@@ -1296,7 +1297,7 @@ void SongEditor::renderProperties() {
 
 // ── renderGameModeConfig ─────────────────────────────────────────────────────
 
-void SongEditor::renderGameModeConfig() {
+void SongEditor::renderGameModeConfig(Engine* engine) {
     if (!m_song) return;
     GameModeConfig& gm = m_song->gameMode;
 
@@ -2026,21 +2027,17 @@ void SongEditor::renderGameModeConfig() {
 
         auto& overrides = m_diffMaterials[(int)m_currentDifficulty];
 
-        const char* kindLabels = "Unlit\0Glow\0Scroll\0Pulse\0Gradient\0\0";
-        const char* kindKeys[] = {"unlit", "glow", "scroll", "pulse", "gradient"};
+        // Pull the project's asset library from the engine. Per slot, the
+        // dropdown only lists materials whose (targetMode, targetSlotSlug)
+        // matches this slot — plus any "universal" materials that leave
+        // those fields empty. Editing the actual material values lives in
+        // StartScreenEditor -> Materials tab; SongEditor is purely an
+        // assignment surface now.
+        MaterialAssetLibrary* lib = engine ? &engine->materialLibrary() : nullptr;
 
-        // Number of params each kind actually reads from the slider row.
-        // Unused trailing sliders are hidden so users can't touch dead knobs.
-        auto paramCountForKind = [](int kindIdx) -> int {
-            switch ((MaterialKind)kindIdx) {
-                case MaterialKind::Unlit:    return 0;
-                case MaterialKind::Glow:     return 3;
-                case MaterialKind::Scroll:   return 4;
-                case MaterialKind::Pulse:    return 3;
-                case MaterialKind::Gradient: return 4;
-                default:                     return 0;
-            }
-        };
+        ImGui::TextDisabled("Assign project material assets to slots. Edit the");
+        ImGui::TextDisabled("materials themselves on the Start Screen -> Materials tab.");
+        ImGui::Spacing();
 
         // Walk slots in declared order. When we enter a run that shares a
         // group label, wrap that run in a nested collapsing header (closed
@@ -2068,109 +2065,46 @@ void SongEditor::renderGameModeConfig() {
                     if (groupOpen) ImGui::Indent();
                 }
             }
-            // Skip slot widgets for closed groups.
             if (inGroup && !groupOpen) continue;
 
             ImGui::PushID((int)slot.id);
-            ImGui::Separator();
-            ImGui::Text("%s", slot.displayName);
 
-            // Ensure an entry exists so UI widgets always bind to live memory.
+            // Load existing assignment (if any).
             auto it = overrides.find(slot.id);
-            bool hasOverride = (it != overrides.end());
-            ChartData::MaterialData md;
-            if (hasOverride) {
-                md = it->second;
-            } else {
-                md.slot = slot.id;
-                md.kind = kindKeys[(int)slot.defaultKind];
-                for (int i = 0; i < 4; ++i) md.tint[i]   = slot.defaultTint[i];
-                for (int i = 0; i < 4; ++i) md.params[i] = slot.defaultParams[i];
-            }
+            std::string currentAsset = (it != overrides.end()) ? it->second.assetName
+                                                                : std::string{};
 
-            // Kind combo
-            int kindIdx = 0;
-            for (int i = 0; i < 5; ++i)
-                if (md.kind == kindKeys[i]) { kindIdx = i; break; }
-            if (ImGui::Combo("Kind", &kindIdx, kindLabels)) {
-                md.kind = kindKeys[kindIdx];
-                hasOverride = true;
-            }
+            // Slot-filtered asset list: only materials targeting this (mode, slug).
+            std::string slug = materialSlotSlug(slot);
+            std::vector<std::string> compatible =
+                lib ? lib->namesCompatibleWith(modeKey, slug)
+                    : std::vector<std::string>{};
 
-            if (ImGui::ColorEdit4("Tint", md.tint)) hasOverride = true;
+            // Build display list: "(default)" + compatible names.
+            std::vector<const char*> items;
+            items.reserve(compatible.size() + 1);
+            items.push_back("(default)");
+            for (auto& n : compatible) items.push_back(n.c_str());
 
-            const char* paramLabels[4] = {"", "", "", ""};
-            switch ((MaterialKind)kindIdx) {
-                case MaterialKind::Glow:
-                    paramLabels[0] = "Intensity";
-                    paramLabels[1] = "Falloff";
-                    paramLabels[2] = "HDR Cap";
-                    break;
-                case MaterialKind::Scroll:
-                    paramLabels[0] = "U Speed";
-                    paramLabels[1] = "V Speed";
-                    paramLabels[2] = "U Tile";
-                    paramLabels[3] = "V Tile";
-                    break;
-                case MaterialKind::Pulse:
-                    paramLabels[0] = "Last Hit Time";
-                    paramLabels[1] = "Decay";
-                    paramLabels[2] = "Peak Mult";
-                    break;
-                case MaterialKind::Gradient:
-                    paramLabels[0] = "Bottom R";
-                    paramLabels[1] = "Bottom G";
-                    paramLabels[2] = "Bottom B";
-                    paramLabels[3] = "Mode (0=vert 1=radial)";
-                    break;
-                default: break;
-            }
-            int pCount = paramCountForKind(kindIdx);
-            for (int i = 0; i < pCount; ++i) {
-                if (ImGui::SliderFloat(paramLabels[i], &md.params[i], -10.f, 10.f))
-                    hasOverride = true;
-            }
+            int selectedIdx = 0;
+            for (size_t i = 0; i < compatible.size(); ++i)
+                if (compatible[i] == currentAsset) { selectedIdx = (int)(i + 1); break; }
 
-            // Texture path + Browse button + drag-drop.
-            char texBuf[256];
-            strncpy(texBuf, md.texturePath.c_str(), 255); texBuf[255] = '\0';
-            ImGui::SetNextItemWidth(-70);
-            if (ImGui::InputText("##texPath", texBuf, 256)) {
-                md.texturePath = texBuf;
-                hasOverride = true;
-            }
-            if (ImGui::BeginDragDropTarget()) {
-                if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("ASSET_PATH")) {
-                    md.texturePath = std::string(static_cast<const char*>(payload->Data),
-                                                 payload->DataSize - 1);
-                    hasOverride = true;
-                }
-                ImGui::EndDragDropTarget();
-            }
-            ImGui::SameLine();
-            if (ImGui::Button("Browse")) {
-                std::string path = browseFile(
-                    L"Images\0*.png;*.jpg;*.jpeg;*.bmp\0All Files\0*.*\0", "textures");
-                if (!path.empty()) {
-                    md.texturePath = path;
-                    hasOverride = true;
+            // Slot name on its own line — full-width combo eats the trailing
+            // label, so we render the name above it instead.
+            ImGui::Text("%s", slot.displayName);
+            ImGui::SetNextItemWidth(-1.f);
+            if (ImGui::Combo("##mat_picker", &selectedIdx,
+                             items.data(), (int)items.size())) {
+                if (selectedIdx == 0) {
+                    overrides.erase(slot.id);
+                } else {
+                    ChartData::MaterialData md;
+                    md.slot      = slot.id;
+                    md.assetName = compatible[selectedIdx - 1];
+                    overrides[slot.id] = md;
                 }
             }
-            if (!md.texturePath.empty()) {
-                ImGui::SameLine();
-                if (ImGui::Button("Clear")) {
-                    md.texturePath.clear();
-                    hasOverride = true;
-                }
-            }
-
-            if (ImGui::Button("Reset to Default")) {
-                overrides.erase(slot.id);
-                ImGui::PopID();
-                continue;
-            }
-
-            if (hasOverride) overrides[slot.id] = md;
 
             ImGui::PopID();
         }
@@ -5370,6 +5304,10 @@ void SongEditor::exportAllCharts() {
         }
 
         // ── Per-slot material overrides for this difficulty ──────────
+        // Post Phase A: if the entry carries an assetName, write the
+        // reference form `{slot, asset}`. Legacy inline form is still
+        // written for entries without an assetName so pre-library charts
+        // keep round-tripping.
         const auto& mats = m_diffMaterials[d];
         if (!mats.empty()) {
             f << ",\n \"materials\": [\n";
@@ -5377,15 +5315,20 @@ void SongEditor::exportAllCharts() {
             for (const auto& [slot, md] : mats) {
                 if (!first) f << ",\n";
                 first = false;
-                f << "   {\"slot\": " << (int)slot
-                  << ", \"kind\": \"" << md.kind << "\""
-                  << ", \"tint\": ["   << md.tint[0]   << ", " << md.tint[1]
-                                << ", " << md.tint[2]   << ", " << md.tint[3]   << "]"
-                  << ", \"params\": [" << md.params[0] << ", " << md.params[1]
-                                << ", " << md.params[2] << ", " << md.params[3] << "]";
-                if (!md.texturePath.empty())
-                    f << ", \"texture\": \"" << md.texturePath << "\"";
-                f << "}";
+                if (!md.assetName.empty()) {
+                    f << "   {\"slot\": " << (int)slot
+                      << ", \"asset\": \"" << md.assetName << "\"}";
+                } else {
+                    f << "   {\"slot\": " << (int)slot
+                      << ", \"kind\": \"" << md.kind << "\""
+                      << ", \"tint\": ["   << md.tint[0]   << ", " << md.tint[1]
+                                    << ", " << md.tint[2]   << ", " << md.tint[3]   << "]"
+                      << ", \"params\": [" << md.params[0] << ", " << md.params[1]
+                                    << ", " << md.params[2] << ", " << md.params[3] << "]";
+                    if (!md.texturePath.empty())
+                        f << ", \"texture\": \"" << md.texturePath << "\"";
+                    f << "}";
+                }
             }
             f << "\n ]";
         }

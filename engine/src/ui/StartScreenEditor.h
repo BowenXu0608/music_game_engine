@@ -3,6 +3,7 @@
 #include "AssetBrowser.h"
 #include "ImageEditor.h"
 #include "renderer/vulkan/TextureManager.h"
+#include "renderer/MaterialAsset.h"
 #include <vulkan/vulkan.h>
 #include <GLFW/glfw3.h>
 #include <string>
@@ -47,6 +48,9 @@ private:
     void renderPreview();
     void renderProperties();
     void renderAssets();
+    // Project-level Material asset CRUD panel. Lives in the Properties
+    // split as a sibling tab. Reads/writes through Engine::materialLibrary().
+    void renderMaterials(Engine* engine);
 
     void loadBackground(VulkanContext& ctx, BufferManager& bufMgr, ImGuiLayer& imgui);
     void loadLogoImage (VulkanContext& ctx, BufferManager& bufMgr, ImGuiLayer& imgui);
@@ -131,4 +135,17 @@ private:
     // ── status feedback ──────────────────────────────────────────────────────
     std::string m_statusMsg;
     float       m_statusTimer = 0.f;
+
+    // ── Materials panel state ───────────────────────────────────────────────
+    // Form copy so edits don't touch the library until the user clicks Save.
+    std::string   m_selectedMaterial;
+    MaterialAsset m_editingMaterial;
+    bool          m_materialEditLoaded = false;    // did we populate the form?
+    std::string   m_materialCompileLog;
+    bool          m_showNewMaterialDialog = false;
+    char          m_newMaterialNameBuf[128] = {};
+    // Set when a material tile is clicked in the Assets browser. On the next
+    // render of the Properties tab bar, force the Materials tab to open and
+    // clear the flag.
+    bool          m_materialsTabRequested = false;
 };

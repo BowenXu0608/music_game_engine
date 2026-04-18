@@ -7,6 +7,7 @@
 
 class Renderer;
 struct GameModeConfig;
+class  MaterialAssetLibrary;
 
 class GameModeRenderer {
 public:
@@ -36,7 +37,16 @@ public:
     void setEditorPreview(bool v) { m_isEditorPreview = v; }
     bool isEditorPreview() const { return m_isEditorPreview; }
 
+    // Engine injects the active project's MaterialAssetLibrary before onInit
+    // so chart entries with an `assetName` can be resolved by name. Renderers
+    // that don't receive a library (null) fall back to the inline legacy
+    // fields on each MaterialData entry — keeps Android and standalone tests
+    // working without the asset system.
+    void setMaterialLibrary(MaterialAssetLibrary* lib) { m_materialLibrary = lib; }
+    MaterialAssetLibrary* materialLibrary() const { return m_materialLibrary; }
+
 protected:
     std::unordered_set<uint32_t> m_activeHoldIds;
     bool m_isEditorPreview = false;
+    MaterialAssetLibrary* m_materialLibrary = nullptr;
 };

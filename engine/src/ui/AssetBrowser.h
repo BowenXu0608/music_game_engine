@@ -13,10 +13,11 @@ inline fs::path u8ToPath(const std::string& s) {
 }
 
 struct AssetList {
-    std::vector<std::string> images;  // .png .jpg .jpeg
-    std::vector<std::string> gifs;    // .gif
-    std::vector<std::string> videos;  // .mp4 .webm
-    std::vector<std::string> audios;  // .mp3 .ogg .wav .flac .aac
+    std::vector<std::string> images;     // .png .jpg .jpeg
+    std::vector<std::string> gifs;       // .gif
+    std::vector<std::string> videos;     // .mp4 .webm
+    std::vector<std::string> audios;     // .mp3 .ogg .wav .flac .aac
+    std::vector<std::string> materials;  // .mat — MaterialAsset JSON files
 };
 
 inline int importAssetsToProject(const std::string& projectPath,
@@ -80,6 +81,8 @@ inline AssetList scanAssets(const std::string& projectPath) {
                 result.videos.push_back(rel);
             else if (ext == ".mp3" || ext == ".ogg" || ext == ".wav" || ext == ".flac" || ext == ".aac")
                 result.audios.push_back(rel);
+            else if (ext == ".mat")
+                result.materials.push_back(rel);
         }
     } catch (const std::exception& e) {
         std::cout << "[AssetBrowser] Scan error: " << e.what() << "\n";

@@ -88,7 +88,12 @@ if(GLSLC)
         ${SHADER_DIR}/quad_pulse.frag
         ${SHADER_DIR}/quad_gradient.frag
         ${SHADER_DIR}/line.vert      ${SHADER_DIR}/line.frag
-        ${SHADER_DIR}/mesh.vert      ${SHADER_DIR}/mesh.frag
+        ${SHADER_DIR}/mesh.vert
+        ${SHADER_DIR}/mesh_unlit.frag
+        ${SHADER_DIR}/mesh_glow.frag
+        ${SHADER_DIR}/mesh_scroll.frag
+        ${SHADER_DIR}/mesh_pulse.frag
+        ${SHADER_DIR}/mesh_gradient.frag
         ${SHADER_DIR}/composite.vert ${SHADER_DIR}/composite.frag
         ${SHADER_DIR}/bloom_downsample.comp
         ${SHADER_DIR}/bloom_upsample.comp

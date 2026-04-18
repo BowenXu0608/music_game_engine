@@ -76,7 +76,9 @@ void AndroidEngine::onWindowInit(ANativeWindow* window) {
     const char* shaderFiles[] = {
         "quad.vert.spv", "quad.frag.spv",
         "line.vert.spv", "line.frag.spv",
-        "mesh.vert.spv", "mesh.frag.spv",
+        "mesh.vert.spv",
+        "mesh_unlit.frag.spv", "mesh_glow.frag.spv",
+        "mesh_scroll.frag.spv", "mesh_pulse.frag.spv", "mesh_gradient.frag.spv",
         "composite.vert.spv", "composite.frag.spv",
         "bloom_downsample.comp.spv", "bloom_upsample.comp.spv"
     };

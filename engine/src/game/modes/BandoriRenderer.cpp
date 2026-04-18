@@ -1,6 +1,7 @@
 #include "BandoriRenderer.h"
 #include "renderer/Renderer.h"
 #include "renderer/Material.h"
+#include "renderer/MaterialAssetLibrary.h"
 #include "ui/ProjectHub.h"
 #include <glm/gtc/matrix_transform.hpp>
 #include <cmath>
@@ -27,13 +28,6 @@ enum BandoriSlot : uint16_t {
     SlotTrackSurface   = 12,
 };
 
-MaterialKind kindFromString(const std::string& s) {
-    if (s == "glow")     return MaterialKind::Glow;
-    if (s == "scroll")   return MaterialKind::Scroll;
-    if (s == "pulse")    return MaterialKind::Pulse;
-    if (s == "gradient") return MaterialKind::Gradient;
-    return MaterialKind::Unlit;
-}
 } // namespace
 
 Material BandoriRenderer::slotOrFallback(uint16_t slot, const Material& fallback) const {
@@ -72,14 +66,12 @@ void BandoriRenderer::onInit(Renderer& renderer, const ChartData& chart,
     m_renderer = &renderer;
     m_notes = chart.notes;
 
-    // Import per-slot material overrides from the chart.
+    // Import per-slot material overrides from the chart. Each entry either
+    // references a project-level MaterialAsset (via md.assetName) or carries
+    // inline legacy fields — resolveMaterial() picks whichever is populated.
     m_chartMaterials.clear();
     for (const auto& md : chart.materials) {
-        Material mat;
-        mat.kind = kindFromString(md.kind);
-        mat.tint   = {md.tint[0],   md.tint[1],   md.tint[2],   md.tint[3]};
-        mat.params = {md.params[0], md.params[1], md.params[2], md.params[3]};
-        m_chartMaterials[md.slot] = mat;
+        m_chartMaterials[md.slot] = resolveMaterial(md, m_materialLibrary);
     }
 
     // Apply camera config

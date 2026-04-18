@@ -36,3 +36,18 @@ enum class MaterialModeKey : int {
 // Mode-tagged slot list. Returned by reference-to-static storage so pointers
 // remain stable across calls.
 const std::vector<MaterialSlotInfo>& getMaterialSlotsForMode(MaterialModeKey mode);
+
+// Filename-safe slug for a slot. Lowercase alphanumeric + underscores; group
+// name is prefixed when present so distinct slots that happen to share a
+// display name (e.g. "Head" under both Hold Note and Slide Note in Cytus)
+// don't collide. Used to build `default_<mode>_<slug>.mat` and
+// `<chartStem>__<slug>.mat`.
+std::string materialSlotSlug(const MaterialSlotInfo& slot);
+
+// Short identifier for a mode, used in default file names.
+const char* materialModeName(MaterialModeKey mode);
+
+// Infer a chart's MaterialModeKey from its filename stem. Relies on the
+// engine's `<song>_<modeKey>_<difficulty>` convention (drop2d/drop3d/
+// circle/scan/phigros). Defaults to Bandori for unrecognized stems.
+MaterialModeKey detectChartMode(const std::string& chartStem);

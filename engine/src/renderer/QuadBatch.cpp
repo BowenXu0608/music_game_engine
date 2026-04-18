@@ -1,4 +1,5 @@
 #include "QuadBatch.h"
+#include "ShaderCompiler.h"
 #include "vulkan/VulkanContext.h"
 #include "vulkan/SyncObjects.h"
 #include "RenderTypes.h"
@@ -35,6 +36,11 @@ const char* shaderNameForKind(MaterialKind k) {
 void QuadBatch::init(VulkanContext& ctx, BufferManager& bufMgr,
                      DescriptorManager& descMgr, VkRenderPass renderPass,
                      const std::string& shaderDir) {
+    // Remembered so custom pipelines can be rebuilt lazily with the same
+    // layout/render-pass bindings as the built-in kind pipelines.
+    m_renderPass = renderPass;
+    m_shaderDir  = shaderDir;
+
     m_vertexBuffers.resize(MAX_FRAMES_IN_FLIGHT);
     m_ubos.resize(MAX_FRAMES_IN_FLIGHT);
     m_frameSets.resize(MAX_FRAMES_IN_FLIGHT);
@@ -101,16 +107,23 @@ void QuadBatch::buildIndexBuffer(VulkanContext& ctx, BufferManager& bufMgr) {
 void QuadBatch::pushBatch(const Material& mat, glm::vec4 uvTransform,
                           uint32_t quadIdx,
                           VulkanContext& ctx, DescriptorManager& descMgr) {
+    // Resolve custom pipeline up-front so batching/coalescing can key off the
+    // VkPipeline handle. Built-in kinds leave this null and fall back to
+    // m_pipelines[kind] at flush time.
+    VkPipeline customPipe = VK_NULL_HANDLE;
+    if (mat.kind == MaterialKind::Custom && !mat.customShaderPath.empty())
+        customPipe = getOrBuildCustomPipeline(ctx, mat.customShaderPath);
+
     // Per-vertex tint + uvTransform are baked into vertices, so batching only
-    // breaks on (kind, texture, params) change. This matches the pre-material
-    // batching efficiency.
+    // breaks on (kind, customPipe, texture, params) change.
     (void)uvTransform;
     bool canCoalesce =
         !m_batches.empty() &&
-        m_batches.back().kind    == mat.kind &&
-        m_batches.back().texture == mat.texture &&
-        m_batches.back().sampler == mat.sampler &&
-        m_batches.back().params  == mat.params;
+        m_batches.back().kind       == mat.kind &&
+        m_batches.back().customPipe == customPipe &&
+        m_batches.back().texture    == mat.texture &&
+        m_batches.back().sampler    == mat.sampler &&
+        m_batches.back().params     == mat.params;
 
     if (canCoalesce) {
         m_batches.back().indexCount += 6;
@@ -119,6 +132,7 @@ void QuadBatch::pushBatch(const Material& mat, glm::vec4 uvTransform,
 
     Batch b{};
     b.kind        = mat.kind;
+    b.customPipe  = customPipe;
     b.texture     = mat.texture;
     b.sampler     = mat.sampler;
     b.tint        = glm::vec4(1.f);        // unused — per-vertex tint is live
@@ -225,17 +239,19 @@ void QuadBatch::flush(VkCommandBuffer cmd, VulkanContext& ctx, DescriptorManager
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                             m_pipelineLayout, 0, 1, &m_frameSets[m_currentFrame], 0, nullptr);
 
-    MaterialKind    lastKind   = MaterialKind::Count;   // force first bind
+    VkPipeline      lastPipe   = VK_NULL_HANDLE;
     VkDescriptorSet lastTexSet = VK_NULL_HANDLE;
 
     for (auto& batch : m_batches) {
-        if (batch.kind != lastKind) {
-            VkPipeline pipe = m_pipelines[(size_t)batch.kind].handle();
-            // Fall back to Unlit if a kind isn't initialized yet (Phase 1).
+        VkPipeline pipe = batch.customPipe;
+        if (pipe == VK_NULL_HANDLE) {
+            pipe = m_pipelines[(size_t)batch.kind].handle();
             if (pipe == VK_NULL_HANDLE)
                 pipe = m_pipelines[(size_t)MaterialKind::Unlit].handle();
+        }
+        if (pipe != lastPipe) {
             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
-            lastKind = batch.kind;
+            lastPipe = pipe;
         }
 
         QuadPushConstants pc{};
@@ -268,8 +284,46 @@ void QuadBatch::updateFrameUBO(const glm::mat4& viewProj, float time, int frameI
     memcpy(m_ubos[frameIndex].mapped, &ubo, sizeof(FrameUBO));
 }
 
+VkPipeline QuadBatch::getOrBuildCustomPipeline(VulkanContext& ctx,
+                                                const std::string& fragPath,
+                                                std::string* errorOut) {
+    auto it = m_customPipelines.find(fragPath);
+    if (it != m_customPipelines.end()) return it->second.handle();
+
+    ShaderCompileResult compile = compileFragmentToSpv(fragPath);
+    if (!compile.ok) {
+        if (errorOut) *errorOut = compile.errorLog;
+        return VK_NULL_HANDLE;
+    }
+
+    auto binding    = QuadVertex::binding();
+    auto attributes = QuadVertex::attributes();
+
+    PipelineConfig cfg{};
+    cfg.renderPass       = m_renderPass;
+    cfg.layout           = m_pipelineLayout;
+    cfg.vertShaderPath   = m_shaderDir + "/quad.vert.spv";
+    cfg.fragShaderPath   = compile.spvPath;
+    cfg.vertexBinding    = binding;
+    cfg.vertexAttributes = {attributes.begin(), attributes.end()};
+    cfg.blend            = PipelineConfig::Blend::Alpha;
+
+    Pipeline pipe;
+    try {
+        pipe.init(ctx, cfg);
+    } catch (const std::exception& e) {
+        if (errorOut) *errorOut = e.what();
+        return VK_NULL_HANDLE;
+    }
+    auto [ins, _] = m_customPipelines.emplace(fragPath, std::move(pipe));
+    if (errorOut) *errorOut = compile.errorLog;    // may carry glslc warnings
+    return ins->second.handle();
+}
+
 void QuadBatch::shutdown(VulkanContext& ctx, BufferManager& bufMgr) {
     for (auto& p : m_pipelines) p.shutdown(ctx);
+    for (auto& [_, p] : m_customPipelines) p.shutdown(ctx);
+    m_customPipelines.clear();
     vkDestroyPipelineLayout(ctx.device(), m_pipelineLayout, nullptr);
     for (auto& b : m_vertexBuffers) bufMgr.destroyBuffer(b);
     for (auto& b : m_ubos)         bufMgr.destroyBuffer(b);

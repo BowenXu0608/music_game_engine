@@ -355,6 +355,10 @@ void ProjectHub::render(Engine* engine) {
                 m_selectedProject = proj;
                 m_projectSelected = true;
                 if (engine) {
+                    // Point the engine-wide material asset library at the
+                    // selected project before the editors start reading
+                    // chart data — migration relies on it being loaded.
+                    engine->openProject(proj.path);
                     engine->startScreenEditor().load(proj.path);
                     engine->switchLayer(EditorLayer::StartScreen);
                 }

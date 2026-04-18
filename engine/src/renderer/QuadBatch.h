@@ -52,9 +52,19 @@ public:
         return m_pipelines[(size_t)k];
     }
 
+    // Compile (if needed) and build a pipeline for a user-authored fragment
+    // shader. The .frag source is passed; the method caches by that path.
+    // Returns VK_NULL_HANDLE when the shader fails to compile — caller should
+    // gracefully fall back to Unlit. `errorOut` (when non-null) is filled
+    // with glslc's stderr so the editor can surface compile errors.
+    VkPipeline getOrBuildCustomPipeline(VulkanContext& ctx,
+                                         const std::string& fragPath,
+                                         std::string* errorOut = nullptr);
+
 private:
     struct Batch {
         MaterialKind    kind;
+        VkPipeline      customPipe = VK_NULL_HANDLE;   // overrides kind when set
         VkImageView     texture;
         VkSampler       sampler;
         VkDescriptorSet texSet = VK_NULL_HANDLE;
@@ -72,6 +82,15 @@ private:
 
     std::array<Pipeline, (size_t)MaterialKind::Count> m_pipelines{};
     VkPipelineLayout m_pipelineLayout = VK_NULL_HANDLE;
+
+    // Template bits captured at init() so custom pipelines can be rebuilt
+    // lazily with the same layout + vertex inputs + render pass as the
+    // built-in pipelines.
+    VkRenderPass     m_renderPass      = VK_NULL_HANDLE;
+    std::string      m_shaderDir;     // for quad.vert.spv lookup
+    // Cache of custom fragment shaders → pipeline. Keyed by the user's .frag
+    // path (not .spv) so we can re-resolve through the compiler on changes.
+    std::unordered_map<std::string, Pipeline> m_customPipelines;
 
     // Per-frame dynamic VBOs (MAX_FRAMES_IN_FLIGHT)
     std::vector<Buffer> m_vertexBuffers;

@@ -2,12 +2,15 @@
 #include "engine/Engine.h"
 #include "renderer/vulkan/VulkanContext.h"
 #include "renderer/vulkan/BufferManager.h"
+#include "renderer/MaterialAssetLibrary.h"
+#include "renderer/ShaderCompiler.h"
 #include <imgui.h>
 #include <nlohmann/json.hpp>
 #include <fstream>
 #include <filesystem>
 #include <algorithm>
 #include <cstring>
+#include <cstdio>
 #include <iostream>
 #ifdef _WIN32
 #include <windows.h>
@@ -405,7 +408,25 @@ void StartScreenEditor::render(Engine* engine) {
     ImGui::SameLine();
 
     ImGui::BeginChild("Properties", ImVec2(propsW, topH), true);
-    renderProperties();
+    if (ImGui::BeginTabBar("start_props_tabs")) {
+        if (ImGui::BeginTabItem("Start Screen")) {
+            renderProperties();
+            ImGui::EndTabItem();
+        }
+        // Force-open the Materials tab when a .mat tile in the assets panel
+        // is clicked. Reset the flag after the first pass so subsequent
+        // clicks on other tabs (Start Screen) stick.
+        ImGuiTabItemFlags matFlags = ImGuiTabItemFlags_None;
+        if (m_materialsTabRequested) {
+            matFlags = ImGuiTabItemFlags_SetSelected;
+            m_materialsTabRequested = false;
+        }
+        if (ImGui::BeginTabItem("Materials", nullptr, matFlags)) {
+            renderMaterials(engine);
+            ImGui::EndTabItem();
+        }
+        ImGui::EndTabBar();
+    }
     ImGui::EndChild();
 
     // Horizontal splitter
@@ -854,6 +875,266 @@ void StartScreenEditor::renderProperties() {
     }
 }
 
+// ── renderMaterials ───────────────────────────────────────────────────────────
+
+void StartScreenEditor::renderMaterials(Engine* engine) {
+    if (!engine) {
+        ImGui::TextDisabled("Engine unavailable");
+        return;
+    }
+    MaterialAssetLibrary& lib = engine->materialLibrary();
+
+    // ── Library list + toolbar ───────────────────────────────────────────────
+    if (ImGui::Button("+ New Material")) {
+        m_showNewMaterialDialog  = true;
+        m_newMaterialNameBuf[0]  = '\0';
+    }
+    ImGui::SameLine();
+    ImGui::TextDisabled("(%d in project)", (int)lib.all().size());
+
+    // Create-new popup
+    if (m_showNewMaterialDialog) {
+        ImGui::OpenPopup("New Material");
+        m_showNewMaterialDialog = false;
+    }
+    if (ImGui::BeginPopupModal("New Material", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::InputText("Name", m_newMaterialNameBuf, sizeof(m_newMaterialNameBuf));
+        std::string name = m_newMaterialNameBuf;
+        bool valid = !name.empty() && !lib.get(name);
+        if (!valid && !name.empty())
+            ImGui::TextColored(ImVec4(1.f, 0.5f, 0.4f, 1.f), "Name already exists");
+        if (!valid) ImGui::BeginDisabled();
+        if (ImGui::Button("Create", ImVec2(100, 0))) {
+            MaterialAsset a;
+            a.name = name;
+            lib.upsert(a);
+            m_selectedMaterial   = name;
+            m_editingMaterial    = a;
+            m_materialEditLoaded = true;
+            m_materialCompileLog.clear();
+            ImGui::CloseCurrentPopup();
+        }
+        if (!valid) ImGui::EndDisabled();
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel", ImVec2(100, 0))) ImGui::CloseCurrentPopup();
+        ImGui::EndPopup();
+    }
+
+    ImGui::Separator();
+
+    // Selectable list — kept tight so the edit panel below has room.
+    float listH = ImGui::GetContentRegionAvail().y * 0.35f;
+    ImGui::BeginChild("mat_list", ImVec2(0, listH), true);
+    for (const auto& name : lib.allNames()) {
+        bool selected = (name == m_selectedMaterial);
+        if (ImGui::Selectable(name.c_str(), selected)) {
+            m_selectedMaterial = name;
+            if (const MaterialAsset* a = lib.get(name)) {
+                m_editingMaterial    = *a;
+                m_materialEditLoaded = true;
+                m_materialCompileLog.clear();
+            }
+        }
+    }
+    ImGui::EndChild();
+
+    // ── Edit panel for the selected material ────────────────────────────────
+    if (m_selectedMaterial.empty() || !m_materialEditLoaded) {
+        ImGui::TextDisabled("Select a material (or create one) to edit.");
+        return;
+    }
+    if (!lib.get(m_selectedMaterial)) {
+        // Underlying asset was deleted — clear local state.
+        m_selectedMaterial.clear();
+        m_materialEditLoaded = false;
+        return;
+    }
+
+    ImGui::Text("Editing: %s", m_editingMaterial.name.c_str());
+    ImGui::Separator();
+
+    // ── Compatibility: which (mode, slot) this material applies to. ──────────
+    // The SongEditor slot dropdowns filter by these fields. Leaving both
+    // blank makes the material "universal" (shows up in every slot); common
+    // usage is to pin a material to one specific mode+slot pair.
+    static const char* kModeLabels[] = {
+        "(any mode)", "bandori", "arcaea", "cytus", "lanota", "phigros"
+    };
+    int modeIdx = 0;
+    if      (m_editingMaterial.targetMode == "bandori") modeIdx = 1;
+    else if (m_editingMaterial.targetMode == "arcaea")  modeIdx = 2;
+    else if (m_editingMaterial.targetMode == "cytus")   modeIdx = 3;
+    else if (m_editingMaterial.targetMode == "lanota")  modeIdx = 4;
+    else if (m_editingMaterial.targetMode == "phigros") modeIdx = 5;
+    if (ImGui::Combo("Target mode", &modeIdx, kModeLabels, IM_ARRAYSIZE(kModeLabels))) {
+        m_editingMaterial.targetMode     = (modeIdx == 0) ? ""
+                                         : kModeLabels[modeIdx];
+        // Changing mode invalidates the slot slug — clear it so the slot
+        // combo below rebuilds against the new mode's slot list.
+        m_editingMaterial.targetSlotSlug.clear();
+    }
+
+    // Build slot list for the selected mode. "(any slot)" is always first.
+    std::vector<std::string> slotSlugs;
+    std::vector<std::string> slotLabels;
+    slotSlugs.push_back("");       // index 0 = any
+    slotLabels.push_back("(any slot)");
+    if (modeIdx != 0) {
+        MaterialModeKey mk =
+              (modeIdx == 1) ? MaterialModeKey::Bandori
+            : (modeIdx == 2) ? MaterialModeKey::Arcaea
+            : (modeIdx == 3) ? MaterialModeKey::Cytus
+            : (modeIdx == 4) ? MaterialModeKey::Lanota
+            :                  MaterialModeKey::Phigros;
+        for (const auto& s : getMaterialSlotsForMode(mk)) {
+            slotSlugs.push_back(materialSlotSlug(s));
+            std::string label = s.displayName;
+            if (s.group && s.group[0]) label = std::string(s.group) + " / " + label;
+            slotLabels.push_back(label);
+        }
+    }
+    int slotIdx = 0;
+    for (size_t i = 0; i < slotSlugs.size(); ++i)
+        if (slotSlugs[i] == m_editingMaterial.targetSlotSlug) { slotIdx = (int)i; break; }
+    std::vector<const char*> slotLabelPtrs;
+    slotLabelPtrs.reserve(slotLabels.size());
+    for (auto& l : slotLabels) slotLabelPtrs.push_back(l.c_str());
+    if (ImGui::Combo("Target slot", &slotIdx, slotLabelPtrs.data(), (int)slotLabelPtrs.size()))
+        m_editingMaterial.targetSlotSlug = slotSlugs[slotIdx];
+
+    ImGui::Separator();
+
+    const char* kindLabels = "Unlit\0Glow\0Scroll\0Pulse\0Gradient\0Custom\0\0";
+    int kindIdx = (int)m_editingMaterial.kind;
+    if (ImGui::Combo("Kind", &kindIdx, kindLabels))
+        m_editingMaterial.kind = (MaterialKind)kindIdx;
+
+    ImGui::ColorEdit4("Tint", m_editingMaterial.tint.data());
+
+    // Param slider count depends on kind — match the legend in Material.h.
+    int paramCount = 0;
+    const char* paramLabels[4] = {"param0", "param1", "param2", "param3"};
+    switch (m_editingMaterial.kind) {
+        case MaterialKind::Glow:
+            paramCount = 3;
+            paramLabels[0] = "intensity"; paramLabels[1] = "falloff"; paramLabels[2] = "hdrCap";
+            break;
+        case MaterialKind::Scroll:
+            paramCount = 4;
+            paramLabels[0] = "uSpeed"; paramLabels[1] = "vSpeed";
+            paramLabels[2] = "uTile";  paramLabels[3] = "vTile";
+            break;
+        case MaterialKind::Pulse:
+            paramCount = 3;
+            paramLabels[0] = "lastHitTime"; paramLabels[1] = "decay"; paramLabels[2] = "peakMult";
+            break;
+        case MaterialKind::Gradient:
+            paramCount = 4;
+            paramLabels[0] = "bottomR"; paramLabels[1] = "bottomG";
+            paramLabels[2] = "bottomB"; paramLabels[3] = "mode";
+            break;
+        case MaterialKind::Custom:
+            // Custom shaders get all 4 sliders — user's .frag decides meaning.
+            paramCount = 4;
+            break;
+        default: break;
+    }
+    for (int i = 0; i < paramCount; ++i)
+        ImGui::DragFloat(paramLabels[i], &m_editingMaterial.params[i], 0.01f);
+
+    // Texture path: relative-to-project. Plain text input for now — full
+    // AssetBrowser integration comes later.
+    char texBuf[256] = {};
+    std::snprintf(texBuf, sizeof(texBuf), "%s", m_editingMaterial.texturePath.c_str());
+    if (ImGui::InputText("Texture", texBuf, sizeof(texBuf)))
+        m_editingMaterial.texturePath = texBuf;
+
+    // Custom-kind-only fields: shader path + Compile button.
+    if (m_editingMaterial.kind == MaterialKind::Custom) {
+        ImGui::Spacing();
+        ImGui::TextDisabled("Custom shader");
+
+        char shBuf[256] = {};
+        std::snprintf(shBuf, sizeof(shBuf), "%s", m_editingMaterial.customShaderPath.c_str());
+        // Accepts .frag (GLSL source, compiled via glslc) or .spv
+        // (pre-compiled SPIR-V, loaded as-is).
+        if (ImGui::InputText("Shader (.frag or .spv)", shBuf, sizeof(shBuf)))
+            m_editingMaterial.customShaderPath = shBuf;
+
+        if (ImGui::Button("Compile")) {
+            // Resolve project-relative path before handing to the compiler.
+            fs::path absShader = fs::path(lib.projectDir()) / m_editingMaterial.customShaderPath;
+            ShaderCompileResult r = compileFragmentToSpv(absShader, true);
+            if (r.ok) {
+                m_materialCompileLog = "OK — " + r.spvPath;
+                if (!r.errorLog.empty()) m_materialCompileLog += "\n" + r.errorLog;
+            } else {
+                m_materialCompileLog = "FAILED\n" + r.errorLog;
+            }
+        }
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Template...")) {
+            // Emit a boilerplate frag that conforms to the push-constant
+            // block, so new users have something that at least compiles.
+            fs::path target = fs::path(lib.projectDir()) /
+                              (m_editingMaterial.customShaderPath.empty()
+                                   ? ("assets/shaders/" + m_editingMaterial.name + ".frag")
+                                   : m_editingMaterial.customShaderPath);
+            std::error_code ec;
+            fs::create_directories(target.parent_path(), ec);
+            if (!fs::exists(target, ec)) {
+                std::ofstream f(target);
+                f << "#version 450\n"
+                     "layout(set = 0, binding = 0) uniform FrameUBO { mat4 viewProj; float time; } ubo;\n"
+                     "layout(set = 1, binding = 0) uniform sampler2D texSampler;\n"
+                     "layout(push_constant) uniform PC {\n"
+                     "    mat4  model;\n"
+                     "    vec4  tint;\n"
+                     "    vec4  uvTransform;\n"
+                     "    vec4  params;\n"
+                     "    uint  kind;\n"
+                     "    uint  _pad[3];\n"
+                     "} pc;\n"
+                     "layout(location = 0) in vec2 fragUV;\n"
+                     "layout(location = 1) in vec4 fragColor;\n"
+                     "layout(location = 0) out vec4 outColor;\n"
+                     "void main() {\n"
+                     "    outColor = texture(texSampler, fragUV) * fragColor;\n"
+                     "    if (outColor.a < 0.01) discard;\n"
+                     "}\n";
+            }
+            // Make the path the material references project-relative.
+            fs::path rel = fs::relative(target, lib.projectDir(), ec);
+            m_editingMaterial.customShaderPath = rel.generic_string();
+        }
+
+        if (!m_materialCompileLog.empty()) {
+            ImGui::Spacing();
+            ImGui::TextUnformatted("Compile log:");
+            ImGui::InputTextMultiline("##compile_log",
+                m_materialCompileLog.data(), m_materialCompileLog.size() + 1,
+                ImVec2(-1, 100),
+                ImGuiInputTextFlags_ReadOnly);
+        }
+    }
+
+    // ── Save / Delete ───────────────────────────────────────────────────────
+    ImGui::Separator();
+    if (ImGui::Button("Save")) {
+        lib.upsert(m_editingMaterial);
+        m_statusMsg   = "Saved material: " + m_editingMaterial.name;
+        m_statusTimer = 3.f;
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Delete")) {
+        lib.remove(m_editingMaterial.name);
+        m_selectedMaterial.clear();
+        m_materialEditLoaded = false;
+        m_statusMsg   = "Deleted material";
+        m_statusTimer = 3.f;
+    }
+}
+
 // ── renderAssets ──────────────────────────────────────────────────────────────
 
 void StartScreenEditor::renderAssets() {
@@ -911,7 +1192,9 @@ void StartScreenEditor::renderAssets() {
         return;
     }
 
-    bool anyFiles = !m_assets.images.empty() || !m_assets.gifs.empty() || !m_assets.videos.empty() || !m_assets.audios.empty();
+    bool anyFiles = !m_assets.images.empty() || !m_assets.gifs.empty() ||
+                    !m_assets.videos.empty() || !m_assets.audios.empty() ||
+                    !m_assets.materials.empty();
     if (!anyFiles) {
         // Drop-zone hint
         ImDrawList* dl = ImGui::GetWindowDrawList();
@@ -1019,6 +1302,55 @@ void StartScreenEditor::renderAssets() {
         std::string lbl = name.size() > 11 ? name.substr(0, 9) + ".." : name;
         ImVec2 lsz = ImGui::CalcTextSize(lbl.c_str());
         ImGui::SetCursorPosX(ImGui::GetCursorPosX() + (thumbSize - lsz.x) * 0.5f);
+        ImGui::TextDisabled("%s", lbl.c_str());
+        ImGui::EndGroup();
+        ImGui::SameLine(0.f, 6.f);
+        ImGui::PopID();
+    }
+
+    // Material tiles — clicking one opens the Materials editor tab with
+    // that asset selected. Rendered with a distinctive "MAT" icon so they
+    // don't blend into the audio group.
+    for (int i = 0; i < (int)m_assets.materials.size(); ++i) {
+        const std::string& f = m_assets.materials[i];
+        std::string name = fs::path(f).filename().string();
+        std::string stem = fs::path(f).stem().string();
+        ImGui::PushID(2000 + i);
+        ImGui::BeginGroup();
+        ImVec2 thumbPos = ImGui::GetCursorScreenPos();
+        ImGui::InvisibleButton("##m", ImVec2(thumbSize, thumbSize));
+        bool clicked = ImGui::IsItemHovered() && ImGui::IsMouseClicked(0);
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        dl->AddRectFilled(thumbPos, ImVec2(thumbPos.x + thumbSize, thumbPos.y + thumbSize),
+                          IM_COL32(50, 30, 70, 255), 4.f);
+        const char* icon = "MAT";
+        ImVec2 mizs = ImGui::CalcTextSize(icon);
+        dl->AddText(ImVec2(thumbPos.x + thumbSize * 0.5f - mizs.x * 0.5f,
+                           thumbPos.y + thumbSize * 0.5f - mizs.y * 0.5f),
+                    IM_COL32(220, 180, 255, 220), icon);
+        if (ImGui::IsItemHovered()) {
+            dl->AddRect(thumbPos, ImVec2(thumbPos.x + thumbSize, thumbPos.y + thumbSize),
+                        IM_COL32(200, 140, 255, 200), 4.f, 0, 2.f);
+            ImGui::SetTooltip("%s\n(click to edit)", f.c_str());
+        }
+        if (clicked) {
+            m_selectedMaterial = stem;
+            if (m_engine) {
+                if (const MaterialAsset* a = m_engine->materialLibrary().get(stem)) {
+                    m_editingMaterial    = *a;
+                    m_materialEditLoaded = true;
+                }
+            }
+            m_materialCompileLog.clear();
+            m_materialsTabRequested = true;
+        }
+        if (ImGui::BeginPopupContextItem("##mctx")) {
+            if (ImGui::MenuItem("Delete")) toDelete = f;
+            ImGui::EndPopup();
+        }
+        std::string lbl = stem.size() > 11 ? stem.substr(0, 9) + ".." : stem;
+        ImVec2 mlsz = ImGui::CalcTextSize(lbl.c_str());
+        ImGui::SetCursorPosX(ImGui::GetCursorPosX() + (thumbSize - mlsz.x) * 0.5f);
         ImGui::TextDisabled("%s", lbl.c_str());
         ImGui::EndGroup();
         ImGui::SameLine(0.f, 6.f);

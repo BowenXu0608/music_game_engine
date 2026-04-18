@@ -770,6 +770,12 @@ ChartData ChartLoader::loadUnified(const std::string& path) {
 
                         ChartData::MaterialData md;
                         md.slot        = (uint16_t)(int)scanNum("slot", 0.f);
+                        // New format: `asset` is a reference into the
+                        // MaterialAssetLibrary. Absent `asset` with inline
+                        // kind/tint/params is the legacy format — kept so
+                        // MaterialAssetLibrary::migrateChartToAssets() can
+                        // turn it into an asset after load.
+                        md.assetName   = scanStr("asset");
                         md.kind        = scanStr("kind");
                         if (md.kind.empty()) md.kind = "unlit";
                         md.texturePath = scanStr("texture");

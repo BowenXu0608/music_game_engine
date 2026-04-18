@@ -118,7 +118,7 @@ public:
 private:
     std::string browseFile(const wchar_t* filter, const std::string& destSubdir);
     void renderProperties();
-    void renderGameModeConfig();
+    void renderGameModeConfig(Engine* engine);
     void renderGameModePreview(ImDrawList* dl, ImVec2 origin, ImVec2 size);
     void renderChartTimeline(ImDrawList* dl, ImVec2 origin, ImVec2 size, Engine* engine);
     void renderWaveform(ImDrawList* dl, ImVec2 origin, ImVec2 size, Engine* engine);

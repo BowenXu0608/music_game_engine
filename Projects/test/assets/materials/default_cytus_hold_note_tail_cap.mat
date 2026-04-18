@@ -1,0 +1,8 @@
+{
+  "name": "default_cytus_hold_note_tail_cap",
+  "kind": "unlit",
+  "tint": [0.3, 0.7, 1, 0.8],
+  "params": [0, 0, 0, 0],
+  "targetMode": "cytus",
+  "targetSlot": "hold_note_tail_cap"
+}

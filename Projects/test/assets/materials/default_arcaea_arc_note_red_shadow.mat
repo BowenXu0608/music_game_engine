@@ -1,0 +1,8 @@
+{
+  "name": "default_arcaea_arc_note_red_shadow",
+  "kind": "unlit",
+  "tint": [0.3, 0.08, 0.22, 0.55],
+  "params": [0, 0, 0, 0],
+  "targetMode": "arcaea",
+  "targetSlot": "arc_note_red_shadow"
+}

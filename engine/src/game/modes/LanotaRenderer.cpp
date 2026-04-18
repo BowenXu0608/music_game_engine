@@ -1,5 +1,6 @@
 #include "LanotaRenderer.h"
 #include "renderer/Renderer.h"
+#include "renderer/MaterialAssetLibrary.h"
 #include "ui/ProjectHub.h"   // GameModeConfig definition
 #include <glm/gtc/matrix_transform.hpp>
 #include <cmath>
@@ -24,13 +25,6 @@ enum LanotaSlot : uint16_t {
     SlotInnerSpawnDisk  = 10,
     SlotOuterHitRing    = 11,
 };
-MaterialKind laKindFromString(const std::string& s) {
-    if (s == "glow")     return MaterialKind::Glow;
-    if (s == "scroll")   return MaterialKind::Scroll;
-    if (s == "pulse")    return MaterialKind::Pulse;
-    if (s == "gradient") return MaterialKind::Gradient;
-    return MaterialKind::Unlit;
-}
 } // namespace
 
 glm::vec4 LanotaRenderer::slotTint(uint16_t slot, glm::vec4 fallbackRGBA) const {
@@ -54,14 +48,11 @@ void LanotaRenderer::onInit(Renderer& renderer, const ChartData& chart,
                             const GameModeConfig* config) {
     m_renderer = &renderer;
 
-    // Per-slot chart material overrides.
+    // Per-slot chart material overrides — resolveMaterial() handles both
+    // asset references and legacy inline entries.
     m_chartMaterials.clear();
     for (const auto& md : chart.materials) {
-        Material mat;
-        mat.kind   = laKindFromString(md.kind);
-        mat.tint   = {md.tint[0],   md.tint[1],   md.tint[2],   md.tint[3]};
-        mat.params = {md.params[0], md.params[1], md.params[2], md.params[3]};
-        m_chartMaterials[md.slot] = mat;
+        m_chartMaterials[md.slot] = resolveMaterial(md, m_materialLibrary);
     }
 
     // Seed disk layout from the per-song config (falls back to defaults).

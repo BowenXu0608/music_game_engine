@@ -1,5 +1,6 @@
 #pragma once
 #include "renderer/Renderer.h"
+#include "renderer/MaterialAssetLibrary.h"
 #include "renderer/vulkan/TextureManager.h"
 #include "game/modes/GameModeRenderer.h"
 #include "engine/GameClock.h"
@@ -64,6 +65,12 @@ public:
 
     // Expose InputManager so platform code (Android JNI, iOS bridge) can inject touches
     InputManager& inputManager() { return m_input; }
+    MaterialAssetLibrary& materialLibrary() { return m_materialLibrary; }
+
+    // Point the material library at a project and reload its assets.
+    // ProjectHub/StartScreenEditor call this when a project is opened; the
+    // library is then shared by every chart in the project.
+    void openProject(const std::string& projectPath);
 
 private:
     void mainLoop();
@@ -123,6 +130,11 @@ private:
     // hub/song-select flow again.
     ChartData                          m_currentChart;
     std::string                        m_currentProjectPath;
+    // Per-project MaterialAsset registry. Reloaded by openProject() whenever
+    // the active project changes. ChartLoader callers migrate any legacy
+    // inline material entries into this library before the chart hits a
+    // renderer, so downstream code only ever sees asset references.
+    MaterialAssetLibrary               m_materialLibrary;
     std::string                        m_currentAudioPath;       // resolved audio path for restart
     bool                               m_framebufferResized = false;
     bool                               m_running = false;

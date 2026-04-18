@@ -89,6 +89,18 @@ struct QuadPushConstants {
     uint32_t  _pad[3];      // 12 B  → total 128 B
 };
 
+// Mesh push-constant block — byte-identical to QuadPushConstants so both batchers
+// can share the same shader push-constant declaration. Kept as a distinct type
+// so the intent at the call site is obvious (3D mesh vs 2D quad).
+struct MeshPushConstants {
+    glm::mat4 model;
+    glm::vec4 tint;
+    glm::vec4 uvTransform;
+    glm::vec4 params;
+    uint32_t  kind;
+    uint32_t  _pad[3];
+};
+
 // ── Draw call descriptor ─────────────────────────────────────────────────────
 
 struct DrawCall {

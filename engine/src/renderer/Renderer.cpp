@@ -26,7 +26,8 @@ void Renderer::init(GLFWwindow* window, const std::string& shaderDir, bool valid
     // Batchers use the scene render pass, not the swapchain render pass
     m_quads.init(m_ctx, m_bufMgr, m_descMgr, m_postProcess.sceneRenderPass(), shaderDir);
     m_lines.init(m_ctx, m_bufMgr, m_descMgr, m_postProcess.sceneRenderPass(), shaderDir);
-    m_meshes.init(m_ctx, m_bufMgr, m_descMgr, m_postProcess.sceneRenderPass(), shaderDir);
+    m_meshes.init(m_ctx, m_bufMgr, m_descMgr, m_postProcess.sceneRenderPass(), shaderDir,
+                  m_whiteTexture.view, m_whiteTexture.sampler);
     m_particles.init(m_ctx, m_bufMgr, m_descMgr, m_postProcess.sceneRenderPass(), shaderDir);
 
     // Default ortho camera

@@ -1,7 +1,9 @@
 #pragma once
 #include "GameModeRenderer.h"
 #include "renderer/MeshRenderer.h"
+#include "renderer/Material.h"
 #include <vector>
+#include <unordered_map>
 
 class ArcaeaRenderer : public GameModeRenderer {
 public:
@@ -26,12 +28,16 @@ private:
     Mesh buildDynamicArcShadowMesh(Renderer& renderer);
     Mesh buildGroundMesh(Renderer& renderer);
     Mesh buildTapMesh(Renderer& renderer);
-    Mesh buildGateMesh(Renderer& renderer, float skyHeight);
+    // Gate is split into 4 sub-meshes so each bar can carry its own material.
+    Mesh buildGateBar(Renderer& renderer, float x0, float y0, float x1, float y1);
     Mesh buildArcTapMesh(Renderer& renderer);
     Mesh buildArcTapShadowMesh(Renderer& renderer);
     glm::vec2 evalArc(const ArcData& arc, float t) const;
     void writeArcVertices(ArcMesh& am, float tClip);
     void writeArcShadowVertices(ArcMesh& am, float tClip);
+
+    // Returns the chart override for `slot` if present, else `fallback`.
+    Material slotOrFallback(uint16_t slot, const Material& fallback) const;
 
     Renderer* m_renderer = nullptr;
     Camera    m_camera;
@@ -40,9 +46,16 @@ private:
 
     Mesh m_groundMesh;
     Mesh m_tapMesh;
-    Mesh m_gateMesh;
+    Mesh m_gateBottom;    // thick bright bar — "Judgment Bar" slot
+    Mesh m_gateSky;       // thin sky line   — "Sky Line" slot
+    Mesh m_gateLeftPost;  // vertical post   — "Side Posts" slot
+    Mesh m_gateRightPost; // vertical post   — "Side Posts" slot
     Mesh m_arcTapMesh;
     Mesh m_arcTapShadowMesh;
+
+    // Per-slot material overrides imported from chart.materials. Empty entries
+    // fall through to the per-slot default in MaterialSlots.cpp.
+    std::unordered_map<uint16_t, Material> m_chartMaterials;
 
     struct HitEvent {
         double    time;

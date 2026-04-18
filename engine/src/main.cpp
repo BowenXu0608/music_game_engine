@@ -62,6 +62,11 @@ int main(int argc, char* argv[]) {
             std::string chartPath = proj.path + "/" + proj.defaultChart;
             if (std::filesystem::exists(chartPath)) {
                 ChartData chart = ChartLoader::load(chartPath);
+                std::string chartStem = std::filesystem::path(chartPath).stem().string();
+                // main.cpp hub launch always hands the chart to BandoriRenderer,
+                // so use the Bandori slot table / defaults for migration.
+                engine.materialLibrary().migrateChartToAssets(chart, chartStem,
+                                                              MaterialModeKey::Bandori);
                 BandoriRenderer* renderer = new BandoriRenderer();
                 engine.setMode(renderer, chart);
             }

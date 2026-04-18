@@ -55,8 +55,27 @@ const std::vector<MaterialSlotInfo> kLanotaSlots = {
     {11, "Outer Hit Ring",    "Playfield",  MaterialKind::Unlit, {0.5f, 0.7f, 1.f, 0.8f},    {0,0,0,0}},
 };
 
-// Arcaea: placeholder — Phase 3.
-const std::vector<MaterialSlotInfo> kArcaeaSlots = {};
+// Arcaea (3D drop). Notes/taps/arcs are drawn via MeshRenderer's pipeline-per-
+// MaterialKind path, so all 5 kinds work on these slots. Arc "Blue"/"Red" and
+// "ArcTap Tile" default to Glow so their outward normals feed rim-lighting;
+// flat surfaces (ground, gate bars, shadows) default to Unlit because their
+// camera-facing normals produce zero rim anyway.
+const std::vector<MaterialSlotInfo> kArcaeaSlots = {
+    {0,  "Click Note",    "",             MaterialKind::Unlit,    {1.f,  0.9f,  0.5f,  1.f},    {0,0,0,0}},
+    {1,  "Flick Note",    "",             MaterialKind::Unlit,    {1.f,  0.35f, 0.35f, 1.f},    {0,0,0,0}},
+    {2,  "Tile",          "ArcTap Note",  MaterialKind::Glow,     {1.f,  1.f,   1.f,   1.f},    {0,0,0,0}},
+    {3,  "Shadow",        "ArcTap Note",  MaterialKind::Unlit,    {0.05f, 0.08f, 0.15f, 0.55f}, {0,0,0,0}},
+    {4,  "Blue",          "Arc Note",     MaterialKind::Glow,     {0.4f,  0.8f,  1.f,   0.9f},  {0,0,0,0}},
+    {5,  "Red",           "Arc Note",     MaterialKind::Glow,     {1.f,   0.4f,  0.7f,  0.9f},  {0,0,0,0}},
+    {6,  "Blue Shadow",   "Arc Note",     MaterialKind::Unlit,    {0.08f, 0.22f, 0.35f, 0.55f}, {0,0,0,0}},
+    {7,  "Red Shadow",    "Arc Note",     MaterialKind::Unlit,    {0.30f, 0.08f, 0.22f, 0.55f}, {0,0,0,0}},
+    // Ground defaults to Gradient (near→far fade). tint = near colour,
+    // params.rgb = far colour, params.w = 0 (vertical).
+    {8,  "Ground",        "Playfield",    MaterialKind::Gradient, {0.15f, 0.15f, 0.25f, 1.f},   {0.05f, 0.05f, 0.15f, 0.f}},
+    {9,  "Judgment Bar",  "Playfield",    MaterialKind::Unlit,    {1.f,   0.95f, 0.55f, 1.f},   {0,0,0,0}},
+    {10, "Sky Line",      "Playfield",    MaterialKind::Unlit,    {0.55f, 0.80f, 1.f,   0.55f}, {0,0,0,0}},
+    {11, "Side Posts",    "Playfield",    MaterialKind::Unlit,    {0.80f, 0.82f, 0.92f, 0.50f}, {0,0,0,0}},
+};
 
 } // namespace
 
@@ -69,4 +88,54 @@ const std::vector<MaterialSlotInfo>& getMaterialSlotsForMode(MaterialModeKey mod
         case MaterialModeKey::Arcaea:  return kArcaeaSlots;
         default:                       return kBandoriSlots;
     }
+}
+
+namespace {
+std::string slugify(const char* s) {
+    std::string out;
+    bool lastUnd = true;   // suppress leading underscore
+    for (; s && *s; ++s) {
+        char c = *s;
+        if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+        if ((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')) {
+            out += c;
+            lastUnd = false;
+        } else if (!lastUnd) {
+            out += '_';
+            lastUnd = true;
+        }
+    }
+    while (!out.empty() && out.back() == '_') out.pop_back();
+    return out;
+}
+} // namespace
+
+std::string materialSlotSlug(const MaterialSlotInfo& slot) {
+    std::string name = slugify(slot.displayName);
+    if (slot.group && slot.group[0]) {
+        std::string g = slugify(slot.group);
+        if (!g.empty()) return g + "_" + name;
+    }
+    return name;
+}
+
+const char* materialModeName(MaterialModeKey mode) {
+    switch (mode) {
+        case MaterialModeKey::Bandori: return "bandori";
+        case MaterialModeKey::Phigros: return "phigros";
+        case MaterialModeKey::Cytus:   return "cytus";
+        case MaterialModeKey::Lanota:  return "lanota";
+        case MaterialModeKey::Arcaea:  return "arcaea";
+        default:                       return "unknown";
+    }
+}
+
+MaterialModeKey detectChartMode(const std::string& stem) {
+    // Engine convention: "<song>_<modeKey>_<difficulty>".
+    if (stem.find("_drop3d_")  != std::string::npos) return MaterialModeKey::Arcaea;
+    if (stem.find("_drop2d_")  != std::string::npos) return MaterialModeKey::Bandori;
+    if (stem.find("_circle_")  != std::string::npos) return MaterialModeKey::Lanota;
+    if (stem.find("_scan_")    != std::string::npos) return MaterialModeKey::Cytus;
+    if (stem.find("_phigros_") != std::string::npos) return MaterialModeKey::Phigros;
+    return MaterialModeKey::Bandori;
 }

@@ -1,0 +1,8 @@
+{
+  "name": "Aa_drop3d_hard__playfield_side_posts",
+  "kind": "unlit",
+  "tint": [0.736495, 0.818462, 0.168729, 0.5],
+  "params": [0, 0, 0, 0],
+  "targetMode": "arcaea",
+  "targetSlot": "playfield_side_posts"
+}

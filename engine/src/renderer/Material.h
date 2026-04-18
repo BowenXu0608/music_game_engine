@@ -3,6 +3,7 @@
 #include <vulkan/vulkan.h>
 #include <cstdint>
 #include <string>
+#include <array>
 
 // Material system — lightweight, per-quad rendering configuration.
 // A Material selects one of N fragment-shader variants (kind), plus a tint,
@@ -18,6 +19,12 @@ enum class MaterialKind : uint32_t {
     Scroll   = 2,  // UV scrolls over time
     Pulse    = 3,  // rgb reacts to a trigger time
     Gradient = 4,  // two-color gradient across the quad
+    // Custom = user-authored fragment shader compiled to SPIR-V at author
+    // time. `Material::customShaderPath` points at the .frag file; the
+    // batcher resolves the compiled .spv into a Pipeline via its custom
+    // pipeline cache. Must still conform to the shared push-constant block
+    // and set layouts — batcher provides a template shader to start from.
+    Custom   = 5,
     Count
 };
 
@@ -34,6 +41,11 @@ struct Material {
     glm::vec4    params  = {0.f, 0.f, 0.f, 0.f};
     VkImageView  texture = VK_NULL_HANDLE;  // null → whiteView()
     VkSampler    sampler = VK_NULL_HANDLE;  // null → whiteSampler()
+    // Only meaningful when `kind == Custom`. Full path to the author's .frag
+    // source; the batcher invokes glslc + caches a pipeline per unique path.
+    // Kept as std::string so Material stays copyable across the batcher's
+    // per-draw storage.
+    std::string  customShaderPath;
 };
 
 const char*  kindName(MaterialKind k);

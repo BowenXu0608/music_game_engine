@@ -1,0 +1,8 @@
+{
+  "name": "default_cytus_slide_note_node",
+  "kind": "unlit",
+  "tint": [1, 1, 1, 1],
+  "params": [0, 0, 0, 0],
+  "targetMode": "cytus",
+  "targetSlot": "slide_note_node"
+}
