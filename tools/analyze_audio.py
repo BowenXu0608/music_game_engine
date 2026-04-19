@@ -130,6 +130,85 @@ def merge_onsets_with_beats(beats, onsets, min_gap=0.05):
     return sorted(merged)
 
 
+def compute_marker_features(samples, sr, marker_times, onset_act, onset_fps=100):
+    """For each marker time, compute (strength, sustain, centroid).
+
+    strength   — peak onset activation in ±50ms window, clipped 0..1
+    sustain    — seconds of estimated sustain (0 = instant-tap candidate).
+                 Derived from gap-to-next-marker when strength is moderate,
+                 so long soft passages become Hold candidates downstream.
+    centroid   — spectral centroid at the marker, normalized 0..1 across
+                 the song via 10/90 percentile clamp. Low = bass/left,
+                 high = treble/right — drives lane assignment.
+    """
+    n_markers = len(marker_times)
+    if n_markers == 0:
+        return [], [], []
+
+    # ── Strength from onset activation ────────────────────────────────
+    strengths = [0.5] * n_markers
+    if onset_act is not None and len(onset_act) > 0:
+        half_win = int(0.05 * onset_fps)  # ±50ms
+        act = np.asarray(onset_act, dtype=np.float32)
+        act_max = float(act.max()) if act.size else 1.0
+        norm = act_max if act_max > 1e-6 else 1.0
+        for i, t in enumerate(marker_times):
+            center = int(float(t) * onset_fps)
+            lo = max(0, center - half_win)
+            hi = min(len(act), center + half_win + 1)
+            if hi > lo:
+                peak = float(act[lo:hi].max()) / norm
+                strengths[i] = float(np.clip(peak, 0.0, 1.0))
+
+    # ── Spectral centroid via windowed FFT ────────────────────────────
+    win_size = 2048
+    centroids_hz = np.zeros(n_markers, dtype=np.float32)
+    n_samples = len(samples)
+    if n_samples >= 16:
+        hann = np.hanning(win_size).astype(np.float32)
+        freqs_full = np.fft.rfftfreq(win_size, 1.0 / sr).astype(np.float32)
+        for i, t in enumerate(marker_times):
+            idx = int(float(t) * sr)
+            lo = max(0, idx - win_size // 2)
+            hi = lo + win_size
+            if hi > n_samples:
+                hi = n_samples
+                lo = max(0, hi - win_size)
+            win = samples[lo:hi]
+            if len(win) < 16:
+                continue
+            # Pad if truncated at edges
+            if len(win) < win_size:
+                padded = np.zeros(win_size, dtype=np.float32)
+                padded[: len(win)] = win
+                win = padded
+            spec = np.abs(np.fft.rfft(win * hann))
+            energy = float(spec.sum())
+            if energy > 1e-9:
+                centroids_hz[i] = float((spec * freqs_full).sum() / energy)
+
+    # Normalize via 10/90 percentile clamp (robust to quiet intros/outros)
+    if n_markers >= 4:
+        lo_p = float(np.percentile(centroids_hz, 10))
+        hi_p = float(np.percentile(centroids_hz, 90))
+    else:
+        lo_p, hi_p = float(centroids_hz.min()), float(centroids_hz.max())
+    span = max(1.0, hi_p - lo_p)
+    centroids = [float(np.clip((c - lo_p) / span, 0.0, 1.0)) for c in centroids_hz]
+
+    # ── Sustain: gap-to-next when onset is soft ───────────────────────
+    sustains = [0.0] * n_markers
+    for i, t in enumerate(marker_times):
+        if i + 1 >= n_markers:
+            continue
+        gap = float(marker_times[i + 1]) - float(t)
+        # Long gap + soft onset -> likely a held/sustained note
+        if gap > 0.35 and strengths[i] < 0.55:
+            sustains[i] = float(min(gap - 0.05, 1.5))
+
+    return strengths, sustains, centroids
+
+
 def analyze(audio_path):
     import madmom
     from madmom.audio.signal import Signal
@@ -141,6 +220,11 @@ def analyze(audio_path):
         "easy": [],
         "medium": [],
         "hard": [],
+        # Per-marker features (parallel to easy/medium/hard). Drives
+        # note-type inference (Tap/Hold/Flick) + lane assignment in Place All.
+        "easy_strength": [],   "easy_sustain": [],   "easy_centroid": [],
+        "medium_strength": [], "medium_sustain": [], "medium_centroid": [],
+        "hard_strength": [],   "hard_sustain": [],   "hard_centroid": [],
     }
 
     # Load audio via miniaudio (handles MP3/OGG/WAV/FLAC without ffmpeg)
@@ -238,6 +322,14 @@ def analyze(audio_path):
     result["easy"] = easy
     result["medium"] = medium
     result["hard"] = hard
+
+    # ── Per-marker features for note-type inference + lane assignment ────
+    onset_act_arr = onset_act if 'onset_act' in locals() else None
+    for level, times in (("easy", easy), ("medium", medium), ("hard", hard)):
+        s, su, c = compute_marker_features(samples, sr, times, onset_act_arr)
+        result[f"{level}_strength"] = [round(v, 4) for v in s]
+        result[f"{level}_sustain"]  = [round(v, 4) for v in su]
+        result[f"{level}_centroid"] = [round(v, 4) for v in c]
 
     return result
 

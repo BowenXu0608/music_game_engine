@@ -190,3 +190,102 @@ Added `EditorLayer::Settings` as the fourth layer alongside `ProjectHub → Star
 **Test Game gear button:** In-game music-select screen (the wheel-based `MusicSelectionEditor::renderGamePreview`) got a floating **⚙ Settings** button top-right. It's rendered as its own top-level ImGui window after `##test_musicsel` closes, and the test window uses `ImGuiWindowFlags_NoBringToFrontOnFocus` so clicking a song card doesn't push the gear behind. Clicking the gear sets `m_showSettings = true`, which opens the same `SettingsPageUI` modal bound to `engine->playerSettings()`. Settings are applied every frame while the modal is open so slider drags take effect live — volume is audibly changing as the slider moves, note-speed is visible on the next PLAY.
 
 **Persistence:** `PlayerSettings` struct + JSON I/O lives in `engine/src/game/PlayerSettings.{h,cpp}`, using the same hand-rolled `jsonString / jsonDouble / jsonBool` scanner `AndroidEngine.cpp` already uses for `music_selection.json`. On Android the file is `<internal_storage>/player_settings.json`, loaded during `AndroidEngine::init` and saved on `onBack` from the Settings screen.
+
+### Material system (2026-04-18)
+
+Per-slot visual overrides in charts. A **slot** is a named visual role within a mode (e.g. Bandori "Tap Note", Cytus "Scan Line", Lanota "Disk Surface"); each slot has a default `MaterialKind` (Unlit / Glow / Scroll / Pulse / Gradient / Custom) and the chart can override kind + tint + params + texture per slot.
+
+**SongEditor → Materials panel** (Config sidebar, below BPM Map). Slots listed via `getMaterialSlotsForMode(currentMode)` with group headers (e.g. all Hold Note slots grouped under one header). Per-slot controls: Kind dropdown (asset-picker in Phase 4), tint, 4 param sliders with kind-specific labels, optional texture picker that accepts `ASSET_PATH` drag-drop. "Reset to default" per slot.
+
+**Phase 4 — project-level assets + custom shaders.** Materials promoted to reusable assets (one `.mat` JSON per material under `<project>/assets/materials/`) with automatic migration on `Engine::openProject()`: inline entries matching the slot default become references to shared `default_<mode>_<slug>.mat`; differing entries spill to per-chart override `<chartStem>__<slug>.mat`.
+
+- **StartScreen → Properties → Materials tab** provides full CRUD: add/delete/rename, kind dropdown, tint, params, texture picker, **Target mode** + **Target slot** combos (filter the SongEditor picker to compatible assets — empty target = universal).
+- **Custom kind** adds a **Template** button (emits boilerplate `.frag` with the shared push-constant block) and a **Compile** button (invokes `ShaderCompiler`, shows glslc errors inline). Compiled `.spv` cached by source mtime. `.hlsl` rejected with a clear error.
+- **Assets panel** gained purple **MAT** tiles; clicking one opens the Materials tab pre-scrolled to that asset.
+- **SongEditor slot picker** is now an asset-picker dropdown driven by `MaterialAssetLibrary::namesCompatibleWith(mode, slug)`.
+
+### Autocharter — feature-driven Place All (2026-04-18)
+
+Place All no longer drops a Tap on every beat marker. `AudioAnalyzer` now produces per-marker **strength / sustain / centroid** features (via the extended `tools/analyze_audio.py`), and `SongEditor` uses them to pick type + lane:
+
+- **Type** — Hold if `sustain ≥ holdMin`; else Flick if `strength ≥ flickThreshold` (default: 88th percentile of the song); else Click.
+- **Lane** (non-ScanLine modes) — centroid → lane index, with an **anti-jack nudge** that shifts by ±1 if the candidate lane was used within `antiJack` notes back. Per-lane **cooldown** (`laneCooldownMs`) drops the marker if every lane is still busy.
+- **ScanLine** — centroid → X position + a global time-gap validator (`scanTimeGapMs`). Lane-less.
+
+New **AI...** gear popup next to Place All exposes: `flickPct`, `holdMin`, `antiJack`, `laneCooldownMs`, `scanTimeGapMs`. Deferred per user: difficulty differentiation by type, Arc generation, sky-note inference — those stay hand-authored.
+
+### Editor Copilot — natural-language chart edits (2026-04-18)
+
+New **Copilot** CollapsingHeader in SongEditor's Properties panel, below BPM Map. Small local-first AI assistant for focused chart edits.
+
+**Endpoint:** defaults to Ollama at `http://localhost:11434/v1` with model `qwen2.5:3b`. OpenAI-compatible `/chat/completions`. Config persists to `%APPDATA%/MusicGameEngineTest/ai_editor_config.json`. `https://` rejected with a clear error (OpenSSL deferred).
+
+**Op vocabulary (6 ops):** `delete_range` / `insert` / `mirror_lanes` / `shift_lanes` / `shift_time` / `convert_type`. No arc / arctap / slide-path / hold-waypoint / disk-keyframe / material ops. Output is a strict JSON envelope `{ explanation, ops: [...] }` — the request sets `response_format: json_object` so Ollama's JSON mode keeps small models honest.
+
+**Undo:** single-level. Apply snapshots `{notes, markers, features}` for the current difficulty; Undo restores.
+
+**UI:** prompt `InputTextMultiline`, Apply + Undo buttons, config gear, last explanation + last-ops preview. Status via the shared `m_statusMsg`/`m_statusTimer`. Worker thread + `pollCopilot()` mirrors the `AudioAnalyzer` pattern; any worker-thread exception converts to a readable error string.
+
+**Files:** `engine/src/editor/{AIEditorConfig, AIEditorClient, ChartEditOps, ChartSnapshot}.{h,cpp}` + `third_party/httplib/` + `third_party/nlohmann/`. SongEditor uses a pimpl `m_copilot` with forward-declared ctor/dtor to keep the header circular-free.
+
+### AI Shader Generator (Materials tab, 2026-04-19)
+
+Natural-language → compiled `.spv` custom-kind shader, in the Materials tab's `kind == Custom` section. Sits next to the existing Template/Compile buttons so hand-editing and AI generation use the same `.frag` path and asset record.
+
+**Flow:** prompt textarea → Generate → worker POSTs to `runChatRequest` → extracts `{"shader": "<glsl>"}` → writes to `<project>/assets/shaders/<material_name>.frag` → calls `compileFragmentToSpv` → on glslc failure, retries (default 3 attempts) with the previous shader + stderr fed back.
+
+**Slot-aware prompt context:** at dispatch time the UI prepends `"This shader is for the '<slot>' slot in the '<mode>' game mode. Tailor the visual to that role..."` when the asset has `targetMode` + `targetSlotSlug` set. Works alongside the asset-level filter (which prevents mis-assignment) to nudge the model toward role-appropriate shaders.
+
+**System prompt = few-shot template.** After several iterations on `qwen2.5:3b`, the shader-gen system prompt embeds a **complete working template shader** and instructs "keep every layout() binding above main() exactly as shown; modify ONLY the body of main()". Small models edit existing code far more reliably than they write from constraints alone. See the 2026-04-19 devlog entry for the evolution (rule-only → forbid-monotonic-decay → color-literal requirement → explicit `ubo.time` scoping → template).
+
+**Files:** `engine/src/editor/{AIChatRequest, ShaderGenClient}.{h,cpp}`. `AIEditorClient` was slimmed to delegate to the shared `runChatRequest` (Copilot behavior unchanged). StartScreenEditor gained a pimpl `m_shaderGen` (same forward-declared-unique_ptr trick as SongEditor's `m_copilot`) to keep `<thread>`/`<atomic>` out of the header.
+
+**Reused infrastructure:** config (`ai_editor_config.json`), endpoint parsing, worker-thread + pollCompletion pattern, and JSON-mode request envelope are all shared with the Copilot via `AIChatRequest`.
+
+**Bug fix as side effect:** on Windows, `_popen` wraps commands in `cmd.exe /c`, which strips the outer `"..."` pair when the command starts with `"` but doesn't end with `"`. This mangled the glslc path into `glslc.exe"` on every invocation. Fixed in `ShaderCompiler.cpp` by wrapping the whole `cmdStr` in an extra outer quote pair on Windows. The hand-written Compile button was latently broken by the same bug and is now fixed.
+
+### Chart Audit (SongEditor Properties, 2026-04-19)
+
+Read-only AI quality review. Point at the current chart, get a structured report with density spikes, jacks, crossovers, dead zones, difficulty concerns. Complements the Autocharter (generation) and Copilot (edit) — Audit never mutates the chart.
+
+**Hybrid design — local scan + LLM narrate.** Small local models (qwen2.5:3b) hallucinate timestamps when asked to reason over raw note lists, and the full chart often blows the context window. Fix: pre-digest facts in C++; the model only prioritizes + writes prose with the timestamps we already gave it.
+
+- `computeAuditMetrics(notes, duration)` → concrete violations:
+  - **Density hotspots**: 4s sliding windows with ≥ 24 notes, merged into contiguous runs.
+  - **Jacks**: ≥ 3 consecutive same-lane notes, each within 500 ms of the prior.
+  - **Crossovers**: adjacent notes with `|dLane| ≥ 3` within 150 ms.
+  - **Dead zones**: gaps > 8 s between onsets.
+  - **Peak NPS** (2 s sliding window, onset-driven) + **Avg NPS** + type counts.
+- `describeMetricsForPrompt` caps the text block (12 density / 12 jacks / 12 crossovers / 6 dead zones) to keep the user message small.
+- `parseAuditReport` extracts the first `{..}` envelope (same pattern as `ChartEditOps`) → `{summary, issues:[{severity, time, end_time, category, message}]}`.
+
+**UI:** Collapsing header "Chart Audit" below "Editor Copilot". Audit button fires the request; response parses to a report. Rendering: summary at top, one row per issue with severity tag (HIGH red / MED amber / LOW blue) + clickable `[time]` button that seeks `m_sceneTime` and scrolls the timeline to `max(0, time - 2s)` + category + message.
+
+**Files:** `engine/src/editor/ChartAudit.{h,cpp}`. SongEditor gained pimpl `m_audit` (`AuditState` in .cpp) alongside `m_copilot`, with the same forward-declared-unique_ptr pattern + `pollAudit()` + `renderAuditPanel()` wiring. Duration comes from `m_waveform.durationSeconds` (lazy-loaded) with fallback to last-note time. Shares `ai_editor_config.json` via `aiConfigPath()`.
+
+### Style Transfer (SongEditor Properties, 2026-04-19)
+
+Reference-driven rebalance of note types + lane distribution, with LLM narration of the before/after delta. Preserves note *times* — it redistributes type and lane, not timing.
+
+**Pure-C++ fingerprint + apply, LLM only for prose.** Same design principle as Chart Audit.
+
+- `StyleFingerprint` = `{noteCount, trackCount, durationSec, tap/hold/flick %, avg/peak NPS, laneHist (normalized), meanDLane, sameLaneRepeatRate}`. Tap/Hold/Flick only; Slide/Arc/ArcTap/Drag/Ring ignored in ratios + lane histogram.
+- `computeFingerprint(ChartData, trackCount)` walks `NoteEvent` variants via `std::visit`, extracts `laneX` from `Tap/Hold/FlickData` only.
+- `enumerateStyleCandidates(projectPath, sets, currentMode, currentSongName, currentDifficulty)` — scans the **in-memory** `std::vector<MusicSetInfo>&` from `MusicSelectionEditor::sets()`, not the on-disk JSON, so newly-added songs appear after Refresh without requiring a prior save. Filters `type` + `dimension` (dropNotes only); trackCount mismatches are allowed — the candidate label's `(Nt)` suffix exposes the difference.
+- `applyStyleTransfer`:
+  - **Type rebalance**: demote surplus Holds (lowest sustain → Tap) and Flicks (lowest strength → Tap) first, then promote Taps → Hold (highest sustain) and Taps → Flick (highest strength) to hit target counts derived from ref ratios × eligible total.
+  - **Lane rebalance**: iterate by time; when `curHist[lane] - targetPerLane[lane] ≥ TOL=2`, pick preferred lane from marker centroid, scan outward if under-filled lane not reached; anti-jack skips `prevLane`. Skips Slide/Arc/ArcTap and cross-lane Holds (single-lane-path-only).
+  - **Cross-track-count resampling**: when `ref.laneHist.size() != trackCount`, each ref lane's mass is mapped to the target lane its center falls in (`center = (r+0.5)/refN`, `targetLane = floor(center * trackCount)`). Preserves the distribution's shape for 12→7 transfers.
+
+**LLM narration** — plain prose, not JSON. `AIEditorClient::startRequest` gained a `jsonMode` overload (the 3-arg default kept Copilot + Audit unchanged). System prompt: "2–3 sentences describing what shifted toward the reference...". User message = three `describeFingerprint` blocks (ref / before / after).
+
+**UI** — Collapsing header "Style Transfer" below Chart Audit:
+- Refresh + `ImGui::BeginCombo` with `<set> / <song> [Difficulty] (Nt)` labels.
+- "Analyze reference" → `ChartLoader::load` + `computeFingerprint(ref, cand.trackCount)` (uses the ref's native lane count, not the target's — a 12-lane ref shows `lanes=12`).
+- **Inline disabled-reason hints** below the combo: "Reference has 0 notes" or "Target chart has 0 notes - place notes first (Autocharter Place All)" — both disable Apply.
+- "Apply style" → snapshots `{notes, markers, features}` + `m_currentDifficulty`; runs the rebalancer; fires narration request with `jsonMode=false`. Stats line `retyped N / relaned M / skipped K` + narration + after-fingerprint render as they arrive.
+- "Undo" — restores the snapshot; refuses with a status warning if the difficulty changed since Apply.
+
+**Files:** `engine/src/editor/ChartStyle.{h,cpp}`. SongEditor gained pimpl `m_style` (`StyleState` in .cpp) as the third AI panel alongside `m_copilot` + `m_audit`; also a new `Engine* m_engineCached` member refreshed each frame in `render()` so the panel can reach `engine->musicSelectionEditor().sets()` without changing `renderProperties()`' signature. `MusicSelectionEditor` gained `const std::vector<MusicSetInfo>& sets() const`.
+
+**Scope** — deliberately minimal: fingerprint is ratios + histograms (no motif / phrasing analysis); candidates are project-scoped (no external-file picker); one target difficulty at a time (no multi-difficulty fan-out). Backlog items 2–5 on the AI-agent list (replay coaching, auto-metadata, lyric sync, voice authoring) are deferred per user direction.

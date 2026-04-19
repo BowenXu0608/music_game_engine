@@ -49,6 +49,7 @@ public:
 
     const std::string& projectPath() const { return m_projectPath; }
     SongInfo* getSelectedSong();
+    const std::vector<MusicSetInfo>& sets() const { return m_sets; }
     void renderGamePreview(ImVec2 origin, ImVec2 size);
     void importFiles(const std::vector<std::string>& srcPaths);
 

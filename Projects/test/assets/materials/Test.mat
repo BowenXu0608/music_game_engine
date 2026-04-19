@@ -1,6 +1,9 @@
 {
-  "name": "Test",
-  "kind": "unlit",
+  "name": "TEST",
+  "kind": "custom",
   "tint": [1, 1, 1, 1],
-  "params": [0, 0, 0, 0]
+  "params": [0, 0, 0, 0],
+  "shader": "assets/shaders/TEST.frag",
+  "targetMode": "bandori",
+  "targetSlot": "hold_note_body"
 }

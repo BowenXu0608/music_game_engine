@@ -6,6 +6,7 @@
 #include "renderer/MaterialAsset.h"
 #include <vulkan/vulkan.h>
 #include <GLFW/glfw3.h>
+#include <memory>
 #include <string>
 #include <vector>
 #include <unordered_map>
@@ -14,6 +15,7 @@ class Engine;
 class VulkanContext;
 class BufferManager;
 class ImGuiLayer;
+struct ShaderGenUIState;   // defined in StartScreenEditor.cpp; holds async shader-gen state
 
 enum class LogoType  { Text, Image };
 enum class BgType    { None, Image, Gif, Video };
@@ -28,6 +30,9 @@ enum class TransitionEffect {
 
 class StartScreenEditor {
 public:
+    StartScreenEditor();
+    ~StartScreenEditor();
+
     void render(Engine* engine);
     void load(const std::string& projectPath);
     void save();
@@ -148,4 +153,9 @@ private:
     // render of the Properties tab bar, force the Materials tab to open and
     // clear the flag.
     bool          m_materialsTabRequested = false;
+
+    // ── AI shader generator (Custom kind only) ──────────────────────────────
+    // Pimpl'd because ShaderGenClient pulls <thread>/<atomic>/<mutex> — we
+    // don't want those leaking into Engine.h and GameFlowPreview.h.
+    std::unique_ptr<ShaderGenUIState> m_shaderGen;
 };

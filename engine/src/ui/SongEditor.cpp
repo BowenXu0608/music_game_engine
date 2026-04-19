@@ -5,6 +5,13 @@
 #include "renderer/vulkan/BufferManager.h"
 #include "renderer/MaterialSlots.h"
 #include "renderer/MaterialAssetLibrary.h"
+#include "editor/AIEditorClient.h"
+#include "editor/AIEditorConfig.h"
+#include "editor/ChartAudit.h"
+#include "editor/ChartEditOps.h"
+#include "editor/ChartSnapshot.h"
+#include "editor/ChartStyle.h"
+#include "game/chart/ChartLoader.h"
 #include <imgui.h>
 #include <filesystem>
 #include <algorithm>
@@ -163,6 +170,7 @@ void SongEditor::setSong(SongInfo* song, const std::string& projectPath) {
     // Clear editor notes and load from chart files if they exist
     m_diffNotes.clear();
     m_diffMarkers.clear();
+    m_diffFeatures.clear();
     m_bpmChanges.clear();
     m_dominantBpm = 0.f;
     m_holdDragging  = false;
@@ -403,6 +411,7 @@ void SongEditor::reloadChartsForCurrentMode() {
     // fresh (mode, difficulty) pair always starts from its own file or empty.
     m_diffNotes.clear();
     m_diffMarkers.clear();
+    m_diffFeatures.clear();
     m_diffMaterials.clear();
     m_diffDiskRot.clear();
     m_diffDiskMove.clear();
@@ -548,9 +557,16 @@ void SongEditor::render(Engine* engine) {
     }
 
     loadWaveformIfNeeded(engine);
+    m_engineCached = engine;
 
     // Poll async beat analysis
     m_analyzer.pollCompletion();
+    // Poll copilot HTTP worker
+    pollCopilot();
+    // Poll chart-audit HTTP worker
+    pollAudit();
+    // Poll style-transfer HTTP worker
+    pollStyle();
 
     ImVec2 contentSize = ImGui::GetContentRegionAvail();
     const float splitterThick = 5.f;
@@ -673,6 +689,9 @@ void SongEditor::render(Engine* engine) {
                                     m_diffMarkers[(int)Difficulty::Easy]   = std::move(result.easyMarkers);
                                     m_diffMarkers[(int)Difficulty::Medium] = std::move(result.mediumMarkers);
                                     m_diffMarkers[(int)Difficulty::Hard]   = std::move(result.hardMarkers);
+                                    m_diffFeatures[(int)Difficulty::Easy]   = std::move(result.easyFeatures);
+                                    m_diffFeatures[(int)Difficulty::Medium] = std::move(result.mediumFeatures);
+                                    m_diffFeatures[(int)Difficulty::Hard]   = std::move(result.hardFeatures);
                                     m_bpmChanges   = std::move(result.bpmChanges);
                                     m_dominantBpm  = result.bpm;
                                     m_scanPageTableDirty = true;  // re-derive page durations from detected BPM
@@ -694,6 +713,7 @@ void SongEditor::render(Engine* engine) {
                 ImGui::SameLine();
                 if (ImGui::Button("Clear Markers", ImVec2(110, 0))) {
                     markers().clear();
+                    features().clear();
                 }
                 ImGui::NewLine();
             }
@@ -1293,6 +1313,14 @@ void SongEditor::renderProperties() {
         }
     }
 
+    // ── Editor Copilot ──────────────────────────────────────────────────────
+    renderCopilotPanel();
+
+    // ── Chart Audit ─────────────────────────────────────────────────────────
+    renderAuditPanel();
+
+    // ── Style Transfer ──────────────────────────────────────────────────────
+    renderStylePanel();
 }
 
 // ── renderGameModeConfig ─────────────────────────────────────────────────────
@@ -2570,6 +2598,7 @@ void SongEditor::renderChartTimeline(ImDrawList* dl, ImVec2 origin, ImVec2 size,
             // Left-click: place marker (raw IO)
             if (io.MouseClicked[0] && !io.KeyCtrl && !io.KeyShift && !io.KeyAlt) {
                 markers().push_back(hoverT);
+                features().push_back(MarkerFeature{});
             }
         }
 
@@ -2608,8 +2637,11 @@ void SongEditor::renderChartTimeline(ImDrawList* dl, ImVec2 origin, ImVec2 size,
                     float d = fabsf(markers()[i] - hoverT);
                     if (d < bestDist) { bestDist = d; bestIdx = i; }
                 }
-                if (bestIdx >= 0)
+                if (bestIdx >= 0) {
                     markers().erase(markers().begin() + bestIdx);
+                    if ((int)features().size() > bestIdx)
+                        features().erase(features().begin() + bestIdx);
+                }
             }
         }
     }
@@ -2777,6 +2809,7 @@ void SongEditor::renderWaveform(ImDrawList* dl, ImVec2 origin, ImVec2 size,
         ImGuiIO& io = ImGui::GetIO();
         if (io.MouseClicked[0] && !io.KeyCtrl && !io.KeyShift && !io.KeyAlt) {
             markers().push_back(hoverT);
+            features().push_back(MarkerFeature{});
         }
         // Right-click: remove nearest marker
         if (io.MouseClicked[1] && !markers().empty()) {
@@ -2787,8 +2820,11 @@ void SongEditor::renderWaveform(ImDrawList* dl, ImVec2 origin, ImVec2 size,
                 float d = fabsf(markers()[i] - hoverT);
                 if (d < bestDist) { bestDist = d; bestIdx = i; }
             }
-            if (bestIdx >= 0)
+            if (bestIdx >= 0) {
                 markers().erase(markers().begin() + bestIdx);
+                if ((int)features().size() > bestIdx)
+                    features().erase(features().begin() + bestIdx);
+            }
         }
     }
 
@@ -4086,25 +4122,49 @@ void SongEditor::renderScanPageNav(ImVec2 origin, float width, Engine* engine) {
         if (ImGui::Button("Place All")) {
             int added = 0;
             auto& ns = notes();
+            const auto& fts = features();
+            // ScanLine note types: Tap only for now. Hold in scan-line spans
+            // multiple pages with direction flips — safer to leave that to
+            // interactive authoring. Flick has no meaning in this mode.
+            const bool supportsFlick = false;
+            const bool supportsHold  = false;
+            const float flickTh = computeFlickThreshold(fts, supportsFlick, m_autoFlickPct);
+            const float minGapS = std::max(0.f, m_autoScanTimeGapMs * 0.001f);
+            // Highest note.time seen so far (across pre-existing + newly placed).
+            float lastScanT = -1e9f;
+            for (const auto& n : ns) if (n.time > lastScanT) lastScanT = n.time;
             for (size_t i = 0; i < markers().size(); ++i) {
                 float t = markers()[i];
-                // De-dup: skip if an existing note already sits within 10ms of t.
                 bool dup = false;
                 for (const auto& n : ns) {
                     if (std::abs(n.time - t) < 0.01f) { dup = true; break; }
                 }
                 if (dup) continue;
+                // Global time-gap gate: keep ScanLine notes from piling up when
+                // the analyzer finds many close onsets.
+                if (t - lastScanT < minGapS) continue;
                 int pIdx = scanPageForTime((double)t);
                 if (pIdx < 0 || pIdx >= (int)m_scanPageTable.size()) continue;
 
+                MarkerFeature f = (i < fts.size()) ? fts[i] : MarkerFeature{};
+                bool hasFeature = (i < fts.size());
+                InferredType it = inferNoteType(f, flickTh, supportsHold, m_autoHoldMin);
+
                 EditorNote n{};
-                n.type  = EditorNoteType::Tap;
-                n.time  = t;
-                // Alternate X across {0.25, 0.5, 0.75} to avoid a straight column.
-                const float xs[3] = {0.5f, 0.25f, 0.75f};
-                n.scanX = xs[added % 3];
+                n.type = it.type;
+                n.time = t;
+                // Spectral centroid drives X — low freq → left, high → right.
+                // No feature → fall back to the original 3-position rotation.
+                if (hasFeature) {
+                    // Pad 10% off each edge so notes aren't flush to the scan bar borders.
+                    n.scanX = 0.1f + std::clamp(f.centroid, 0.f, 1.f) * 0.8f;
+                } else {
+                    const float xs[3] = {0.5f, 0.25f, 0.75f};
+                    n.scanX = xs[added % 3];
+                }
                 n.scanY = scanPageTimeToY(pIdx, (double)t);
                 ns.push_back(n);
+                lastScanT = t;
                 ++added;
             }
             std::sort(ns.begin(), ns.end(),
@@ -4113,6 +4173,23 @@ void SongEditor::renderScanPageNav(ImVec2 origin, float width, Engine* engine) {
                       });
         }
         ImGui::EndDisabled();
+    }
+    // AI tuning gear (same knobs as non-ScanLine toolbar)
+    ImGui::SameLine();
+    if (ImGui::Button("AI..."))
+        ImGui::OpenPopup("ai_tuning_scan");
+    if (ImGui::BeginPopup("ai_tuning_scan")) {
+        ImGui::TextUnformatted("AI Place-All tuning");
+        ImGui::Separator();
+        ImGui::SetNextItemWidth(180);
+        ImGui::SliderFloat("ScanLine time gap (ms)##ais",
+                           &m_autoScanTimeGapMs, 0.f, 300.f, "%.0f ms");
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Minimum time between any two ScanLine notes");
+        if (ImGui::Button("Reset defaults##ais")) {
+            m_autoScanTimeGapMs = 60.f;
+        }
+        ImGui::EndPopup();
     }
     // Direction pill
     ImGui::SameLine();
@@ -5468,17 +5545,16 @@ void SongEditor::renderNoteToolbar() {
     toolBtn("Click",  NoteTool::Tap, ImVec4(0.2f, 0.5f, 0.8f, 1.f));
     toolBtn("Hold",   NoteTool::Hold, ImVec4(0.2f, 0.7f, 0.3f, 1.f));
 
-    // Flick: authored in 2D drop (Bandori) and 3D drop (ground plane).
+    // Flick: 2D drop (Bandori), 3D drop (Arcaea), and Circle (Lanota) all
+    // support Flick in their renderers.
     const bool twoDDrop = (gm.type == GameModeType::DropNotes
                            && gm.dimension != DropDimension::ThreeD);
-    if (twoDDrop || is3D) {
+    if (twoDDrop || is3D || gm.type == GameModeType::Circle) {
         toolBtn("Flick", NoteTool::Flick, ImVec4(0.8f, 0.3f, 0.3f, 1.f));
     }
 
-    // Slide: Circle + 3D drop only. 2D drop and ScanLine intentionally omit it.
-    if (gm.type == GameModeType::Circle || is3D) {
-        toolBtn("Slide", NoteTool::Slide, ImVec4(0.7f, 0.3f, 0.7f, 1.f));
-    }
+    // Slide is ScanLine-only. The ScanLine toolbar path (see scanLineMode
+    // block) shows its own Slide button; this non-ScanLine toolbar omits it.
 
     // Arc tools: only in 3D DropNotes mode
     if (is3D) {
@@ -5539,6 +5615,9 @@ void SongEditor::renderNoteToolbar() {
                         m_diffMarkers[(int)Difficulty::Easy]   = std::move(result.easyMarkers);
                         m_diffMarkers[(int)Difficulty::Medium] = std::move(result.mediumMarkers);
                         m_diffMarkers[(int)Difficulty::Hard]   = std::move(result.hardMarkers);
+                        m_diffFeatures[(int)Difficulty::Easy]   = std::move(result.easyFeatures);
+                        m_diffFeatures[(int)Difficulty::Medium] = std::move(result.mediumFeatures);
+                        m_diffFeatures[(int)Difficulty::Hard]   = std::move(result.hardFeatures);
                         m_bpmChanges   = std::move(result.bpmChanges);
                         m_dominantBpm  = result.bpm;
                         m_scanPageTableDirty = true;  // re-derive page durations from detected BPM
@@ -5563,6 +5642,7 @@ void SongEditor::renderNoteToolbar() {
     ImGui::SameLine();
     if (ImGui::Button("Clear Markers", ImVec2(96, 26))) {
         markers().clear();
+        features().clear();
     }
 
     ImGui::SameLine();
@@ -5570,28 +5650,124 @@ void SongEditor::renderNoteToolbar() {
     ImGui::PushStyleColor(ImGuiCol_ButtonHovered,  ImVec4(0.6f, 0.45f, 0.15f, 1.f));
     ImGui::PushStyleColor(ImGuiCol_ButtonActive,   ImVec4(0.4f, 0.25f, 0.08f, 1.f));
     if (ImGui::Button("Place All", ImVec2(72, 26))) {
-        // Place a Tap note on every marker, distributing across tracks
+        // Feature-driven placement. Uses analyzer features (strength / sustain /
+        // centroid) when available; falls back to Tap + round-robin lane for
+        // manually-added markers with no feature data.
         int tc = m_song ? m_song->gameMode.trackCount : 7;
-        int track = 0;
-        for (float t : markers()) {
-            // Skip if a note already exists near this time
+        const auto& mks  = markers();
+        const auto& fts  = features();
+        // This branch handles 2D drop (Bandori), 3D drop (Arcaea), Circle (Lanota).
+        // All three support Click/Hold/Flick. Slide is ScanLine-only; Arc/ArcTap
+        // are 3D-drop extras intentionally left for the chart author.
+        const bool supportsFlick = true;
+        const bool supportsHold  = true;
+        const float flickTh = computeFlickThreshold(fts, supportsFlick, m_autoFlickPct);
+        const float cooldownS = std::max(0.f, m_autoLaneCooldownMs * 0.001f);
+        // Track the last occupied time per lane (note.time for Click/Flick;
+        // note.endTime for Hold so we don't stack through a live Hold).
+        std::vector<float> laneLastT(tc, -1e9f);
+        for (const auto& n : notes()) {
+            if (n.track < 0 || n.track >= tc) continue;
+            float last = (n.type == EditorNoteType::Hold && n.endTime > 0.f)
+                         ? n.endTime : n.time;
+            if (last > laneLastT[n.track]) laneLastT[n.track] = last;
+        }
+        int prevLane = -1;
+        int fallbackCounter = 0;
+        for (size_t i = 0; i < mks.size(); ++i) {
+            float t = mks[i];
             bool exists = false;
             for (auto& n : notes()) {
                 if (fabsf(n.time - t) < 0.01f) { exists = true; break; }
             }
-            if (!exists) {
-                EditorNote note;
-                note.type  = EditorNoteType::Tap;
-                note.time  = t;
-                note.track = track % tc;
-                notes().push_back(note);
-                track++;
+            if (exists) continue;
+
+            MarkerFeature f = (i < fts.size()) ? fts[i] : MarkerFeature{};
+            bool hasFeature = (i < fts.size());
+            InferredType it = inferNoteType(f, flickTh, supportsHold, m_autoHoldMin);
+
+            EditorNote note{};
+            note.type = it.type;
+            note.time = t;
+            if (it.type == EditorNoteType::Hold)
+                note.endTime = t + it.duration;
+
+            // Lane pick + validation: if the chosen lane is still cooling down
+            // from a previous note/hold, try outward alternates. If every lane
+            // is busy, skip this marker rather than forcing an overlap.
+            int lane = hasFeature
+                ? inferLaneFromCentroid(f.centroid, tc, prevLane, m_autoAntiJack)
+                : (fallbackCounter++ % tc);
+            if (lane < 0) lane = 0;
+            auto laneFree = [&](int L) {
+                return (t - laneLastT[L]) >= cooldownS;
+            };
+            if (!laneFree(lane)) {
+                int picked = -1;
+                for (int shift = 1; shift <= tc && picked < 0; ++shift) {
+                    int up = lane + shift, dn = lane - shift;
+                    if (up < tc && laneFree(up))        picked = up;
+                    else if (dn >= 0 && laneFree(dn))   picked = dn;
+                }
+                if (picked < 0) continue;  // every lane cooling down; drop note
+                lane = picked;
             }
+            note.track = lane;
+            float occ = (it.type == EditorNoteType::Hold) ? note.endTime : t;
+            laneLastT[lane] = occ;
+            notes().push_back(note);
+            prevLane = note.track;
         }
     }
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("Place a Tap note on every marker");
     ImGui::PopStyleColor(3);
+
+    // ── AI tuning gear ───────────────────────────────────────────────────────
+    ImGui::SameLine();
+    if (ImGui::Button("AI...", ImVec2(48, 26)))
+        ImGui::OpenPopup("ai_tuning");
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Tune Place All inference + validation");
+    if (ImGui::BeginPopup("ai_tuning")) {
+        ImGui::TextUnformatted("AI Place-All tuning");
+        ImGui::Separator();
+        ImGui::SetNextItemWidth(180);
+        ImGui::SliderFloat("Flick percentile##ai",
+                           &m_autoFlickPct, 0.50f, 0.99f, "%.2f");
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Fraction of markers that stay Click; top "
+                              "(1 - pct) become Flick");
+        ImGui::SetNextItemWidth(180);
+        ImGui::SliderFloat("Min hold (s)##ai",
+                           &m_autoHoldMin, 0.05f, 0.80f, "%.2f s");
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Minimum detected sustain (s) before a marker "
+                              "becomes a Hold");
+        ImGui::Checkbox("Anti-jack##ai", &m_autoAntiJack);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Nudge same-lane repeats to an adjacent lane");
+        ImGui::SetNextItemWidth(180);
+        ImGui::SliderFloat("Lane cooldown (ms)##ai",
+                           &m_autoLaneCooldownMs, 0.f, 400.f, "%.0f ms");
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Minimum gap before the same lane can be "
+                              "re-used (non-ScanLine)");
+        ImGui::SetNextItemWidth(180);
+        ImGui::SliderFloat("ScanLine time gap (ms)##ai",
+                           &m_autoScanTimeGapMs, 0.f, 300.f, "%.0f ms");
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Minimum time between any two ScanLine notes");
+        ImGui::Separator();
+        if (ImGui::Button("Reset defaults##ai")) {
+            m_autoFlickPct       = 0.88f;
+            m_autoHoldMin        = 0.20f;
+            m_autoAntiJack       = true;
+            m_autoLaneCooldownMs = 80.f;
+            m_autoScanTimeGapMs  = 60.f;
+        }
+        ImGui::EndPopup();
+    }
 
     ImGui::SameLine();
     ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.6f, 0.15f, 0.15f, 1.f));
@@ -6819,4 +6995,739 @@ uint32_t SongEditor::laneMaskAt(double songTime) const {
 bool SongEditor::isLaneEnabledAt(int lane, double songTime) const {
     if (lane < 0 || lane >= 32) return true;
     return (laneMaskAt(songTime) & (1u << lane)) != 0;
+}
+
+// ── AI Place-All inference ──────────────────────────────────────────────────
+
+SongEditor::InferredType
+SongEditor::inferNoteType(const MarkerFeature& f,
+                          float flickThreshold, bool supportsHold,
+                          float holdMinSec) const {
+    InferredType out;
+    // Hold wins over Flick when a soft, clearly-sustained onset is detected:
+    // sustain is computed from gap-to-next-onset + low strength in the analyzer.
+    if (supportsHold && f.sustain >= holdMinSec) {
+        out.type = EditorNoteType::Hold;
+        out.duration = f.sustain;
+        return out;
+    }
+    if (f.strength >= flickThreshold) {
+        out.type = EditorNoteType::Flick;
+        return out;
+    }
+    out.type = EditorNoteType::Tap;
+    return out;
+}
+
+float SongEditor::computeFlickThreshold(const std::vector<MarkerFeature>& feats,
+                                        bool supportsFlick, float pct) const {
+    if (!supportsFlick || feats.empty()) return 1e9f;
+    std::vector<float> s;
+    s.reserve(feats.size());
+    for (const auto& f : feats) s.push_back(f.strength);
+    pct = std::clamp(pct, 0.f, 1.f);
+    size_t idx = (size_t)std::floor(pct * (float)(s.size() - 1));
+    std::nth_element(s.begin(), s.begin() + idx, s.end());
+    return s[idx];
+}
+
+int SongEditor::inferLaneFromCentroid(float centroid, int laneCount,
+                                       int prevLane, bool antiJack) const {
+    if (laneCount <= 0) return -1;
+    if (laneCount == 1) return 0;
+    int lane = (int)std::floor(std::clamp(centroid, 0.f, 0.9999f) * laneCount);
+    if (lane < 0) lane = 0;
+    if (lane >= laneCount) lane = laneCount - 1;
+    if (antiJack && lane == prevLane) {
+        if (lane + 1 < laneCount)       lane += 1;
+        else if (lane - 1 >= 0)         lane -= 1;
+    }
+    return lane;
+}
+
+// ── Editor Copilot ──────────────────────────────────────────────────────────
+
+struct SongEditor::CopilotState {
+    AIEditorClient                client;
+    AIEditorConfig                config;
+    std::string                   prompt;
+    std::string                   rawResponse;
+    std::string                   explanation;
+    std::string                   lastError;
+    std::vector<ChartEditOp>      proposed;
+    std::optional<ChartSnapshot>  undo;
+    bool                          configLoaded = false;
+    bool                          inFlight     = false;
+    bool                          hasResult    = false;  // any response to show
+};
+
+static std::string aiConfigPath() {
+    // %APPDATA%\MusicGameEngine\ai_editor_config.json on Windows, with a
+    // fallback to the cwd so running from a clean checkout still works.
+#ifdef _WIN32
+    const char* appdata = std::getenv("APPDATA");
+    if (appdata && *appdata) {
+        fs::path dir = fs::path(appdata) / "MusicGameEngine";
+        std::error_code ec;
+        fs::create_directories(dir, ec);
+        if (!ec) return (dir / "ai_editor_config.json").string();
+    }
+#endif
+    return "ai_editor_config.json";
+}
+
+struct SongEditor::AuditState {
+    AIEditorClient  client;
+    AIEditorConfig  config;
+    std::string     rawResponse;
+    AuditReport     report;
+    bool            configLoaded = false;
+    bool            inFlight     = false;
+    bool            hasResult    = false;
+};
+
+struct SongEditor::StyleState {
+    AIEditorClient               client;
+    AIEditorConfig               config;
+    std::vector<StyleCandidate>  candidates;
+    int                          selected = -1;
+    bool                         configLoaded   = false;
+    bool                         candidatesLoaded = false;
+    bool                         haveReference  = false;
+    bool                         inFlight       = false;
+    bool                         hasNarration   = false;
+    StyleFingerprint             refFp, beforeFp, afterFp;
+    std::string                  narration;
+    std::string                  lastError;
+    std::string                  rawResponse;
+    std::optional<ChartSnapshot> undo;
+    int                          undoDifficulty = -1;
+    int                          statsRetyped = 0;
+    int                          statsRelaned = 0;
+    int                          statsSkipped = 0;
+};
+
+SongEditor::SongEditor()
+    : m_copilot(std::make_unique<CopilotState>()),
+      m_audit  (std::make_unique<AuditState>()),
+      m_style  (std::make_unique<StyleState>()) {}
+
+SongEditor::~SongEditor() = default;
+
+// Per-frame: deliver any completed copilot response back to the UI thread.
+void SongEditor::pollCopilot() {
+    if (!m_copilot) return;
+    m_copilot->client.pollCompletion();
+}
+
+// Build the system prompt that primes the AI for this chart context. Called
+// each time the user hits Generate so mode / difficulty / counts are fresh.
+static std::string buildCopilotSystemPrompt(const SongInfo* song,
+                                            Difficulty diff,
+                                            const std::vector<EditorNote>& notes) {
+    int tap = 0, hold = 0, flick = 0, other = 0;
+    for (const auto& n : notes) {
+        switch (n.type) {
+            case EditorNoteType::Tap:   ++tap;   break;
+            case EditorNoteType::Hold:  ++hold;  break;
+            case EditorNoteType::Flick: ++flick; break;
+            default: ++other; break;
+        }
+    }
+    const char* modeName = "dropnotes";
+    if (song) {
+        if (song->gameMode.type == GameModeType::Circle)   modeName = "circle";
+        else if (song->gameMode.type == GameModeType::ScanLine) modeName = "scanline";
+        else if (song->gameMode.dimension == DropDimension::ThreeD) modeName = "arcaea";
+        else modeName = "bandori";
+    }
+    const char* diffName = (diff == Difficulty::Easy) ? "easy"
+                         : (diff == Difficulty::Medium) ? "medium" : "hard";
+    int laneCount = song ? song->gameMode.trackCount : 7;
+
+    char ctx[1024];
+    std::snprintf(ctx, sizeof(ctx),
+        "You are inside a music-game chart editor. Current chart state:\n"
+        "  mode = %s\n"
+        "  lane_count = %d\n"
+        "  difficulty = %s\n"
+        "  note_count = %zu  (tap=%d, hold=%d, flick=%d, other=%d)\n\n",
+        modeName, laneCount, diffName, notes.size(), tap, hold, flick, other);
+
+    static const char* kSchema =
+        "Respond with JSON ONLY matching this envelope - no prose, no ```fences```:\n"
+        "{\n"
+        "  \"explanation\": \"one short sentence\",\n"
+        "  \"ops\": [\n"
+        "    {\"op\":\"delete_range\", \"from\":0.0, \"to\":1.0, \"type_filter\":\"any|tap|hold|flick\"},\n"
+        "    {\"op\":\"insert\", \"time\":0.0, \"track\":0, \"type\":\"tap|hold|flick\", \"duration\":0.3},\n"
+        "    {\"op\":\"mirror_lanes\", \"from\":0.0, \"to\":1.0},\n"
+        "    {\"op\":\"shift_lanes\", \"from\":0.0, \"to\":1.0, \"delta\":1},\n"
+        "    {\"op\":\"shift_time\",  \"from\":0.0, \"to\":1.0, \"delta\":-0.08},\n"
+        "    {\"op\":\"convert_type\",\"from\":0.0, \"to\":1.0, \"from_type\":\"tap\", \"to_type\":\"hold\", \"duration\":0.3}\n"
+        "  ]\n"
+        "}\n\n"
+        "Rules:\n"
+        "- Times are seconds from song start. Tracks are 0-based (0 is the leftmost lane).\n"
+        "- Prefer fewer, broader ops. If the request is unclear, return ops=[] and explain.\n"
+        "- Never emit 'slide', 'arc', or 'arctap' - not in this vocabulary.\n"
+        "- Respect lane_count: never pick a track >= lane_count.\n";
+
+    return std::string(ctx) + kSchema;
+}
+
+void SongEditor::renderCopilotPanel() {
+    if (!m_copilot) return;
+    CopilotState& c = *m_copilot;
+
+    if (!c.configLoaded) {
+        loadAIEditorConfig(aiConfigPath(), c.config);
+        c.configLoaded = true;
+    }
+
+    if (!ImGui::CollapsingHeader("Editor Copilot")) return;
+
+    // ── Settings popup ───────────────────────────────────────────────────
+    if (ImGui::SmallButton("Settings##copilot"))
+        ImGui::OpenPopup("copilot_settings");
+    ImGui::SameLine();
+    ImGui::TextDisabled("(%s)", c.config.model.c_str());
+    if (ImGui::BeginPopup("copilot_settings")) {
+        bool changed = false;
+        char endpointBuf[512];
+        std::strncpy(endpointBuf, c.config.endpoint.c_str(), sizeof(endpointBuf) - 1);
+        endpointBuf[sizeof(endpointBuf) - 1] = 0;
+        ImGui::SetNextItemWidth(300);
+        if (ImGui::InputText("Endpoint", endpointBuf, sizeof(endpointBuf))) {
+            c.config.endpoint = endpointBuf; changed = true;
+        }
+
+        char modelBuf[256];
+        std::strncpy(modelBuf, c.config.model.c_str(), sizeof(modelBuf) - 1);
+        modelBuf[sizeof(modelBuf) - 1] = 0;
+        ImGui::SetNextItemWidth(300);
+        if (ImGui::InputText("Model", modelBuf, sizeof(modelBuf))) {
+            c.config.model = modelBuf; changed = true;
+        }
+
+        char keyBuf[512];
+        std::strncpy(keyBuf, c.config.apiKey.c_str(), sizeof(keyBuf) - 1);
+        keyBuf[sizeof(keyBuf) - 1] = 0;
+        ImGui::SetNextItemWidth(300);
+        if (ImGui::InputText("API key (optional)", keyBuf, sizeof(keyBuf),
+                             ImGuiInputTextFlags_Password)) {
+            c.config.apiKey = keyBuf; changed = true;
+        }
+
+        ImGui::SetNextItemWidth(120);
+        if (ImGui::SliderInt("Timeout (s)", &c.config.timeoutSecs, 5, 300))
+            changed = true;
+
+        ImGui::Separator();
+        ImGui::TextDisabled("Default: Ollama on localhost:11434.");
+        ImGui::TextDisabled("Recommended fast text models:");
+        ImGui::TextDisabled("  ollama pull qwen2.5:3b     (fast, good JSON)");
+        ImGui::TextDisabled("  ollama pull llama3.2:3b    (fast, general)");
+        ImGui::TextDisabled("Vision/reasoning models (qwen3-vl, etc.)");
+        ImGui::TextDisabled("work but are much slower.");
+        if (changed) saveAIEditorConfig(aiConfigPath(), c.config);
+        ImGui::EndPopup();
+    }
+
+    // ── Prompt box ───────────────────────────────────────────────────────
+    char promptBuf[2048];
+    std::strncpy(promptBuf, c.prompt.c_str(), sizeof(promptBuf) - 1);
+    promptBuf[sizeof(promptBuf) - 1] = 0;
+    ImGui::InputTextMultiline("##copilotPrompt", promptBuf, sizeof(promptBuf),
+                              ImVec2(-1, 80));
+    c.prompt = promptBuf;
+
+    // ── Generate / Undo row ──────────────────────────────────────────────
+    bool disabled = c.inFlight || c.prompt.empty();
+    ImGui::BeginDisabled(disabled);
+    if (ImGui::Button(c.inFlight ? "Generating..." : "Generate")) {
+        c.client.setCallback([this](AIEditorResult res) {
+            CopilotState& cc = *m_copilot;
+            cc.inFlight = false;
+            cc.rawResponse = res.message;
+            cc.proposed.clear();
+            cc.explanation.clear();
+            if (!res.success) {
+                cc.lastError = res.errorMessage;
+                cc.hasResult = true;
+                m_statusMsg = "Copilot: " + res.errorMessage;
+                m_statusTimer = 5.f;
+                return;
+            }
+            auto parsed = parseChartEditOps(res.message);
+            if (!parsed.success) {
+                cc.lastError = parsed.errorMessage;
+            } else {
+                cc.explanation = parsed.explanation;
+                cc.proposed    = std::move(parsed.ops);
+                cc.lastError.clear();
+            }
+            cc.hasResult = true;
+            m_statusMsg = "Copilot: " + std::to_string(cc.proposed.size())
+                        + " op(s) proposed";
+            m_statusTimer = 3.f;
+        });
+
+        std::string sys  = buildCopilotSystemPrompt(m_song, m_currentDifficulty, notes());
+        c.inFlight = true;
+        c.hasResult = false;
+        c.client.startRequest(c.config, sys, c.prompt);
+    }
+    ImGui::EndDisabled();
+
+    ImGui::SameLine();
+    ImGui::BeginDisabled(!c.undo.has_value());
+    if (ImGui::Button("Undo last")) {
+        auto& n = notes();
+        auto& m = markers();
+        auto& f = features();
+        n = c.undo->notes;
+        m = c.undo->markers;
+        f = c.undo->features;
+        c.undo.reset();
+        m_statusMsg = "Copilot: undo applied";
+        m_statusTimer = 3.f;
+    }
+    ImGui::EndDisabled();
+
+    // ── Result preview ───────────────────────────────────────────────────
+    if (c.hasResult) {
+        ImGui::Separator();
+        if (!c.explanation.empty())
+            ImGui::TextWrapped("%s", c.explanation.c_str());
+        if (!c.lastError.empty()) {
+            ImGui::TextColored(ImVec4(1.f, 0.5f, 0.4f, 1.f),
+                               "Error: %s", c.lastError.c_str());
+            // Fallback: show a snippet of the raw response so the user can see
+            // what the model actually said when parsing fails.
+            if (!c.rawResponse.empty()) {
+                ImGui::TextDisabled("Raw: %.200s%s",
+                    c.rawResponse.c_str(),
+                    c.rawResponse.size() > 200 ? "..." : "");
+            }
+        }
+        for (const auto& op : c.proposed) {
+            ImGui::BulletText("%s", describeChartEditOp(op).c_str());
+        }
+        if (!c.proposed.empty()) {
+            if (ImGui::Button("Apply##copilot")) {
+                ChartSnapshot snap;
+                snap.notes    = notes();
+                snap.markers  = markers();
+                snap.features = features();
+                c.undo = std::move(snap);
+                int laneCount = m_song ? m_song->gameMode.trackCount : 7;
+                int totalIns = 0, totalDel = 0, totalMut = 0;
+                for (const auto& op : c.proposed) {
+                    auto st = applyChartEditOp(notes(), laneCount, op);
+                    totalIns += st.inserted;
+                    totalDel += st.deleted;
+                    totalMut += st.mutated;
+                }
+                char msg[128];
+                std::snprintf(msg, sizeof(msg),
+                    "Copilot applied: +%d / -%d / ~%d",
+                    totalIns, totalDel, totalMut);
+                m_statusMsg = msg;
+                m_statusTimer = 4.f;
+                c.proposed.clear();
+                c.hasResult = false;
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Discard##copilot")) {
+                c.proposed.clear();
+                c.hasResult = false;
+                c.explanation.clear();
+                c.lastError.clear();
+            }
+        }
+    }
+}
+
+// ── Chart Audit ─────────────────────────────────────────────────────────────
+
+void SongEditor::pollAudit() {
+    if (!m_audit) return;
+    m_audit->client.pollCompletion();
+}
+
+static std::string buildAuditSystemPrompt(const SongInfo* song,
+                                           Difficulty diff) {
+    const char* modeName = "dropnotes";
+    if (song) {
+        if (song->gameMode.type == GameModeType::Circle)   modeName = "circle";
+        else if (song->gameMode.type == GameModeType::ScanLine) modeName = "scanline";
+        else if (song->gameMode.dimension == DropDimension::ThreeD) modeName = "arcaea";
+        else modeName = "bandori";
+    }
+    const char* diffName = (diff == Difficulty::Easy) ? "easy"
+                         : (diff == Difficulty::Medium) ? "medium" : "hard";
+    int laneCount = song ? song->gameMode.trackCount : 7;
+
+    char ctx[768];
+    std::snprintf(ctx, sizeof(ctx),
+        "You are a rhythm-game chart auditor. You review finished charts and\n"
+        "report quality issues so the author can fix them.\n\n"
+        "Current chart: mode=%s, lane_count=%d, difficulty=%s.\n\n",
+        modeName, laneCount, diffName);
+
+    static const char* kSchema =
+        "The user message contains pre-computed metrics from a local scan\n"
+        "(density hotspots, jacks, crossovers, dead zones). Base your review\n"
+        "on those exact timestamps; do not invent new ones.\n\n"
+        "Respond with JSON ONLY matching this envelope - no prose, no fences:\n"
+        "{\n"
+        "  \"summary\": \"3-4 sentence overview of the chart's overall quality\",\n"
+        "  \"issues\": [\n"
+        "    {\"severity\":\"high|medium|low\", \"time\":0.0, \"end_time\":0.0,\n"
+        "     \"category\":\"density|jack|crossover|pacing|difficulty|other\",\n"
+        "     \"message\":\"short, actionable, <=120 chars\"}\n"
+        "  ]\n"
+        "}\n\n"
+        "Rules:\n"
+        "- High severity = impossible or unfun (extreme density, rapid crossovers).\n"
+        "- Medium = a noticeable weakness (monotonous jacks, pacing slump).\n"
+        "- Low = taste/polish.\n"
+        "- Clean chart? Leave issues=[] and fill summary only.\n"
+        "- Only cite timestamps that appear in the metrics block.\n"
+        "- Match difficulty: easy charts should tolerate lower peak_nps than hard.\n";
+
+    return std::string(ctx) + kSchema;
+}
+
+void SongEditor::renderAuditPanel() {
+    if (!m_audit) return;
+    AuditState& a = *m_audit;
+
+    if (!a.configLoaded) {
+        loadAIEditorConfig(aiConfigPath(), a.config);
+        a.configLoaded = true;
+    }
+
+    if (!ImGui::CollapsingHeader("Chart Audit")) return;
+
+    ImGui::TextDisabled("(%s)", a.config.model.c_str());
+
+    bool disabled = a.inFlight || notes().empty();
+    ImGui::BeginDisabled(disabled);
+    if (ImGui::Button(a.inFlight ? "Auditing..." : "Audit chart")) {
+        float dur = (float)m_waveform.durationSeconds;
+        AuditMetrics metrics = computeAuditMetrics(notes(), dur);
+        std::string metricsDesc = describeMetricsForPrompt(metrics);
+        std::string sys = buildAuditSystemPrompt(m_song, m_currentDifficulty);
+        std::string usr = metricsDesc + "\nReview this chart and report issues.";
+
+        a.client.setCallback([this](AIEditorResult res) {
+            AuditState& aa = *m_audit;
+            aa.inFlight = false;
+            aa.rawResponse = res.message;
+            aa.report = AuditReport{};
+            if (!res.success) {
+                aa.report.errorMessage = res.errorMessage;
+                aa.hasResult = true;
+                m_statusMsg = "Audit: " + res.errorMessage;
+                m_statusTimer = 5.f;
+                return;
+            }
+            aa.report = parseAuditReport(res.message);
+            aa.hasResult = true;
+            char msg[128];
+            std::snprintf(msg, sizeof(msg),
+                "Audit: %zu issue(s)", aa.report.issues.size());
+            m_statusMsg = msg;
+            m_statusTimer = 3.f;
+        });
+
+        a.inFlight = true;
+        a.hasResult = false;
+        a.client.startRequest(a.config, sys, usr);
+    }
+    ImGui::EndDisabled();
+
+    if (!a.hasResult) return;
+
+    ImGui::Separator();
+    if (!a.report.errorMessage.empty()) {
+        ImGui::TextColored(ImVec4(1.f, 0.5f, 0.4f, 1.f),
+                           "Error: %s", a.report.errorMessage.c_str());
+        if (!a.rawResponse.empty()) {
+            ImGui::TextDisabled("Raw: %.200s%s",
+                a.rawResponse.c_str(),
+                a.rawResponse.size() > 200 ? "..." : "");
+        }
+        return;
+    }
+
+    if (!a.report.summary.empty())
+        ImGui::TextWrapped("%s", a.report.summary.c_str());
+
+    if (a.report.issues.empty()) {
+        ImGui::TextDisabled("(no issues flagged)");
+        return;
+    }
+
+    ImGui::Spacing();
+    for (size_t i = 0; i < a.report.issues.size(); ++i) {
+        const auto& issue = a.report.issues[i];
+        ImVec4 col;
+        const char* tag;
+        switch (issue.severity) {
+            case AuditSeverity::High:
+                col = ImVec4(0.95f, 0.45f, 0.40f, 1.f); tag = "HIGH"; break;
+            case AuditSeverity::Medium:
+                col = ImVec4(0.95f, 0.80f, 0.30f, 1.f); tag = "MED";  break;
+            default:
+                col = ImVec4(0.65f, 0.80f, 0.95f, 1.f); tag = "LOW";  break;
+        }
+        ImGui::TextColored(col, "%s", tag);
+        ImGui::SameLine();
+
+        char timeLbl[64];
+        if (issue.timeEnd > issue.timeStart + 0.01f)
+            std::snprintf(timeLbl, sizeof(timeLbl),
+                "[%.2f-%.2fs]##a%zu", issue.timeStart, issue.timeEnd, i);
+        else
+            std::snprintf(timeLbl, sizeof(timeLbl),
+                "[%.2fs]##a%zu", issue.timeStart, i);
+
+        if (ImGui::SmallButton(timeLbl)) {
+            m_sceneTime       = issue.timeStart;
+            m_timelineScrollX = std::max(0.f, issue.timeStart - 2.f);
+        }
+        ImGui::SameLine();
+        ImGui::TextWrapped("%s - %s",
+            issue.category.empty() ? "other" : issue.category.c_str(),
+            issue.message.c_str());
+    }
+}
+
+// ── Style Transfer ──────────────────────────────────────────────────────────
+
+void SongEditor::pollStyle() {
+    if (!m_style) return;
+    m_style->client.pollCompletion();
+}
+
+static std::string buildStyleSystemPrompt() {
+    return
+        "You are a music-game chart style reviewer. The user just applied a "
+        "style transfer from a reference chart to their working chart. Given "
+        "the reference fingerprint, the before-stats, and the after-stats, "
+        "write 2-3 sentences describing what shifted toward the reference "
+        "and what remained. Be concrete with numbers. Plain prose only - no "
+        "JSON, no code fences, no bullets.";
+}
+
+static std::string buildStyleUserPrompt(const StyleFingerprint& ref,
+                                         const StyleFingerprint& before,
+                                         const StyleFingerprint& after) {
+    std::string s;
+    s += "Reference:\n";
+    s += describeFingerprint(ref);
+    s += "\nBefore:\n";
+    s += describeFingerprint(before);
+    s += "\nAfter:\n";
+    s += describeFingerprint(after);
+    return s;
+}
+
+void SongEditor::renderStylePanel() {
+    if (!m_style || !m_song) return;
+    StyleState& s = *m_style;
+
+    if (!s.configLoaded) {
+        loadAIEditorConfig(aiConfigPath(), s.config);
+        s.configLoaded = true;
+    }
+
+    if (!ImGui::CollapsingHeader("Style Transfer")) return;
+
+    ImGui::TextDisabled("(%s)", s.config.model.c_str());
+
+    // Populate candidates on first open or when user hits Refresh.
+    auto repopulate = [&]() {
+        s.candidates.clear();
+        if (m_engineCached) {
+            s.candidates = enumerateStyleCandidates(
+                m_projectPath,
+                m_engineCached->musicSelectionEditor().sets(),
+                m_song->gameMode,
+                m_song->name,
+                m_currentDifficulty);
+        }
+        s.selected = s.candidates.empty() ? -1 : 0;
+        s.candidatesLoaded = true;
+        s.haveReference = false;
+    };
+    if (!s.candidatesLoaded) repopulate();
+
+    ImGui::SameLine();
+    if (ImGui::SmallButton("Refresh##style")) repopulate();
+
+    if (s.candidates.empty()) {
+        ImGui::TextDisabled("(no compatible charts in this project)");
+    } else {
+        ImGui::SetNextItemWidth(-1);
+        const char* preview = (s.selected >= 0 &&
+                               s.selected < (int)s.candidates.size())
+            ? s.candidates[s.selected].label.c_str()
+            : "(pick a reference)";
+        if (ImGui::BeginCombo("##styleRef", preview)) {
+            for (int i = 0; i < (int)s.candidates.size(); ++i) {
+                bool sel = (i == s.selected);
+                if (ImGui::Selectable(s.candidates[i].label.c_str(), sel)) {
+                    s.selected = i;
+                    s.haveReference = false;
+                }
+                if (sel) ImGui::SetItemDefaultFocus();
+            }
+            ImGui::EndCombo();
+        }
+    }
+
+    bool canAnalyze = (s.selected >= 0 && !s.inFlight);
+    ImGui::BeginDisabled(!canAnalyze);
+    if (ImGui::Button("Analyze reference")) {
+        const auto& cand = s.candidates[s.selected];
+        try {
+            ChartData ref = ChartLoader::load(cand.absPath);
+            int refTc = cand.trackCount > 0 ? cand.trackCount
+                                            : m_song->gameMode.trackCount;
+            s.refFp = computeFingerprint(ref, refTc);
+            s.haveReference = true;
+            m_statusMsg = "Style: loaded reference " + cand.label;
+            m_statusTimer = 3.f;
+        } catch (const std::exception& e) {
+            m_statusMsg = std::string("Style: load failed - ") + e.what();
+            m_statusTimer = 5.f;
+            s.haveReference = false;
+        } catch (...) {
+            m_statusMsg = "Style: load failed (unknown)";
+            m_statusTimer = 5.f;
+            s.haveReference = false;
+        }
+    }
+    ImGui::EndDisabled();
+
+    if (s.haveReference) {
+        ImGui::Separator();
+        ImGui::TextDisabled("Reference fingerprint:");
+        ImGui::TextWrapped("%s", describeFingerprint(s.refFp).c_str());
+    }
+
+    bool canApply = s.haveReference && !s.inFlight && !notes().empty()
+                 && s.refFp.noteCount > 0;
+    if (s.haveReference && s.refFp.noteCount == 0) {
+        ImGui::TextColored(ImVec4(1.f, 0.6f, 0.3f, 1.f),
+            "Reference has 0 notes - pick a non-empty chart.");
+    }
+    if (s.haveReference && notes().empty()) {
+        ImGui::TextColored(ImVec4(1.f, 0.6f, 0.3f, 1.f),
+            "Target chart has 0 notes - place notes first (Autocharter Place All).");
+    }
+    ImGui::BeginDisabled(!canApply);
+    if (ImGui::Button(s.inFlight ? "Applying..." : "Apply style")) {
+        // Snapshot current state for undo.
+        ChartSnapshot snap;
+        snap.notes    = notes();
+        snap.markers  = markers();
+        snap.features = features();
+        s.undo = std::move(snap);
+        s.undoDifficulty = (int)m_currentDifficulty;
+
+        int tc = m_song->gameMode.trackCount;
+        float dur = (float)m_waveform.durationSeconds;
+        s.beforeFp = computeFingerprintFromEditor(notes(), tc, dur);
+
+        StyleTransferOptions opts;
+        StyleTransferStats st = applyStyleTransfer(
+            notes(), features(), markers(), tc, s.refFp, opts);
+        s.statsRetyped = st.retyped;
+        s.statsRelaned = st.relaned;
+        s.statsSkipped = st.skipped;
+
+        s.afterFp = computeFingerprintFromEditor(notes(), tc, dur);
+
+        // Fire narration request (jsonMode=false for prose).
+        s.client.setCallback([this](AIEditorResult res) {
+            StyleState& ss = *m_style;
+            ss.inFlight = false;
+            ss.rawResponse = res.message;
+            if (!res.success) {
+                ss.lastError = res.errorMessage;
+                m_statusMsg = "Style: " + res.errorMessage;
+                m_statusTimer = 5.f;
+            } else {
+                ss.narration = res.message;
+                ss.lastError.clear();
+                m_statusMsg = "Style: narration received";
+                m_statusTimer = 3.f;
+            }
+            ss.hasNarration = true;
+        });
+        s.inFlight = true;
+        s.hasNarration = false;
+        s.narration.clear();
+        s.lastError.clear();
+        s.client.startRequest(s.config,
+                              buildStyleSystemPrompt(),
+                              buildStyleUserPrompt(s.refFp, s.beforeFp, s.afterFp),
+                              /*jsonMode=*/false);
+
+        char msg[128];
+        std::snprintf(msg, sizeof(msg),
+            "Style applied: retyped %d / relaned %d / skipped %d",
+            st.retyped, st.relaned, st.skipped);
+        m_statusMsg = msg;
+        m_statusTimer = 4.f;
+    }
+    ImGui::EndDisabled();
+
+    ImGui::SameLine();
+    ImGui::BeginDisabled(!s.undo.has_value());
+    if (ImGui::Button("Undo##style")) {
+        if ((int)m_currentDifficulty != s.undoDifficulty) {
+            m_statusMsg = "Style: undo blocked - difficulty changed";
+            m_statusTimer = 4.f;
+        } else {
+            notes()    = s.undo->notes;
+            markers()  = s.undo->markers;
+            features() = s.undo->features;
+            s.undo.reset();
+            s.hasNarration = false;
+            m_statusMsg = "Style: undo applied";
+            m_statusTimer = 3.f;
+        }
+    }
+    ImGui::EndDisabled();
+
+    if (s.inFlight || s.hasNarration || s.statsRetyped > 0 || s.statsRelaned > 0) {
+        ImGui::Separator();
+        char stline[128];
+        std::snprintf(stline, sizeof(stline),
+            "retyped %d  relaned %d  skipped %d",
+            s.statsRetyped, s.statsRelaned, s.statsSkipped);
+        ImGui::TextDisabled("%s", stline);
+
+        if (!s.lastError.empty()) {
+            ImGui::TextColored(ImVec4(1.f, 0.5f, 0.4f, 1.f),
+                               "Error: %s", s.lastError.c_str());
+        }
+        if (!s.narration.empty()) {
+            ImGui::TextWrapped("%s", s.narration.c_str());
+        } else if (s.inFlight) {
+            ImGui::TextDisabled("(waiting for narration...)");
+        }
+
+        if (s.hasNarration || s.statsRetyped + s.statsRelaned > 0) {
+            ImGui::Spacing();
+            ImGui::TextDisabled("After:");
+            ImGui::TextWrapped("%s", describeFingerprint(s.afterFp).c_str());
+        }
+    }
 }

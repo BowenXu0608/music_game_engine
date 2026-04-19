@@ -11,6 +11,15 @@ struct BpmChange {
     float bpm  = 120.f;
 };
 
+// Per-marker features parallel to the marker time arrays. Drives
+// Place-All note-type inference (strength→Flick, sustain→Hold) and
+// centroid-based lane assignment.
+struct MarkerFeature {
+    float strength = 0.5f;   // 0..1 — onset peak at marker
+    float sustain  = 0.f;    // seconds — 0 means instant (tap-like)
+    float centroid = 0.5f;   // 0..1 — normalized spectral centroid
+};
+
 struct AudioAnalysisResult {
     bool        success = false;
     std::string errorMessage;
@@ -19,6 +28,9 @@ struct AudioAnalysisResult {
     std::vector<float> easyMarkers;
     std::vector<float> mediumMarkers;
     std::vector<float> hardMarkers;
+    std::vector<MarkerFeature> easyFeatures;
+    std::vector<MarkerFeature> mediumFeatures;
+    std::vector<MarkerFeature> hardFeatures;
 };
 
 class AudioAnalyzer {

@@ -144,13 +144,23 @@ ShaderCompileResult compileFragmentToSpv(const fs::path& shaderPath, bool forceR
         return r;
     }
 
-    // glslc <src> -o <dst> 2>&1  — merge stderr into stdout for capture.
+    // glslc <src> -o <dst> 2>&1  - merge stderr into stdout for capture.
     std::ostringstream cmd;
     cmd << quoteForShell(glslc)
         << " " << quoteForShell(shaderPath.string())
         << " -o " << quoteForShell(spvPath.string())
         << " 2>&1";
     std::string cmdStr = cmd.str();
+
+#ifdef _WIN32
+    // cmd.exe /c pitfall: when the command string starts with `"..."` and
+    // contains more than one pair of quotes, cmd.exe strips the leading/
+    // trailing quote, which mangles the glslc path into `glslc.exe"` and
+    // Windows returns ERROR_PATH_NOT_FOUND. Wrapping the whole thing in an
+    // extra outer quote pair feeds cmd.exe the quotes it wants to strip and
+    // leaves our inner quoting intact.
+    cmdStr = "\"" + cmdStr + "\"";
+#endif
 
     FILE* pipe = POPEN(cmdStr.c_str(), "r");
     if (!pipe) {

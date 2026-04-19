@@ -255,6 +255,27 @@ AudioAnalysisResult AudioAnalyzer::parseJson(const std::string& jsonStr) {
     result.mediumMarkers = extractArray("medium");
     result.hardMarkers   = extractArray("hard");
 
+    // Per-marker features (parallel arrays). Missing → zero-init feature, which
+    // falls back to Tap in the inference helper.
+    auto buildFeatures = [&](const std::string& level,
+                             const std::vector<float>& times)
+        -> std::vector<MarkerFeature>
+    {
+        std::vector<MarkerFeature> feats(times.size());
+        auto sv = extractArray(level + "_strength");
+        auto suv = extractArray(level + "_sustain");
+        auto cv = extractArray(level + "_centroid");
+        for (size_t i = 0; i < feats.size(); ++i) {
+            if (i < sv.size())  feats[i].strength = sv[i];
+            if (i < suv.size()) feats[i].sustain  = suv[i];
+            if (i < cv.size())  feats[i].centroid = cv[i];
+        }
+        return feats;
+    };
+    result.easyFeatures   = buildFeatures("easy",   result.easyMarkers);
+    result.mediumFeatures = buildFeatures("medium", result.mediumMarkers);
+    result.hardFeatures   = buildFeatures("hard",   result.hardMarkers);
+
     // Parse bpm_changes: [{"time":0.0,"bpm":128.0}, ...]
     {
         std::string key = "\"bpm_changes\"";

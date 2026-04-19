@@ -4,6 +4,8 @@
 #include "renderer/vulkan/BufferManager.h"
 #include "renderer/MaterialAssetLibrary.h"
 #include "renderer/ShaderCompiler.h"
+#include "editor/ShaderGenClient.h"
+#include "editor/AIEditorConfig.h"
 #include <imgui.h>
 #include <nlohmann/json.hpp>
 #include <fstream>
@@ -11,6 +13,7 @@
 #include <algorithm>
 #include <cstring>
 #include <cstdio>
+#include <cstdlib>
 #include <iostream>
 #ifdef _WIN32
 #include <windows.h>
@@ -26,6 +29,39 @@
 
 namespace fs = std::filesystem;
 using json = nlohmann::json;
+
+// ── AI shader-gen state (pimpl) ───────────────────────────────────────────────
+
+struct ShaderGenUIState {
+    ShaderGenClient client;
+    AIEditorConfig  cfg;
+    bool            cfgLoaded     = false;
+    char            prompt[4096]  = {};
+    int             maxAttempts   = 3;
+    std::string     finalLog;        // attemptsLog after completion
+    std::string     finalError;      // errorMessage after completion
+    std::string     finalSpvPath;    // on success
+    bool            callbackBound = false;
+};
+
+// Same resolution as the Copilot's aiConfigPath() in SongEditor.cpp. Kept
+// local here rather than extracted to keep the editor headers lightweight.
+static std::string shaderGenConfigPath() {
+#ifdef _WIN32
+    const char* appdata = std::getenv("APPDATA");
+    if (appdata && *appdata) {
+        fs::path dir = fs::path(appdata) / "MusicGameEngine";
+        std::error_code ec;
+        fs::create_directories(dir, ec);
+        if (!ec) return (dir / "ai_editor_config.json").string();
+    }
+#endif
+    return "ai_editor_config.json";
+}
+
+StartScreenEditor::StartScreenEditor()
+    : m_shaderGen(std::make_unique<ShaderGenUIState>()) {}
+StartScreenEditor::~StartScreenEditor() = default;
 
 // ── Vulkan lifecycle ──────────────────────────────────────────────────────────
 
@@ -1114,6 +1150,171 @@ void StartScreenEditor::renderMaterials(Engine* engine) {
             ImGui::InputTextMultiline("##compile_log",
                 m_materialCompileLog.data(), m_materialCompileLog.size() + 1,
                 ImVec2(-1, 100),
+                ImGuiInputTextFlags_ReadOnly);
+        }
+
+        // ── AI Generate (Custom shaders) ────────────────────────────────────
+        ImGui::Spacing();
+        ImGui::Separator();
+
+        if (!m_shaderGen->cfgLoaded) {
+            loadAIEditorConfig(shaderGenConfigPath(), m_shaderGen->cfg);
+            m_shaderGen->cfgLoaded = true;
+        }
+        // Deliver any completed generation to the callback. Called each frame
+        // the Materials tab is visible - if the user navigates away mid-flight,
+        // delivery happens when they return. No Vulkan / ImGui on the worker.
+        m_shaderGen->client.pollCompletion();
+
+        ImGui::TextUnformatted("AI Generate");
+        ImGui::SameLine();
+        ImGui::TextDisabled("(%s)", m_shaderGen->cfg.model.c_str());
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Settings##shadergen"))
+            ImGui::OpenPopup("shadergen_settings");
+
+        if (ImGui::BeginPopup("shadergen_settings")) {
+            bool changed = false;
+            char endpointBuf[512];
+            std::strncpy(endpointBuf, m_shaderGen->cfg.endpoint.c_str(), sizeof(endpointBuf) - 1);
+            endpointBuf[sizeof(endpointBuf) - 1] = 0;
+            ImGui::SetNextItemWidth(300);
+            if (ImGui::InputText("Endpoint", endpointBuf, sizeof(endpointBuf))) {
+                m_shaderGen->cfg.endpoint = endpointBuf; changed = true;
+            }
+
+            char modelBuf[256];
+            std::strncpy(modelBuf, m_shaderGen->cfg.model.c_str(), sizeof(modelBuf) - 1);
+            modelBuf[sizeof(modelBuf) - 1] = 0;
+            ImGui::SetNextItemWidth(300);
+            if (ImGui::InputText("Model", modelBuf, sizeof(modelBuf))) {
+                m_shaderGen->cfg.model = modelBuf; changed = true;
+            }
+
+            char keyBuf[512];
+            std::strncpy(keyBuf, m_shaderGen->cfg.apiKey.c_str(), sizeof(keyBuf) - 1);
+            keyBuf[sizeof(keyBuf) - 1] = 0;
+            ImGui::SetNextItemWidth(300);
+            if (ImGui::InputText("API key", keyBuf, sizeof(keyBuf))) {
+                m_shaderGen->cfg.apiKey = keyBuf; changed = true;
+            }
+
+            int timeout = m_shaderGen->cfg.timeoutSecs;
+            if (ImGui::SliderInt("Timeout (s)", &timeout, 10, 600)) {
+                m_shaderGen->cfg.timeoutSecs = timeout; changed = true;
+            }
+
+            ImGui::SliderInt("Max attempts", &m_shaderGen->maxAttempts, 1, 6);
+
+            if (changed)
+                saveAIEditorConfig(shaderGenConfigPath(), m_shaderGen->cfg);
+
+            ImGui::EndPopup();
+        }
+
+        ImGui::TextWrapped("Describe the effect in plain English. The AI will write a .frag, compile it, and retry on glslc errors.");
+        ImGui::InputTextMultiline("##shadergen_prompt",
+            m_shaderGen->prompt, sizeof(m_shaderGen->prompt),
+            ImVec2(-1, 80));
+
+        const bool inFlight = m_shaderGen->client.isRunning();
+        if (inFlight) ImGui::BeginDisabled();
+        if (ImGui::Button("Generate")) {
+            // Bind the result callback exactly once - it captures `this` and
+            // writes to main-thread UI state on poll.
+            if (!m_shaderGen->callbackBound) {
+                m_shaderGen->client.setCallback([this](ShaderGenResult r) {
+                    m_shaderGen->finalLog     = r.attemptsLog;
+                    m_shaderGen->finalError   = r.errorMessage;
+                    m_shaderGen->finalSpvPath = r.spvPath;
+                    if (r.success) {
+                        m_statusMsg   = "Shader gen OK (attempts=" +
+                                        std::to_string(r.attempts) + ")";
+                        m_materialCompileLog = "OK (AI) - " + r.spvPath +
+                                               "\n\n" + r.attemptsLog;
+                    } else {
+                        m_statusMsg = "Shader gen failed: " + r.errorMessage;
+                        m_materialCompileLog = "FAILED (AI)\n" +
+                                               r.errorMessage + "\n\n" +
+                                               r.attemptsLog;
+                    }
+                    m_statusTimer = 3.f;
+                });
+                m_shaderGen->callbackBound = true;
+            }
+
+            // Resolve target .frag path: reuse the material's existing path
+            // if set, otherwise synthesize one from the material name and
+            // record it so the existing Compile button picks it up next.
+            fs::path target;
+            std::error_code ec;
+            if (!m_editingMaterial.customShaderPath.empty()) {
+                target = fs::path(lib.projectDir()) /
+                         m_editingMaterial.customShaderPath;
+            } else {
+                std::string rel = "assets/shaders/" +
+                                  m_editingMaterial.name + ".frag";
+                target = fs::path(lib.projectDir()) / rel;
+                m_editingMaterial.customShaderPath = rel;
+            }
+            fs::create_directories(target.parent_path(), ec);
+
+            std::string userPrompt = m_shaderGen->prompt;
+            if (userPrompt.empty())
+                userPrompt = "A simple animated colored quad using ubo.time.";
+
+            // Inject the material's declared target mode + slot so the model
+            // can tailor the shader to its visual role. Enforces the Phase 4
+            // "a material belongs to one game-object type" constraint at the
+            // prompt level.
+            std::string ctxLine;
+            const std::string& tMode = m_editingMaterial.targetMode;
+            const std::string& tSlot = m_editingMaterial.targetSlotSlug;
+            if (!tMode.empty() && !tSlot.empty()) {
+                ctxLine = "This shader is for the '" + tSlot +
+                          "' slot in the '" + tMode +
+                          "' game mode. Tailor the visual to that role "
+                          "(short-lived tap vs. long hold body vs. persistent "
+                          "track surface, etc.). Do not produce generic effects "
+                          "that would only make sense on a different slot.\n\n";
+            } else if (!tMode.empty()) {
+                ctxLine = "This shader is for the '" + tMode +
+                          "' game mode (any slot). Keep it broadly applicable "
+                          "to that mode's visuals.\n\n";
+            }
+            if (!ctxLine.empty()) userPrompt = ctxLine + userPrompt;
+
+            m_shaderGen->finalLog.clear();
+            m_shaderGen->finalError.clear();
+            m_shaderGen->finalSpvPath.clear();
+
+            m_shaderGen->client.startGeneration(
+                m_shaderGen->cfg, userPrompt, target.string(),
+                m_shaderGen->maxAttempts);
+        }
+        if (inFlight) ImGui::EndDisabled();
+
+        // Live status while a request is in flight.
+        if (inFlight) {
+            auto s = m_shaderGen->client.liveStatus();
+            ImGui::SameLine();
+            ImGui::Text("[%d/%d] %s",
+                        s.attempt, s.maxAttempts,
+                        s.phase.empty() ? "starting..." : s.phase.c_str());
+        }
+
+        // Final log / error after completion.
+        if (!inFlight &&
+            (!m_shaderGen->finalLog.empty() || !m_shaderGen->finalError.empty()))
+        {
+            ImGui::Spacing();
+            ImGui::TextUnformatted("Generation log:");
+            std::string combined = m_shaderGen->finalLog;
+            if (!m_shaderGen->finalError.empty())
+                combined += "\n---ERROR---\n" + m_shaderGen->finalError;
+            ImGui::InputTextMultiline("##gen_log",
+                combined.data(), combined.size() + 1,
+                ImVec2(-1, 120),
                 ImGuiInputTextFlags_ReadOnly);
         }
     }

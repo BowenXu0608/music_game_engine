@@ -3,7 +3,7 @@
 A C++20/Vulkan-based rhythm game engine with a Unity Hub-style editor for mobile rhythm game development.  
 Supports **BanG Dream**, **Arcaea**, **Cytus**, and **Lanota** as plugin game modes (Phigros renderer exists but is not currently reachable from the UI).
 
-**Last updated:** 2026-04-12
+**Last updated:** 2026-04-19
 
 ---
 
@@ -68,15 +68,18 @@ Vulkan-based graphics pipeline. Two sub-layers: Vulkan backend + Batcher layer.
 - `SyncObjects` — `MAX_FRAMES_IN_FLIGHT = 3`, semaphores, fences
 
 **Batcher Layer** (`engine/src/renderer/`):
-- `QuadBatch` — textured quads (max 8192/frame)
+- `QuadBatch` — textured quads, pipeline-per-`MaterialKind` (max 8192/frame)
 - `LineBatch` — line segments CPU-expanded to quads (max 4096/frame)
-- `MeshRenderer` — per-mesh 3D draw with depth test
+- `MeshRenderer` — per-mesh 3D draw with depth test, pipeline-per-`MaterialKind`
 - `ParticleSystem` — ring buffer 2048 particles, additive blend
 - `PostProcess` — bloom compute mip chain (5-level) + composite pass
 - `Camera.h` — unified ortho + perspective, header-only
+- `Material.h` / `MaterialSlots.h` — material kinds (Unlit / Glow / Scroll / Pulse / Gradient / Custom), per-mode slot tables
+- `MaterialAsset.h` / `MaterialAssetLibrary.h` — project-level `.mat` asset system (Phase 4)
+- `ShaderCompiler.h` — runtime `.frag` → `.spv` via `glslc`, mtime-cached (Phase 4 Custom kind)
 - `Renderer.h/.cpp` — top-level owner, exposes `whiteView()`, `whiteSampler()`, `descriptors()`
 
-**Shaders** (`shaders/`): quad, line, mesh, bloom_downsample/upsample (compute), composite
+**Shaders** (`shaders/`): quad_{unlit,glow,scroll,pulse,gradient}, mesh_{unlit,glow,scroll,pulse,gradient}, line, bloom_downsample/upsample (compute), composite
 
 > Full details: [docs/sys1_rendering.md](docs/sys1_rendering.md)
 
@@ -224,11 +227,16 @@ ProjectHub → StartScreenEditor → MusicSelectionEditor → SongEditor → (Te
 - DAW-style layout: scene preview + chart timeline simultaneous, left sidebar config, waveform strip
 - Per-difficulty notes (Easy/Medium/Hard)
 - Madmom beat analysis — auto-generate markers for 3 difficulties
+- **Autocharter Place All** — feature-driven (strength/sustain/centroid) note-type + lane selection with anti-jack cooldown; AI... knob popup exposes thresholds
+- **Editor Copilot** — natural-language chart edits via local Ollama / OpenAI-compatible endpoint; 6 ops, single-level undo
 - Game mode config: DropNotes/Circle/ScanLine + 2D/3D dimension + track count + camera + HUD
 - Multi-waypoint hold authoring via drag-to-record
+- **Materials panel** — per-slot visual overrides (Unlit / Glow / Scroll / Pulse / Gradient / Custom), project-level `.mat` asset library shared across charts
+- **AI Shader Generator** — for Custom-kind materials: describe an effect in English, worker writes & compiles a `.frag` with glslc-error retry loop
 - **Circle mode:** keyframed disk animation (rotate/scale/move) with easing
-- **ScanLine mode:** variable-speed keyframes, Cytus-style slides (LMB+RMB), multi-sweep holds
-- **3D DropNotes mode:** 3-panel arc editing — timeline ribbons, height curve editor, cross-section preview; ArcTap click-to-place on parent arc
+- **ScanLine mode:** paginated page-based authoring, per-page speed overrides, variable-speed keyframes, Cytus-style slides (LMB+RMB), multi-sweep holds
+- **3D DropNotes mode:** multi-waypoint arc editor (click-to-place, chain merge on import), per-waypoint height handles, ArcTap click-to-place on parent arc
+- **Player Settings page:** 4th editor layer previewing the shipped in-game settings screen
 - Chart persistence: save/load as Unified Chart Format JSON
 
 > Full details: [docs/sys7_editor.md](docs/sys7_editor.md)
@@ -316,6 +324,23 @@ One document per system, all under `docs/`:
 ---
 
 ## Recent Additions
+
+**2026-04-19**
+- **AI Shader Generator** — natural-language → compiled `.spv` for custom-kind materials. Materials tab prompt → worker runs a compile-retry loop (default 3 attempts), feeding glslc errors back to the model on failure. Slot-aware prompt context (`targetMode` + `targetSlotSlug`) nudges the AI toward role-appropriate shaders. Uses `qwen2.5:3b` via Ollama by default; any OpenAI-compatible `http://` endpoint works.
+- **Shared `AIChatRequest` helper** — extracted from `AIEditorClient` so the Copilot and the new Shader Generator share one HTTP/JSON path.
+- **ShaderCompiler bug fix** — `_popen` on Windows was mangling the glslc path via `cmd.exe /c` outer-quote stripping. Fixed; hand-written Compile button in the Materials tab is fixed for free.
+
+**2026-04-18**
+- **Player Settings page** — 4th editor layer + in-game runtime. 8 settings (volumes, offset, note speed, dim, FPS, language), tap-to-calibrate audio-offset wizard, shared `SettingsPageUI` across editor / Test Game / Android runtime.
+- **Material system (Phases 1–4)** — per-slot material overrides (Unlit / Glow / Scroll / Pulse / Gradient / Custom) on all 5 modes, `QuadBatch` + `MeshRenderer` pipeline-per-kind, 128 B push constants, promoted to **project-level `.mat` assets** with auto-migration, and a runtime `ShaderCompiler` that accepts custom `.frag` per material.
+- **Arcaea 3D visual refresh** — hexagonal-prism arcs with outward-radial normals, rectangular-prism arctaps, flat ground shadows for both. Restart-from-pause freeze fixed (`GameClock::resume` in `launchGameplay`).
+- **Autocharter Phase 1+2** — feature-driven Place All. `AudioAnalyzer` emits per-marker strength/sustain/centroid; `SongEditor` picks note type + lane with anti-jack cooldown. New AI... gear popup exposes the knobs.
+- **Editor Copilot** — natural-language chart edits via local Ollama (default `qwen2.5:3b`) or any OpenAI-compatible endpoint. 6 ops (delete_range / insert / mirror_lanes / shift_lanes / shift_time / convert_type), single-level undo, Copilot panel in SongEditor Properties.
+
+**2026-04-17**
+- **3D Drop (Arcaea) end-to-end rebuild** — single-source-of-truth playfield constants, Bandori-style slot lane mapping with auto-expand, rectangle judgment gate, smooth per-frame arc clipping via host-mapped vertex buffer, world-space hit particles with lane-vs-sky-event routing.
+- **Scan Line editor redesign** — paginated page-based authoring (one sweep = one page), per-page speed overrides, AI marker integration, cursor-follow scan line, auto page turning during playback and at page edges.
+- **Arc editor multi-waypoint rework** — click-to-place workflow, chain merging on import, per-waypoint height handles.
 
 **2026-04-12**
 - **Arc/ArcTap editor** — 3-panel editing for Arcaea-style arcs: timeline ribbons (click-drag create), height curve editor (draggable start/end Y handles), cross-section preview (front-face view with arc dots). Full JSON round-trip, ArcaeaRenderer renders arc ribbons + diamond ArcTaps.

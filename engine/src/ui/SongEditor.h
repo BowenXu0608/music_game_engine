@@ -9,6 +9,8 @@
 #include "renderer/vulkan/TextureManager.h"
 #include <vulkan/vulkan.h>
 #include <GLFW/glfw3.h>
+#include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 #include <unordered_map>
@@ -104,6 +106,9 @@ class ImGuiLayer;
 
 class SongEditor {
 public:
+    SongEditor();
+    ~SongEditor();
+
     void render(Engine* engine);
 
     void initVulkan(VulkanContext& ctx, BufferManager& bufMgr, ImGuiLayer& imgui,
@@ -130,6 +135,27 @@ private:
     void reloadChartsForCurrentMode();
     void loadChartFile(Difficulty diff, const std::string& chartRel);
 
+    // ── AI Place-All inference ───────────────────────────────────────────────
+    // Pick note type + duration from a marker's audio features.
+    //   flickThreshold — strength >= this becomes Flick (pass 1e9 to disable)
+    //   supportsHold   — soft + sustained onsets become Hold
+    //   holdMinSec     — minimum sustain (s) for a marker to become a Hold
+    // Returns type in .type, Hold duration in .duration (0 for non-Hold).
+    struct InferredType { EditorNoteType type = EditorNoteType::Tap; float duration = 0.f; };
+    InferredType inferNoteType(const MarkerFeature& f,
+                               float flickThreshold, bool supportsHold,
+                               float holdMinSec) const;
+
+    // Song-adaptive Flick threshold: the pct-th percentile of |features|
+    // strengths. Returns a very large value when supportsFlick is false.
+    float computeFlickThreshold(const std::vector<MarkerFeature>& feats,
+                                bool supportsFlick, float pct) const;
+
+    // Centroid → lane. If antiJack is true and the mapped lane equals
+    // prevLane, shift by ±1 (wraps at edges). Returns -1 if laneCount <= 0.
+    int inferLaneFromCentroid(float centroid, int laneCount, int prevLane,
+                              bool antiJack) const;
+
     SongInfo*      m_song        = nullptr;
     std::string    m_projectPath;
 
@@ -137,6 +163,7 @@ private:
     BufferManager* m_bufMgr = nullptr;
     ImGuiLayer*    m_imgui  = nullptr;
     GLFWwindow*    m_window = nullptr;
+    Engine*        m_engineCached = nullptr;  // refreshed each frame in render()
 
     // ── Panel split ──────────────────────────────────────────────────────────
     float m_sidebarW  = 280.f;  // Left sidebar width in pixels (draggable)
@@ -174,6 +201,9 @@ private:
     // ── Note editing (per-difficulty) ────────────────────────────────────────
     std::unordered_map<int, std::vector<EditorNote>> m_diffNotes;   // key = (int)Difficulty
     std::unordered_map<int, std::vector<float>>      m_diffMarkers; // key = (int)Difficulty
+    // AI per-marker features — parallel to m_diffMarkers. Populated by
+    // the analyzer, consumed by Place All to infer note type + lane.
+    std::unordered_map<int, std::vector<MarkerFeature>> m_diffFeatures;
 
     // Per-difficulty material-slot overrides. Keyed by slot id; values carry
     // the kind/tint/params/texture the user has set for that slot.
@@ -182,8 +212,10 @@ private:
     // Convenience accessors for the current difficulty's data
     std::vector<EditorNote>& notes()         { return m_diffNotes[(int)m_currentDifficulty]; }
     std::vector<float>&      markers()       { return m_diffMarkers[(int)m_currentDifficulty]; }
+    std::vector<MarkerFeature>& features()   { return m_diffFeatures[(int)m_currentDifficulty]; }
     const std::vector<EditorNote>& notes()   const { return const_cast<SongEditor*>(this)->m_diffNotes[(int)m_currentDifficulty]; }
     const std::vector<float>&      markers() const { return const_cast<SongEditor*>(this)->m_diffMarkers[(int)m_currentDifficulty]; }
+    const std::vector<MarkerFeature>& features() const { return const_cast<SongEditor*>(this)->m_diffFeatures[(int)m_currentDifficulty]; }
     std::unordered_map<uint16_t, ChartData::MaterialData>& materialsForDiff() {
         return m_diffMaterials[(int)m_currentDifficulty];
     }
@@ -373,6 +405,34 @@ private:
     // ── Dynamic BPM map (from audio analysis) ────────────────────────────────
     std::vector<BpmChange> m_bpmChanges;   // tempo sections detected by AI
     float m_dominantBpm = 0.f;             // most common BPM
+
+    // ── Editor Copilot (natural-language chart edits, pimpl-hidden) ──────────
+    // Implementation in SongEditor.cpp — see CopilotState.
+    struct CopilotState;
+    std::unique_ptr<CopilotState> m_copilot;
+    void renderCopilotPanel();
+    void pollCopilot();
+
+    // ── Chart Audit (read-only quality review, pimpl-hidden) ────────────────
+    // Implementation in SongEditor.cpp — see AuditState.
+    struct AuditState;
+    std::unique_ptr<AuditState> m_audit;
+    void renderAuditPanel();
+    void pollAudit();
+
+    // ── Style Transfer (reference-driven rebalance, pimpl-hidden) ───────────
+    // Implementation in SongEditor.cpp — see StyleState.
+    struct StyleState;
+    std::unique_ptr<StyleState> m_style;
+    void renderStylePanel();
+    void pollStyle();
+
+    // ── AI Place-All tuning (session-local; not persisted) ───────────────────
+    float m_autoFlickPct      = 0.88f;  // 0.5..1.0 — strength percentile → Flick
+    float m_autoHoldMin       = 0.20f;  // 0.05..0.80 — sustain seconds → Hold
+    bool  m_autoAntiJack      = true;   // nudge same-lane repeats
+    float m_autoLaneCooldownMs = 80.f;  // 0..400 — min ms between notes on same lane
+    float m_autoScanTimeGapMs  = 60.f;  // 0..300 — min ms between any two ScanLine notes
 
     // ── Test Game popup ──────────────────────────────────────────────────────
     bool m_showTestError = false;

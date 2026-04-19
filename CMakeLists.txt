@@ -10,12 +10,14 @@ find_package(Vulkan REQUIRED)
 # ── Third-party paths ────────────────────────────────────────────────────────
 set(TP ${CMAKE_CURRENT_SOURCE_DIR}/third_party)
 
-set(GLFW_INCLUDE_DIR  "${TP}/glfw/include")
-set(GLFW_LIBRARY      "${TP}/glfw/lib-vc2022/glfw3.lib")
-set(GLM_INCLUDE_DIR   "${TP}/glm_extracted")
-set(VMA_INCLUDE_DIR   "${TP}/vma")
-set(STB_INCLUDE_DIR   "${TP}/stb")
-set(IMGUI_DIR         "${TP}/imgui")
+set(GLFW_INCLUDE_DIR     "${TP}/glfw/include")
+set(GLFW_LIBRARY         "${TP}/glfw/lib-vc2022/glfw3.lib")
+set(GLM_INCLUDE_DIR      "${TP}/glm_extracted")
+set(VMA_INCLUDE_DIR      "${TP}/vma")
+set(STB_INCLUDE_DIR      "${TP}/stb")
+set(IMGUI_DIR            "${TP}/imgui")
+set(HTTPLIB_INCLUDE_DIR  "${TP}/httplib")
+set(NLOHMANN_INCLUDE_DIR "${TP}/nlohmann")
 
 # ── Sources ──────────────────────────────────────────────────────────────────
 file(GLOB_RECURSE ENGINE_SOURCES
@@ -28,6 +30,7 @@ file(GLOB_RECURSE ENGINE_SOURCES
     engine/src/gameplay/*.cpp
     engine/src/engine/*.cpp
     engine/src/ui/*.cpp
+    engine/src/editor/*.cpp
     engine/src/input/*.cpp
 )
 
@@ -54,12 +57,19 @@ target_include_directories(MusicGameEngine PUBLIC
     ${STB_INCLUDE_DIR}
     ${IMGUI_DIR}
     ${IMGUI_DIR}/backends
+    ${HTTPLIB_INCLUDE_DIR}
+    ${NLOHMANN_INCLUDE_DIR}
 )
 
 target_link_libraries(MusicGameEngine PUBLIC
     ${Vulkan_LIBRARIES}
     ${GLFW_LIBRARY}
 )
+
+# cpp-httplib needs winsock on Windows
+if(WIN32)
+    target_link_libraries(MusicGameEngine PUBLIC ws2_32)
+endif()
 
 # ── Windows defines ──────────────────────────────────────────────────────────
 target_compile_definitions(MusicGameEngine PUBLIC
