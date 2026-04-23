@@ -1,8 +1,11 @@
 #include "MusicSelectionEditor.h"
 #include "SettingsPageUI.h"
+#include "StartScreenEditor.h"
 #include "engine/Engine.h"
+#include "renderer/MaterialAssetLibrary.h"
 #include "renderer/vulkan/VulkanContext.h"
 #include "renderer/vulkan/BufferManager.h"
+#include "ui/PreviewAspect.h"
 #include <imgui_internal.h>
 #include <imgui.h>
 #include <nlohmann/json.hpp>
@@ -137,6 +140,10 @@ void MusicSelectionEditor::load(const std::string& projectPath) {
     json j;
     try { j = json::parse(f); } catch (...) { m_loaded = true; return; }
 
+    m_pageBackground = j.value("background", "");
+    m_fcImage        = j.value("fcImage", "");
+    m_apImage        = j.value("apImage", "");
+
     if (j.contains("sets") && j["sets"].is_array()) {
         for (auto& sj : j["sets"]) {
             MusicSetInfo set;
@@ -154,6 +161,14 @@ void MusicSelectionEditor::load(const std::string& projectPath) {
                     song.chartHard   = songJ.value("chartHard", "");
                     song.score       = songJ.value("score", 0);
                     song.achievement = songJ.value("achievement", "");
+                    song.scoreEasy         = songJ.value("scoreEasy",   0);
+                    song.scoreMedium       = songJ.value("scoreMedium", 0);
+                    song.scoreHard         = songJ.value("scoreHard",   0);
+                    song.achievementEasy   = songJ.value("achievementEasy",   "");
+                    song.achievementMedium = songJ.value("achievementMedium", "");
+                    song.achievementHard   = songJ.value("achievementHard",   "");
+                    song.previewStart      = songJ.value("previewStart",   -1.f);
+                    song.previewDuration   = songJ.value("previewDuration", 30.f);
                     // per-song game mode config
                     if (songJ.contains("gameMode") && songJ["gameMode"].is_object()) {
                         auto& gm = songJ["gameMode"];
@@ -251,6 +266,14 @@ void MusicSelectionEditor::save() {
             songJ["chartHard"]   = song.chartHard;
             songJ["score"]       = song.score;
             songJ["achievement"] = song.achievement;
+            songJ["scoreEasy"]         = song.scoreEasy;
+            songJ["scoreMedium"]       = song.scoreMedium;
+            songJ["scoreHard"]         = song.scoreHard;
+            songJ["achievementEasy"]   = song.achievementEasy;
+            songJ["achievementMedium"] = song.achievementMedium;
+            songJ["achievementHard"]   = song.achievementHard;
+            songJ["previewStart"]      = song.previewStart;
+            songJ["previewDuration"]   = song.previewDuration;
             // per-song game mode config
             json gmJ;
             switch (song.gameMode.type) {
@@ -310,10 +333,83 @@ void MusicSelectionEditor::save() {
         sj["songs"] = songsArr;
         setsArr.push_back(sj);
     }
-    j["sets"] = setsArr;
+    j["sets"]       = setsArr;
+    j["background"] = m_pageBackground;
+    j["fcImage"]    = m_fcImage;
+    j["apImage"]    = m_apImage;
 
     std::ofstream out(m_projectPath + "/music_selection.json");
     if (out.is_open()) out << j.dump(2);
+}
+
+// ── Audio preview ────────────────────────────────────────────────────────────
+//
+// Plays a ~30 s clip from `previewStart` of the currently-selected song
+// after the selection "dwells" for a short moment (~500 ms). Changing the
+// selection restarts the dwell; after `previewDuration` seconds we stop.
+
+void MusicSelectionEditor::updateAudioPreview(float dt) {
+    if (!m_engine) return;
+    // Preview audio is only meant for the real game and the editor's
+    // full-screen test-game mode — not the small editor preview box.
+    if (!m_engine->isTestMode()) {
+        if (m_previewPlaying) {
+            m_engine->audio().stop();
+            m_previewPlaying = false;
+        }
+        m_previewDwellT = 0.f;
+        m_previewStopT  = 0.f;
+        return;
+    }
+    AudioEngine& ae = m_engine->audio();
+
+    // Did the selection change since the last frame? If yes, reset dwell.
+    if (m_selectedSet != m_previewSetIdx ||
+        m_selectedSong != m_previewSongIdx) {
+        if (m_previewPlaying) {
+            ae.stop();
+            m_previewPlaying = false;
+        }
+        m_previewSetIdx  = m_selectedSet;
+        m_previewSongIdx = m_selectedSong;
+        m_previewDwellT  = 0.f;
+        m_previewStopT   = 0.f;
+        return;
+    }
+
+    if (m_selectedSet < 0 || m_selectedSet >= (int)m_sets.size()) return;
+    auto& set = m_sets[m_selectedSet];
+    if (m_selectedSong < 0 || m_selectedSong >= (int)set.songs.size()) return;
+    const auto& song = set.songs[m_selectedSong];
+    if (song.audioFile.empty()) return;
+
+    if (!m_previewPlaying) {
+        // Dwell before loading audio so fast scrolling doesn't churn the
+        // decoder on every song the user flies past.
+        m_previewDwellT += dt;
+        if (m_previewDwellT < 0.5f) return;
+
+        std::string full = m_projectPath + "/" + song.audioFile;
+        if (m_previewPath != full) {
+            if (!ae.load(full)) return;
+            m_previewPath = full;
+        }
+        float start = song.previewStart;
+        if (start < 0.f) {
+            // Fallback: 25% of duration so we land somewhere past the intro.
+            double dur = ae.durationSeconds();
+            start = (float)(dur * 0.25);
+        }
+        ae.playFrom((double)start);
+        m_previewPlaying = true;
+        m_previewStopT   = song.previewDuration;
+    } else {
+        m_previewStopT -= dt;
+        if (m_previewStopT <= 0.f) {
+            ae.stop();
+            m_previewPlaying = false;
+        }
+    }
 }
 
 // ── Accessor ─────────────────────────────────────────────────────────────────
@@ -336,6 +432,22 @@ void MusicSelectionEditor::render(Engine* engine) {
     float lerpSpeed = 8.f;
     m_setScrollCurrent  += (m_setScrollTarget  - m_setScrollCurrent)  * std::min(1.f, lerpSpeed * dt);
     m_songScrollCurrent += (m_songScrollTarget - m_songScrollCurrent) * std::min(1.f, lerpSpeed * dt);
+
+    // Default selection: on first entry after load, pick the first song of
+    // the first set so the scene shows something by default.
+    if (m_selectedSet < 0 && !m_sets.empty()) {
+        m_selectedSet     = 0;
+        m_setScrollTarget = 0.f;
+        if (!m_sets[0].songs.empty()) {
+            m_selectedSong     = 0;
+            m_songScrollTarget = 0.f;
+        }
+    }
+
+    // Audio preview for the dwelling selection. After a short dwell we load
+    // the song's audio and start playing from its previewStart. Changing
+    // selection resets the timer; after previewDuration we stop playback.
+    updateAudioPreview(dt);
 
     // ── Test mode: full-screen music selection ─────────────────────────────────
     if (engine && engine->isTestMode()) {
@@ -476,12 +588,6 @@ void MusicSelectionEditor::render(Engine* engine) {
         m_statusMsg   = "Saved!";
         m_statusTimer = 2.f;
     }
-    ImGui::SameLine();
-    if (ImGui::Button("Load")) {
-        load(m_projectPath);
-        m_statusMsg   = "Loaded!";
-        m_statusTimer = 2.f;
-    }
     if (m_statusTimer > 0.f) {
         ImGui::SameLine();
         ImGui::TextColored(ImVec4(0.4f, 1.f, 0.4f, 1.f), "%s", m_statusMsg.c_str());
@@ -495,24 +601,96 @@ void MusicSelectionEditor::render(Engine* engine) {
     }
 
     ImGui::End();
+
 }
 
 // ── renderPreview ────────────────────────────────────────────────────────────
 
 void MusicSelectionEditor::renderPreview(float width, float height) {
 
-    ImVec2 avail = ImGui::GetContentRegionAvail();
-    ImDrawList* dl = ImGui::GetWindowDrawList();
-    ImVec2 p = ImGui::GetCursorScreenPos();
-    float pw = avail.x, ph = avail.y;
+    // Aspect-ratio controls so authors preview the song wheel at the final
+    // device's shape. Shares state with the Start Screen editor.
+    if (m_engine)
+        previewAspect::renderControls(m_engine->previewAspect());
+    ImGui::Spacing();
 
-    // Dark background
-    dl->AddRectFilled(p, ImVec2(p.x + pw, p.y + ph), IM_COL32(20, 22, 30, 255));
+    ImVec2 avail = ImGui::GetContentRegionAvail();
+    previewAspect::FitResult fit = m_engine
+        ? previewAspect::fitAndLetterbox(m_engine->previewAspect(), avail)
+        : previewAspect::FitResult{ImGui::GetCursorScreenPos(), avail};
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    ImVec2 p = fit.origin;
+    float pw = fit.size.x, ph = fit.size.y;
+
+    // Clip wheel/cover/button draws to the letterbox rect so nothing leaks
+    // into the dark bars when the author picks a narrow aspect.
+    dl->PushClipRect(p, ImVec2(p.x + pw, p.y + ph), true);
+
+    // ── Background ──────────────────────────────────────────────────────────
+    VkDescriptorSet pageBg = m_pageBackground.empty()
+        ? VK_NULL_HANDLE : getThumb(m_pageBackground);
+    if (pageBg) {
+        // Draw the user's image filling the scene.
+        dl->AddImage((ImTextureID)(uint64_t)pageBg, p,
+                     ImVec2(p.x + pw, p.y + ph));
+
+        // Frosted-glass overlay — approximated by layering semi-transparent
+        // dark panels whose opacity varies horizontally. We split the width
+        // into three horizontal bands (left wheel, center stack, right wheel)
+        // and draw each with its own alpha so the middle feels less frosted
+        // than the sides. Gradient edges smooth the transitions.
+        const float wheelW = pw * 0.18f;
+        const ImU32 frostHeavy  = IM_COL32(20, 22, 30, 190); // sides
+        const ImU32 frostLight  = IM_COL32(20, 22, 30,  55); // middle
+        const float fadeW       = 18.f;                      // narrow transition
+
+        // Left: solid heavy band
+        dl->AddRectFilled(p, ImVec2(p.x + wheelW, p.y + ph), frostHeavy);
+        // Transition left → middle
+        dl->AddRectFilledMultiColor(
+            ImVec2(p.x + wheelW,         p.y),
+            ImVec2(p.x + wheelW + fadeW, p.y + ph),
+            frostHeavy, frostLight, frostLight, frostHeavy);
+        // Middle: light
+        dl->AddRectFilled(ImVec2(p.x + wheelW + fadeW,      p.y),
+                          ImVec2(p.x + pw - wheelW - fadeW, p.y + ph),
+                          frostLight);
+        // Transition middle → right
+        dl->AddRectFilledMultiColor(
+            ImVec2(p.x + pw - wheelW - fadeW, p.y),
+            ImVec2(p.x + pw - wheelW,         p.y + ph),
+            frostLight, frostHeavy, frostHeavy, frostLight);
+        // Right: solid heavy band
+        dl->AddRectFilled(ImVec2(p.x + pw - wheelW, p.y),
+                          ImVec2(p.x + pw,          p.y + ph),
+                          frostHeavy);
+
+        // Soft dark shadow on the middle-facing side of each panel gives
+        // the boundary depth without drawing a hard bright line.
+        const ImU32 edgeLo = IM_COL32(0, 0, 0, 140);
+        float lx = p.x + wheelW;
+        float rx = p.x + pw - wheelW;
+        dl->AddLine(ImVec2(lx, p.y), ImVec2(lx, p.y + ph), edgeLo, 2.f);
+        dl->AddLine(ImVec2(rx, p.y), ImVec2(rx, p.y + ph), edgeLo, 2.f);
+
+        // Subtle top/bottom vignette so text pops against busy backgrounds.
+        const ImU32 tVignette = IM_COL32(0, 0, 0,  90);
+        const ImU32 bVignette = IM_COL32(0, 0, 0,  50);
+        dl->AddRectFilledMultiColor(p, ImVec2(p.x + pw, p.y + ph * 0.18f),
+                                    tVignette, tVignette, 0, 0);
+        dl->AddRectFilledMultiColor(
+            ImVec2(p.x,      p.y + ph * 0.82f),
+            ImVec2(p.x + pw, p.y + ph),
+            0, 0, bVignette, bVignette);
+    } else {
+        // No background set — fall back to the flat dark fill.
+        dl->AddRectFilled(p, ImVec2(p.x + pw, p.y + ph), IM_COL32(20, 22, 30, 255));
+    }
 
     // Layout proportions
     float wheelW     = pw * 0.18f;   // each wheel column
     float centerW    = pw - wheelW * 2.f;
-    float coverSize  = std::min(centerW * 0.7f, ph * 0.50f);
+    float coverSize  = std::min(centerW * 0.7f, ph * 0.55f);
 
     // ── Left wheel: Music Sets ───────────────────────────────────────────────
     renderSetWheel(ImVec2(p.x, p.y), wheelW, ph);
@@ -520,21 +698,28 @@ void MusicSelectionEditor::renderPreview(float width, float height) {
     // ── Right wheel: Songs ───────────────────────────────────────────────────
     renderSongWheel(ImVec2(p.x + pw - wheelW, p.y), wheelW, ph);
 
-    // ── Center: Cover photo ──────────────────────────────────────────────────
+    // ── Center: Cover + difficulty + play, centered vertically ──────────────
+    const float diffGap   = std::max(ph * 0.04f, 28.f);
+    const float playGap   = 50.f;
+    const float diffRowH  = 48.f;   // matches renderDifficultyButtons
+    const float playRowH  = 60.f;   // matches renderPlayButton
+    float stackH  = coverSize + diffGap + diffRowH + playGap + playRowH;
     float centerX = p.x + wheelW + centerW * 0.5f;
-    float coverY  = p.y + ph * 0.08f;
+    float stackTop = p.y + (ph - stackH) * 0.5f;
+    float coverY   = stackTop;
     renderCoverPhoto(ImVec2(centerX, coverY), coverSize);
 
-    // ── Difficulty buttons ───────────────────────────────────────────────────
-    float diffY = coverY + coverSize + ph * 0.04f;
+    float diffY = coverY + coverSize + diffGap;
     renderDifficultyButtons(ImVec2(centerX, diffY), centerW);
 
-    // ── Play button ──────────────────────────────────────────────────────────
-    float playY = diffY + 50.f;
+    float playY = diffY + playGap;
     renderPlayButton(ImVec2(centerX, playY), centerW);
 
-    // Reserve the space so ImGui knows we used it
-    ImGui::Dummy(avail);
+    // Preview toggle is handled inside renderSongWheel — when on, every
+    // song card renders both rhombus slots as "unlocked" so the author can
+    // judge how the badge images fill the real slots.
+
+    dl->PopClipRect();
 }
 
 // ── renderGamePreview ────────────────────────────────────────────────────────
@@ -543,8 +728,41 @@ void MusicSelectionEditor::renderGamePreview(ImVec2 p, ImVec2 size) {
     ImDrawList* dl = ImGui::GetWindowDrawList();
     float pw = size.x, ph = size.y;
 
-    // Dark background
-    dl->AddRectFilled(p, ImVec2(p.x + pw, p.y + ph), IM_COL32(20, 22, 30, 255));
+    // Page background + frosted overlay (see renderPreview for the layering
+    // rationale — middle stays readable, sides feel heavier).
+    VkDescriptorSet pageBg = m_pageBackground.empty()
+        ? VK_NULL_HANDLE : getThumb(m_pageBackground);
+    if (pageBg) {
+        dl->AddImage((ImTextureID)(uint64_t)pageBg, p,
+                     ImVec2(p.x + pw, p.y + ph));
+        const float wheelWBand = pw * 0.18f;
+        const ImU32 frostHeavy = IM_COL32(20, 22, 30, 190);
+        const ImU32 frostLight = IM_COL32(20, 22, 30,  55);
+        const float fadeW      = 18.f;
+        dl->AddRectFilled(p, ImVec2(p.x + wheelWBand, p.y + ph), frostHeavy);
+        dl->AddRectFilledMultiColor(
+            ImVec2(p.x + wheelWBand,         p.y),
+            ImVec2(p.x + wheelWBand + fadeW, p.y + ph),
+            frostHeavy, frostLight, frostLight, frostHeavy);
+        dl->AddRectFilled(ImVec2(p.x + wheelWBand + fadeW,      p.y),
+                          ImVec2(p.x + pw - wheelWBand - fadeW, p.y + ph),
+                          frostLight);
+        dl->AddRectFilledMultiColor(
+            ImVec2(p.x + pw - wheelWBand - fadeW, p.y),
+            ImVec2(p.x + pw - wheelWBand,         p.y + ph),
+            frostLight, frostHeavy, frostHeavy, frostLight);
+        dl->AddRectFilled(ImVec2(p.x + pw - wheelWBand, p.y),
+                          ImVec2(p.x + pw,               p.y + ph),
+                          frostHeavy);
+
+        const ImU32 edgeLo = IM_COL32(0, 0, 0, 140);
+        float lx = p.x + wheelWBand;
+        float rx = p.x + pw - wheelWBand;
+        dl->AddLine(ImVec2(lx, p.y), ImVec2(lx, p.y + ph), edgeLo, 2.f);
+        dl->AddLine(ImVec2(rx, p.y), ImVec2(rx, p.y + ph), edgeLo, 2.f);
+    } else {
+        dl->AddRectFilled(p, ImVec2(p.x + pw, p.y + ph), IM_COL32(20, 22, 30, 255));
+    }
 
     float wheelW    = pw * 0.18f;
     float centerW   = pw - wheelW * 2.f;
@@ -849,48 +1067,128 @@ void MusicSelectionEditor::renderSongWheel(ImVec2 origin, float width, float hei
                               IM_COL32(80, 40, 60, (int)(200 * alphaFactor)));
         }
 
-        // Text area: right portion of card
+        // Clip all card interior to the card's bounding rect so long song
+        // names, oversized badges, etc. can never paint past the edges.
+        ImVec2 cardMin(std::min({tl.x, tr.x, br.x, bl.x}),
+                        std::min({tl.y, tr.y, br.y, bl.y}));
+        ImVec2 cardMax(std::max({tl.x, tr.x, br.x, bl.x}),
+                        std::max({tl.y, tr.y, br.y, bl.y}));
+        dl->PushClipRect(cardMin, cardMax, true);
+
+        // Card interior layout:
+        //   [cover  0..thumbFrac]  [text column]  [two rhombus badges]
+        // Rhombus area is sized first (so it always fits); whatever width
+        // is left after the cover + rhombus pair becomes the text column.
         float quadCX = (tl.x + tr.x + br.x + bl.x) * 0.25f;
         float quadCY = (tl.y + tr.y + br.y + bl.y) * 0.25f;
-        float textOffsetX = sw * thumbFrac * 0.5f;
-        float textBaseX = quadCX + textOffsetX;
 
-        // Song name
+        float cardW      = sw * 2.f;
+        float coverW     = cardW * thumbFrac;
+        float padding    = sw * 0.04f;
+        // Rhombus sized to leave vertical padding inside the card; the pair
+        // overlaps by 25%, so visual width ≈ rhombusH * 1.75.
+        float rhombusH   = std::min(sh * 1.60f, cardW * 0.20f);
+        float rhombusW   = rhombusH;
+        float overlap    = rhombusW * 0.25f;
+        float rhombusPairW = rhombusW + (rhombusW - overlap); // ~1.75 * W
+        float rhombusAreaW = rhombusPairW + padding;
+
+        // Text column spans what's left between cover and rhombus area.
+        float textColLeft  = tl.x + coverW + padding;
+        float textColRight = tr.x - rhombusAreaW;
+        if (textColRight < textColLeft + 10.f)
+            textColRight = textColLeft + 10.f;
+        float textBaseX    = (textColLeft + textColRight) * 0.5f;
+        float textColW     = textColRight - textColLeft;
+
+        // Per-difficulty score + achievement.
+        int diffScore = 0;
+        const std::string* diffAch = nullptr;
+        switch (m_selectedDifficulty) {
+            case Difficulty::Easy:
+                diffScore = song.scoreEasy;   diffAch = &song.achievementEasy;   break;
+            case Difficulty::Medium:
+                diffScore = song.scoreMedium; diffAch = &song.achievementMedium; break;
+            case Difficulty::Hard:
+                diffScore = song.scoreHard;   diffAch = &song.achievementHard;   break;
+        }
+
+        VkDescriptorSet fcTex = m_fcImage.empty()
+            ? VK_NULL_HANDLE : getThumb(m_fcImage);
+        VkDescriptorSet apTex = m_apImage.empty()
+            ? VK_NULL_HANDLE : getThumb(m_apImage);
+
+        bool fcUnlocked = false, apUnlocked = false;
+        if (diffAch && !diffAch->empty()) {
+            std::string low = *diffAch;
+            for (char& c : low) c = (char)std::tolower((unsigned char)c);
+            if      (low == "ap") { fcUnlocked = true; apUnlocked = true; }
+            else if (low == "fc") { fcUnlocked = true; }
+        }
+        // Preview toggle: force both slots lit so the engine author can
+        // see how their uploaded badge images read in the real rhombus.
+        if (m_showAchievementPreview) { fcUnlocked = true; apUnlocked = true; }
+
+        // Name + score stacked in the card's text column; two rhombus
+        // badge slots sit to the RIGHT of that column.
         const char* songName = song.name.c_str();
-        ImVec2 nameSz = ImGui::CalcTextSize(songName);
-        dl->AddText(ImVec2(textBaseX - nameSz.x * 0.5f, quadCY - sh * 0.5f),
+        ImVec2 nameSz  = ImGui::CalcTextSize(songName);
+        char scoreBuf[32];
+        snprintf(scoreBuf, sizeof(scoreBuf), "%d", diffScore);
+        ImVec2 scoreSz = ImGui::CalcTextSize(scoreBuf);
+
+        float nameY  = quadCY - sh * 0.32f;
+        float scoreY = quadCY + sh * 0.12f;
+        // Rhombus pair anchored at the right edge of the interior.
+        float rhombusRight = tr.x - padding;
+        float apCX = rhombusRight - rhombusW * 0.5f;
+        float fcCX = apCX - (rhombusW - overlap);
+        float rhombusCY = quadCY;
+
+        auto drawRhombusSlot = [&](float cx, float cy,
+                                    VkDescriptorSet tex, bool unlocked,
+                                    ImU32 fillCol) {
+            float hw = rhombusW * 0.5f;
+            float hh = rhombusH * 0.5f;
+            ImVec2 pN(cx,      cy - hh);
+            ImVec2 pE(cx + hw, cy);
+            ImVec2 pS(cx,      cy + hh);
+            ImVec2 pW(cx - hw, cy);
+
+            ImU32 back = unlocked
+                ? fillCol
+                : IM_COL32(45, 48, 60, (int)(180 * alphaFactor));
+            dl->AddQuadFilled(pN, pE, pS, pW, back);
+
+            if (tex) {
+                int a = unlocked ? (int)(230 * alphaFactor)
+                                  : (int)( 60 * alphaFactor);
+                dl->AddImageQuad((ImTextureID)(uint64_t)tex, pN, pE, pS, pW,
+                                  ImVec2(0.5f, 0),   ImVec2(1, 0.5f),
+                                  ImVec2(0.5f, 1),   ImVec2(0, 0.5f),
+                                  IM_COL32(255, 255, 255, a));
+            }
+
+            ImU32 outline = unlocked
+                ? IM_COL32(255, 255, 255, (int)(200 * alphaFactor))
+                : IM_COL32(150, 150, 170, (int)(140 * alphaFactor));
+            dl->AddQuad(pN, pE, pS, pW, outline, 1.5f);
+        };
+
+        drawRhombusSlot(fcCX, rhombusCY, fcTex, fcUnlocked,
+                         IM_COL32( 40, 110, 150, (int)(170 * alphaFactor)));
+        drawRhombusSlot(apCX, rhombusCY, apTex, apUnlocked,
+                         IM_COL32(150, 120,  40, (int)(170 * alphaFactor)));
+
+        // Text drawn on top of the rhombus backdrop.
+        dl->AddText(ImVec2(textBaseX - nameSz.x * 0.5f, nameY),
                     IM_COL32(240, 240, 250, (int)(255 * alphaFactor)),
                     songName);
-
-        // Score
-        char scoreBuf[32];
-        snprintf(scoreBuf, sizeof(scoreBuf), "%d", song.score);
-        ImVec2 scoreSz = ImGui::CalcTextSize(scoreBuf);
-        dl->AddText(ImVec2(textBaseX - scoreSz.x * 0.5f, quadCY + 2.f),
-                    IM_COL32(200, 200, 220, (int)(200 * alphaFactor)),
+        dl->AddText(ImVec2(textBaseX - scoreSz.x * 0.5f, scoreY),
+                    IM_COL32(200, 200, 220, (int)(220 * alphaFactor)),
                     scoreBuf);
 
-        // Achievement badge (top-right corner of card)
-        if (!song.achievement.empty()) {
-            const char* achText = song.achievement.c_str();
-            ImVec2 achSz = ImGui::CalcTextSize(achText);
-            float badgeW = achSz.x + 8.f;
-            float badgeH = achSz.y + 4.f;
-            float bx = tr.x - badgeW - 4.f;
-            float by = tr.y + 4.f;
-
-            ImU32 badgeCol;
-            if (song.achievement == "AP")
-                badgeCol = IM_COL32(255, 215, 0, (int)(230 * alphaFactor));    // gold
-            else if (song.achievement == "FC")
-                badgeCol = IM_COL32(0, 200, 120, (int)(230 * alphaFactor));    // green
-            else
-                badgeCol = IM_COL32(140, 140, 160, (int)(200 * alphaFactor));  // gray
-
-            dl->AddRectFilled(ImVec2(bx, by), ImVec2(bx + badgeW, by + badgeH), badgeCol, 3.f);
-            dl->AddText(ImVec2(bx + 4.f, by + 2.f),
-                        IM_COL32(255, 255, 255, (int)(255 * alphaFactor)), achText);
-        }
+        dl->PopClipRect();
 
         // Click target
         float minX = std::min({tl.x, tr.x, br.x, bl.x});
@@ -972,6 +1270,8 @@ void MusicSelectionEditor::renderCoverPhoto(ImVec2 origin, float size) {
         dl->AddText(ImVec2(origin.x - labelSz.x * 0.5f, br.y + 6.f),
                     IM_COL32(220, 220, 240, 255), label.c_str());
     }
+    // Achievement badge lives on the song wheel card (next to the score),
+    // see renderSongWheel.
 }
 
 // ── Difficulty buttons ───────────────────────────────────────────────────────
@@ -1119,6 +1419,129 @@ void MusicSelectionEditor::renderPlayButton(ImVec2 origin, float width) {
 void MusicSelectionEditor::renderHierarchy(float width, float height) {
     ImGui::Text("Hierarchy");
     ImGui::Separator();
+
+    // ── Page background (drawn behind the whole scene) ──────────────────────
+    // Frosted-glass overlay kicks in automatically when a background is set.
+    {
+        ImGui::TextUnformatted("Page Background:");
+        const float zoneW = ImGui::GetContentRegionAvail().x - 74.f;
+        const float zoneH = 40.f;
+        ImVec2 zonePos = ImGui::GetCursorScreenPos();
+        ImGui::InvisibleButton("##pagebgzone", ImVec2(zoneW, zoneH));
+        ImDrawList* dlBg = ImGui::GetWindowDrawList();
+        VkDescriptorSet bgDesc = m_pageBackground.empty()
+            ? VK_NULL_HANDLE : getThumb(m_pageBackground);
+        ImU32 border = ImGui::IsItemHovered()
+            ? IM_COL32(100, 160, 255, 255) : IM_COL32(100, 100, 120, 180);
+        if (bgDesc) {
+            dlBg->AddImage((ImTextureID)(uint64_t)bgDesc, zonePos,
+                           ImVec2(zonePos.x + zoneW, zonePos.y + zoneH));
+        } else {
+            dlBg->AddRectFilled(zonePos, ImVec2(zonePos.x + zoneW, zonePos.y + zoneH),
+                                IM_COL32(30, 30, 45, 180), 4.f);
+            const char* hint = "Drop background image here";
+            ImVec2 tsz = ImGui::CalcTextSize(hint);
+            dlBg->AddText(ImVec2(zonePos.x + zoneW * 0.5f - tsz.x * 0.5f,
+                                 zonePos.y + zoneH * 0.5f - tsz.y * 0.5f),
+                          IM_COL32(120, 120, 140, 200), hint);
+        }
+        dlBg->AddRect(zonePos, ImVec2(zonePos.x + zoneW, zonePos.y + zoneH),
+                      border, 4.f, 0, 1.5f);
+        if (ImGui::BeginDragDropTarget()) {
+            if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("ASSET_PATH")) {
+                std::string rel(static_cast<const char*>(payload->Data),
+                                payload->DataSize - 1);
+                m_pageBackground = rel;
+            }
+            ImGui::EndDragDropTarget();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Clear##pagebg"))
+            m_pageBackground.clear();
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+    }
+
+    // ── Achievement badge images (page-level) ────────────────────────────────
+    // Shared by every song/chart in the game; moved here from the per-chart
+    // SongEditor so authors only manage one badge pair.
+    {
+        auto badgeDropZone = [&](const char* label, const char* idBase,
+                                  std::string& outPath) {
+            ImGui::TextUnformatted(label);
+            // Square zone so badges (which are usually circular or
+            // rhombus-shaped) display at their real aspect ratio.
+            const float zoneSide = 96.f;
+            ImVec2 zonePos = ImGui::GetCursorScreenPos();
+            ImGui::PushID(idBase);
+            ImGui::InvisibleButton("##zone", ImVec2(zoneSide, zoneSide));
+            ImDrawList* dl = ImGui::GetWindowDrawList();
+            VkDescriptorSet thumb = outPath.empty()
+                ? VK_NULL_HANDLE : getThumb(outPath);
+            ImU32 border = ImGui::IsItemHovered()
+                ? IM_COL32(100, 160, 255, 255) : IM_COL32(100, 100, 120, 180);
+            // Backing panel
+            dl->AddRectFilled(zonePos,
+                              ImVec2(zonePos.x + zoneSide, zonePos.y + zoneSide),
+                              IM_COL32(30, 30, 45, 220), 4.f);
+            if (thumb) {
+                // Aspect-fit the image inside the square so it isn't stretched.
+                ImVec2 imgSz(64.f, 64.f);
+                auto it = m_thumbCache.find(outPath);
+                if (it != m_thumbCache.end() &&
+                    it->second.tex.width > 0 && it->second.tex.height > 0) {
+                    imgSz = ImVec2((float)it->second.tex.width,
+                                   (float)it->second.tex.height);
+                }
+                float scale = std::min(zoneSide / imgSz.x, zoneSide / imgSz.y);
+                float fitW  = imgSz.x * scale;
+                float fitH  = imgSz.y * scale;
+                ImVec2 imgMin(zonePos.x + (zoneSide - fitW) * 0.5f,
+                              zonePos.y + (zoneSide - fitH) * 0.5f);
+                ImVec2 imgMax(imgMin.x + fitW, imgMin.y + fitH);
+                dl->AddImage((ImTextureID)(uint64_t)thumb, imgMin, imgMax);
+            } else {
+                const char* hint = "Drop\nbadge\nhere";
+                ImVec2 tsz = ImGui::CalcTextSize(hint);
+                dl->AddText(ImVec2(zonePos.x + zoneSide * 0.5f - tsz.x * 0.5f,
+                                   zonePos.y + zoneSide * 0.5f - tsz.y * 0.5f),
+                            IM_COL32(120, 120, 140, 200), hint);
+            }
+            dl->AddRect(zonePos,
+                        ImVec2(zonePos.x + zoneSide, zonePos.y + zoneSide),
+                        border, 4.f, 0, 1.5f);
+            if (ImGui::BeginDragDropTarget()) {
+                if (const ImGuiPayload* payload =
+                        ImGui::AcceptDragDropPayload("ASSET_PATH")) {
+                    outPath = std::string(
+                        static_cast<const char*>(payload->Data),
+                        payload->DataSize - 1);
+                }
+                ImGui::EndDragDropTarget();
+            }
+            ImGui::SameLine();
+            ImGui::BeginGroup();
+            if (ImGui::Button("Clear")) outPath.clear();
+            ImGui::EndGroup();
+            ImGui::PopID();
+        };
+
+        ImGui::TextUnformatted("Achievement Badges:");
+        ImGui::TextDisabled("Shown on the results screen when a chart clears FC / AP.");
+        ImGui::Spacing();
+        badgeDropZone("Full Combo (FC)",  "fcbadge", m_fcImage);
+        ImGui::Spacing();
+        badgeDropZone("All Perfect (AP)", "apbadge", m_apImage);
+        ImGui::Spacing();
+        const char* btnLabel = m_showAchievementPreview
+            ? "Hide Badge Preview" : "Preview Badges in Scene";
+        if (ImGui::Button(btnLabel, ImVec2(-1, 0)))
+            m_showAchievementPreview = !m_showAchievementPreview;
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+    }
 
     // ── Add Set button ───────────────────────────────────────────────────────
     if (ImGui::Button("+ Add Set", ImVec2(-1, 0))) {
@@ -1315,9 +1738,11 @@ void MusicSelectionEditor::renderHierarchy(float width, float height) {
                 ImGui::SameLine();
                 if (ImGui::SmallButton("Clear##songcover"))
                     song.coverImage.clear();
-                ImGui::TextDisabled("%s", song.coverImage.c_str());
             }
 
+            ImGui::Spacing();
+            ImGui::TextDisabled("Score and FC/AP badges are filled in by the");
+            ImGui::TextDisabled("judgement system after the player clears a chart.");
             ImGui::Spacing();
             ImGui::TextDisabled("Double-click song to edit charts, audio, score...");
             if (ImGui::Button("Edit Song Details >>")) {
@@ -1396,7 +1821,6 @@ void MusicSelectionEditor::renderHierarchy(float width, float height) {
                 ImGui::SameLine();
                 if (ImGui::SmallButton("Clear##setcover"))
                     set.coverImage.clear();
-                ImGui::TextDisabled("%s", set.coverImage.c_str());
             }
 
             ImGui::Text("Songs: %d", (int)set.songs.size());
@@ -1522,7 +1946,17 @@ void MusicSelectionEditor::renderAssets() {
     }
 
     const float thumbSize = 80.f;
+    const float tileSpacing = 6.f;
     std::string toDelete;
+
+    // Wrap to next row when the next tile would overflow the panel width.
+    auto flowNext = [&]() {
+        float lastEndX  = ImGui::GetItemRectMax().x;
+        float rightEdge = ImGui::GetWindowPos().x +
+                          ImGui::GetWindowContentRegionMax().x;
+        if (lastEndX + tileSpacing + thumbSize <= rightEdge)
+            ImGui::SameLine(0.f, tileSpacing);
+    };
 
     // Lambda to draw a horizontal strip of draggable thumbnails
     auto drawThumbs = [&](const std::vector<std::string>& files) {
@@ -1570,10 +2004,11 @@ void MusicSelectionEditor::renderAssets() {
             ImGui::TextDisabled("%s", lbl.c_str());
 
             ImGui::EndGroup();
-            ImGui::SameLine(0.f, 6.f);
+            flowNext();
             ImGui::PopID();
         }
         ImGui::NewLine();
+        ImGui::Spacing();
     };
 
     if (!m_assets.images.empty()) { ImGui::Text("Images:"); drawThumbs(m_assets.images); }
@@ -1616,7 +2051,78 @@ void MusicSelectionEditor::renderAssets() {
             ImGui::SetCursorPosX(ImGui::GetCursorPosX() + (thumbSize - lsz.x) * 0.5f);
             ImGui::TextDisabled("%s", lbl.c_str());
             ImGui::EndGroup();
-            ImGui::SameLine(0.f, 6.f);
+            flowNext();
+            ImGui::PopID();
+        }
+        ImGui::NewLine();
+        ImGui::Spacing();
+    }
+
+    // Material tiles — same renderer as StartScreenEditor's Assets panel
+    // so the user sees the same previews on every page.
+    if (!m_assets.materials.empty()) {
+        ImGui::Text("Materials:");
+        for (int i = 0; i < (int)m_assets.materials.size(); ++i) {
+            const std::string& f = m_assets.materials[i];
+            std::string name = fs::path(f).filename().string();
+            std::string stem = fs::path(f).stem().string();
+            ImGui::PushID(2000 + i);
+            ImGui::BeginGroup();
+            ImVec2 thumbPos = ImGui::GetCursorScreenPos();
+            ImGui::InvisibleButton("##m", ImVec2(thumbSize, thumbSize));
+            ImDrawList* dl = ImGui::GetWindowDrawList();
+
+            const MaterialAsset* matPtr = m_engine
+                ? m_engine->materialLibrary().get(stem) : nullptr;
+            if (matPtr && m_engine) {
+                m_engine->startScreenEditor().drawMaterialPreviewAt(
+                    *matPtr, thumbPos, ImVec2(thumbSize, thumbSize));
+            } else {
+                dl->AddRectFilled(thumbPos,
+                                  ImVec2(thumbPos.x + thumbSize, thumbPos.y + thumbSize),
+                                  IM_COL32(50, 30, 70, 255), 4.f);
+                const char* icon = "MAT";
+                ImVec2 mizs = ImGui::CalcTextSize(icon);
+                dl->AddText(ImVec2(thumbPos.x + thumbSize * 0.5f - mizs.x * 0.5f,
+                                   thumbPos.y + thumbSize * 0.5f - mizs.y * 0.5f),
+                            IM_COL32(220, 180, 255, 220), icon);
+            }
+            if (ImGui::IsItemHovered()) {
+                dl->AddRect(thumbPos,
+                            ImVec2(thumbPos.x + thumbSize, thumbPos.y + thumbSize),
+                            IM_COL32(200, 140, 255, 200), 4.f, 0, 2.f);
+                if (matPtr && m_engine) {
+                    ImGui::BeginTooltip();
+                    ImGui::TextUnformatted(f.c_str());
+                    if (!matPtr->targetMode.empty() ||
+                        !matPtr->targetSlotSlug.empty()) {
+                        ImGui::TextDisabled("target: %s / %s",
+                            matPtr->targetMode.empty()     ? "(any)" : matPtr->targetMode.c_str(),
+                            matPtr->targetSlotSlug.empty() ? "(any)" : matPtr->targetSlotSlug.c_str());
+                    }
+                    m_engine->startScreenEditor().drawMaterialPreviewAt(
+                        *matPtr, ImGui::GetCursorScreenPos(), ImVec2(260.f, 140.f));
+                    ImGui::Dummy(ImVec2(260.f, 140.f));
+                    ImGui::EndTooltip();
+                } else {
+                    ImGui::SetTooltip("%s", f.c_str());
+                }
+            }
+            if (ImGui::BeginDragDropSource()) {
+                ImGui::SetDragDropPayload("ASSET_PATH", f.c_str(), f.size() + 1);
+                ImGui::Text("%s", name.c_str());
+                ImGui::EndDragDropSource();
+            }
+            if (ImGui::BeginPopupContextItem("##mctx")) {
+                if (ImGui::MenuItem("Delete")) toDelete = f;
+                ImGui::EndPopup();
+            }
+            std::string lbl = stem.size() > 11 ? stem.substr(0, 9) + ".." : stem;
+            ImVec2 mlsz = ImGui::CalcTextSize(lbl.c_str());
+            ImGui::SetCursorPosX(ImGui::GetCursorPosX() + (thumbSize - mlsz.x) * 0.5f);
+            ImGui::TextDisabled("%s", lbl.c_str());
+            ImGui::EndGroup();
+            flowNext();
             ImGui::PopID();
         }
         ImGui::NewLine();

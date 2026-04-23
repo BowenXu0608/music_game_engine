@@ -32,6 +32,13 @@ public:
     void resume();
     void stop();
 
+    // Seek to `startSec` and start playback. Used by the Music Selection
+    // page to play a short preview clip of a highlighted song.
+    void playFrom(double startSec);
+
+    // Total duration of the currently-loaded sound (seconds). 0 if none.
+    double durationSeconds() const;
+
     // Returns current playback position in seconds (DSP clock).
     // Returns -1.0 if not playing.
     double positionSeconds() const;

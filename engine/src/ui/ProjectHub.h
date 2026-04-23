@@ -80,6 +80,8 @@ struct ProjectInfo {
     std::string version;
     std::string defaultChart;
     std::string shaderPath;
+    std::string lastModified;     // formatted "YYYY-MM-DD HH:MM"
+    long long   lastModifiedRaw = 0; // unix seconds — for sorting
 };
 
 class ProjectHub {
@@ -94,7 +96,9 @@ public:
 private:
     void scanProjects();
     void renderCreateDialog(Engine* engine);
+    void renderAddFileDialog();
     bool createProject(const std::string& name);
+    bool importProject(const std::string& srcPath);
     void startApkBuild(const ProjectInfo& proj);
     void renderApkDialog();
 
@@ -103,10 +107,17 @@ private:
     LaunchCallback           m_launchCallback;
     bool                     m_scanned         = false;
     bool                     m_projectSelected = false;
+    int                      m_selectedIdx     = -1;  // highlight in hub list
+
+    char        m_searchBuf[128] = {};
 
     bool        m_showCreateDialog = false;
     char        m_newProjectName[128] = {};
     std::string m_createError;
+
+    bool        m_showAddFileDialog  = false;
+    char        m_addFilePath[512]   = {};
+    std::string m_addFileError;
 
     // APK build state
     bool             m_showApkDialog  = false;

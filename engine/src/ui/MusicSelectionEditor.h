@@ -26,8 +26,25 @@ struct SongInfo {
     std::string chartEasy;    // relative path to chart file
     std::string chartMedium;
     std::string chartHard;
-    int         score = 0;            // 0..1000000
-    std::string achievement;          // "", "FC", "AP"
+    int         score = 0;            // legacy per-song field (kept for migration)
+    std::string achievement;          // legacy per-song field (kept for migration)
+
+    // Per-difficulty stats. Populated by the results screen when the player
+    // clears a chart; each difficulty records its own score + achievement
+    // badge so the music card reflects the currently-selected difficulty.
+    int         scoreEasy        = 0;
+    int         scoreMedium      = 0;
+    int         scoreHard        = 0;
+    std::string achievementEasy;
+    std::string achievementMedium;
+    std::string achievementHard;
+
+    // Music-selection preview clip (seconds into the audio). Populated by
+    // the AudioAnalyzer's peak-energy detector; editable in SongEditor.
+    // previewStart < 0 means "auto-detect on next chance".
+    float       previewStart    = -1.f;
+    float       previewDuration = 30.f;
+
     GameModeConfig gameMode;          // per-song game mode config
 };
 
@@ -86,6 +103,31 @@ private:
     Difficulty m_selectedDifficulty = Difficulty::Hard;
     bool       m_autoPlay = false;
 
+    // Page-level background — drawn behind the wheels/cover and then
+    // overlaid with a frosted-glass gradient (heavy on sides, light
+    // middle) so foreground text stays readable.
+    std::string m_pageBackground;   // project-relative path
+
+    // Achievement badge images — one pair per game, configured here
+    // instead of per-song. Read by the results screen when a chart
+    // reaches FC or AP. Stored as top-level keys in music_selection.json.
+    std::string m_fcImage;          // Full Combo badge
+    std::string m_apImage;          // All Perfect badge
+
+    // Modal flag for the preview overlay (shows both badges with a
+    // spinning/glow effect so the author can judge them in context).
+    bool        m_showAchievementPreview = false;
+
+    // Audio preview: when the selected song dwells for a short moment,
+    // load and play a 30 s clip from the song's previewStart. Reset every
+    // time the selection changes.
+    int    m_previewSetIdx     = -1;
+    int    m_previewSongIdx    = -1;
+    float  m_previewDwellT     = 0.f;   // seconds the selection has dwelt
+    bool   m_previewPlaying    = false; // audio engine currently plays our clip
+    std::string m_previewPath;          // currently-loaded clip's audio path
+    float  m_previewStopT      = 0.f;   // seconds left before we stop playback
+
     // ── Wheel scroll state (smooth animation) ────────────────────────────────
     float m_setScrollTarget  = 0.f;
     float m_setScrollCurrent = 0.f;
@@ -118,6 +160,7 @@ private:
     bool      m_assetsScanned = false;
     // ImageEditor m_imageEditor;
     void renderAssets();
+    void updateAudioPreview(float dt);
 
     // ── Preview tab ──────────────────────────────────────────────────────────
     int m_previewTab = 0;  // 0=Editor, 1=Game Preview

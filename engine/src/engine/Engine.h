@@ -80,6 +80,16 @@ public:
     // library is then shared by every chart in the project.
     void openProject(const std::string& projectPath);
 
+    // Shared editor-preview aspect ratio (Start Screen + Music Selection).
+    // Editors letterbox/pillarbox their preview boxes to this ratio so the
+    // author sees their scene as it will appear on the target device.
+    struct PreviewAspect {
+        int   w = 16;
+        int   h = 9;
+        int   presetIdx = 0;   // 0 = first preset (16:9 Desktop)
+    };
+    PreviewAspect& previewAspect() { return m_previewAspect; }
+
 private:
     void mainLoop();
     void update(float dt);
@@ -145,6 +155,8 @@ private:
     // inline material entries into this library before the chart hits a
     // renderer, so downstream code only ever sees asset references.
     MaterialAssetLibrary               m_materialLibrary;
+
+    PreviewAspect                      m_previewAspect;
     std::string                        m_currentAudioPath;       // resolved audio path for restart
     bool                               m_framebufferResized = false;
     bool                               m_running = false;

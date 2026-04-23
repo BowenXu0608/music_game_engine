@@ -1,4 +1,7 @@
 {
+  "apImage": "assets/textures/_cgi-bin_mmwebwx-bin_webwxgetmsgimg__&MsgID=6560311396711576903&skey=@crypt_fe033b05_37901c151e3a0950a9b03cdfef2f6453&mmweb_appid=wx_webfilehelper.jpg",
+  "background": "assets/textures/3302789baba9c5c1f1556f240f1fa72c.JPG",
+  "fcImage": "assets/textures/_cgi-bin_mmwebwx-bin_webwxgetmsgimg__&MsgID=1949234573562479640&skey=@crypt_fe033b05_37901c151e3a0950a9b03cdfef2f6453&mmweb_appid=wx_webfilehelper.jpg",
   "sets": [
     {
       "coverImage": "assets/textures/_cgi-bin_mmwebwx-bin_webwxgetmsgimg__&MsgID=8707269281776363004&skey=@crypt_fe033b05_37901c151e3a0950a9b03cdfef2f6453&mmweb_appid=wx_webfilehelper.jpg",
@@ -6,6 +9,9 @@
       "songs": [
         {
           "achievement": "",
+          "achievementEasy": "",
+          "achievementHard": "",
+          "achievementMedium": "",
           "artist": "me",
           "audioFile": "assets/audio/M800001Ms8Wg3B9QbY.mp3",
           "chartEasy": "assets/charts/Aa_drop2d_easy.json",
@@ -90,10 +96,18 @@
             "type": "dropNotes"
           },
           "name": "Aa",
-          "score": 158300
+          "previewDuration": 30.0,
+          "previewStart": 0.0,
+          "score": 158300,
+          "scoreEasy": 0,
+          "scoreHard": 0,
+          "scoreMedium": 0
         },
         {
           "achievement": "",
+          "achievementEasy": "",
+          "achievementHard": "",
+          "achievementMedium": "",
           "artist": "me",
           "audioFile": "assets/audio/Funky+DL+-+Mana,+the+Girl+from+Kanagawa(Le+Emporium+Jazzstrumental).mp3",
           "chartEasy": "assets/charts/Ab_drop2d_easy.json",
@@ -178,7 +192,12 @@
             "type": "dropNotes"
           },
           "name": "Ab",
-          "score": 0
+          "previewDuration": 30.0,
+          "previewStart": 0.0,
+          "score": 0,
+          "scoreEasy": 0,
+          "scoreHard": 0,
+          "scoreMedium": 0
         }
       ]
     },
@@ -188,6 +207,9 @@
       "songs": [
         {
           "achievement": "",
+          "achievementEasy": "",
+          "achievementHard": "",
+          "achievementMedium": "",
           "artist": "me",
           "audioFile": "assets/audio/M800001Ms8Wg3B9QbY.mp3",
           "chartEasy": "",
@@ -271,7 +293,12 @@
             "type": "scanLine"
           },
           "name": "Ba",
-          "score": 0
+          "previewDuration": 30.0,
+          "previewStart": -1.0,
+          "score": 0,
+          "scoreEasy": 0,
+          "scoreHard": 0,
+          "scoreMedium": 0
         }
       ]
     }

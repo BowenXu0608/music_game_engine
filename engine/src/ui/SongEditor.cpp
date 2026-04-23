@@ -1275,6 +1275,69 @@ void SongEditor::renderProperties() {
         ImGui::SetNextItemWidth(-1);
         ImGui::SliderFloat("Offset (s)", &m_song->gameMode.audioOffset, -2.f, 2.f, "%.3f s");
         ImGui::TextDisabled("Delay before notes start (sync audio with chart)");
+
+        // ── Music-Selection Preview clip ────────────────────────────────────
+        // The Music Selection page plays this clip when the player dwells
+        // on the song. Start can be auto-detected from the AI markers'
+        // peak-strength window, or dragged by hand.
+        ImGui::Spacing();
+        ImGui::TextUnformatted("Preview Clip");
+        float songDur = m_waveformLoaded ? (float)m_waveform.durationSeconds : 0.f;
+        float& pStart = m_song->previewStart;
+        float& pDur   = m_song->previewDuration;
+        if (pDur < 5.f)  pDur = 5.f;
+        if (pDur > 60.f) pDur = 60.f;
+        if (pStart < 0.f) pStart = 0.f;
+        float maxStart = std::max(0.f, songDur - pDur);
+        if (pStart > maxStart) pStart = maxStart;
+
+        ImGui::SetNextItemWidth(-120);
+        ImGui::SliderFloat("Start (s)##preview", &pStart,
+                           0.f, std::max(1.f, maxStart),
+                           "%.2f s");
+        ImGui::SameLine();
+        if (ImGui::Button("Auto-Detect##preview")) {
+            // Pick the previewDuration-long window with the highest sum of
+            // onset strengths across the hardest-difficulty markers that the
+            // AI analyzer produced. If no hard markers exist, fall back to
+            // whichever difficulty has the most markers.
+            const std::vector<float>*         bestTimes = nullptr;
+            const std::vector<MarkerFeature>* bestFeats = nullptr;
+            for (int d = (int)Difficulty::Hard; d >= (int)Difficulty::Easy; --d) {
+                auto& t = m_diffMarkers[d];
+                auto& f = m_diffFeatures[d];
+                if (!t.empty() && t.size() == f.size()) {
+                    bestTimes = &t; bestFeats = &f; break;
+                }
+            }
+            if (bestTimes && !bestTimes->empty()) {
+                float bestSum = -1.f;
+                float bestT   = 0.f;
+                const auto& times    = *bestTimes;
+                const auto& features = *bestFeats;
+                for (size_t i = 0; i < times.size(); ++i) {
+                    float t0 = times[i];
+                    float t1 = t0 + pDur;
+                    float sum = 0.f;
+                    for (size_t j = i; j < times.size() && times[j] <= t1; ++j)
+                        sum += features[j].strength;
+                    if (sum > bestSum) { bestSum = sum; bestT = t0; }
+                }
+                if (bestSum > 0.f) pStart = bestT;
+                m_statusMsg = "Preview auto-detected at " +
+                              std::to_string((int)pStart) + "s";
+            } else {
+                // No analysis yet — fall back to 25% of duration.
+                pStart = songDur * 0.25f;
+                m_statusMsg = "No analyzer data — preview set to 25% of song";
+            }
+            m_statusTimer = 3.f;
+        }
+        ImGui::SliderFloat("Length (s)##preview", &pDur, 10.f, 45.f, "%.0f s");
+        if (songDur > 0.f) {
+            ImGui::TextDisabled("Range: %.1f s → %.1f s   (song: %.1f s)",
+                                 pStart, pStart + pDur, songDur);
+        }
     }
 
     // ── BPM Map (from analysis) ─────────────────────────────────────────────
@@ -1860,98 +1923,8 @@ void SongEditor::renderGameModeConfig(Engine* engine) {
         ImGui::Spacing();
     }
 
-    // ── Achievements ────────────────────────────────────────────────────────
-    if (ImGui::CollapsingHeader("Achievements", ImGuiTreeNodeFlags_DefaultOpen)) {
-        ImGui::Spacing();
-
-        // Auto-judge explanation
-        ImGui::TextDisabled("Evaluated automatically at results screen:");
-        ImGui::Spacing();
-
-        // ── Full Combo (FC) ─────────────────────────────────────────────────
-        ImGui::Text("Full Combo (FC)");
-        ImGui::TextDisabled("No misses — every note hit");
-
-        // FC image picker — asset drag-drop only
-        {
-            const ImVec2 slotSz(96, 96);
-            ImVec2 slotPos = ImGui::GetCursorScreenPos();
-            ImGui::InvisibleButton("##fcSlot", slotSz);
-            ImDrawList* dl = ImGui::GetWindowDrawList();
-            ImVec2 slotMax(slotPos.x + slotSz.x, slotPos.y + slotSz.y);
-            VkDescriptorSet fcThumb = gm.fcImage.empty() ? VK_NULL_HANDLE : getThumb(gm.fcImage);
-            if (fcThumb) {
-                dl->AddImage((ImTextureID)(uint64_t)fcThumb, slotPos, slotMax);
-            } else {
-                dl->AddRectFilled(slotPos, slotMax, IM_COL32(35, 35, 50, 255), 4.f);
-                const char* hint = "Drag asset here";
-                ImVec2 ts = ImGui::CalcTextSize(hint);
-                dl->AddText(ImVec2(slotPos.x + (slotSz.x - ts.x) * 0.5f,
-                                    slotPos.y + (slotSz.y - ts.y) * 0.5f),
-                            IM_COL32(140, 140, 160, 200), hint);
-            }
-            dl->AddRect(slotPos, slotMax, IM_COL32(120, 120, 160, 180), 4.f, 0, 1.5f);
-            if (ImGui::BeginDragDropTarget()) {
-                if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("ASSET_PATH")) {
-                    gm.fcImage = std::string(static_cast<const char*>(payload->Data), payload->DataSize - 1);
-                }
-                ImGui::EndDragDropTarget();
-            }
-            ImGui::SameLine();
-            ImGui::BeginGroup();
-            if (!gm.fcImage.empty()) {
-                ImGui::TextDisabled("%s", gm.fcImage.c_str());
-                if (ImGui::Button("Clear##fcClear")) gm.fcImage.clear();
-            } else {
-                ImGui::TextDisabled("(no image)");
-            }
-            ImGui::EndGroup();
-        }
-
-        ImGui::Spacing();
-
-        // ── All Perfect (AP) ────────────────────────────────────────────────
-        ImGui::Text("All Perfect (AP)");
-        ImGui::TextDisabled("Every note judged Perfect");
-
-        // AP image picker — asset drag-drop only
-        {
-            const ImVec2 slotSz(96, 96);
-            ImVec2 slotPos = ImGui::GetCursorScreenPos();
-            ImGui::InvisibleButton("##apSlot", slotSz);
-            ImDrawList* dl = ImGui::GetWindowDrawList();
-            ImVec2 slotMax(slotPos.x + slotSz.x, slotPos.y + slotSz.y);
-            VkDescriptorSet apThumb = gm.apImage.empty() ? VK_NULL_HANDLE : getThumb(gm.apImage);
-            if (apThumb) {
-                dl->AddImage((ImTextureID)(uint64_t)apThumb, slotPos, slotMax);
-            } else {
-                dl->AddRectFilled(slotPos, slotMax, IM_COL32(35, 35, 50, 255), 4.f);
-                const char* hint = "Drag asset here";
-                ImVec2 ts = ImGui::CalcTextSize(hint);
-                dl->AddText(ImVec2(slotPos.x + (slotSz.x - ts.x) * 0.5f,
-                                    slotPos.y + (slotSz.y - ts.y) * 0.5f),
-                            IM_COL32(140, 140, 160, 200), hint);
-            }
-            dl->AddRect(slotPos, slotMax, IM_COL32(120, 120, 160, 180), 4.f, 0, 1.5f);
-            if (ImGui::BeginDragDropTarget()) {
-                if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("ASSET_PATH")) {
-                    gm.apImage = std::string(static_cast<const char*>(payload->Data), payload->DataSize - 1);
-                }
-                ImGui::EndDragDropTarget();
-            }
-            ImGui::SameLine();
-            ImGui::BeginGroup();
-            if (!gm.apImage.empty()) {
-                ImGui::TextDisabled("%s", gm.apImage.c_str());
-                if (ImGui::Button("Clear##apClear")) gm.apImage.clear();
-            } else {
-                ImGui::TextDisabled("(no image)");
-            }
-            ImGui::EndGroup();
-        }
-
-        ImGui::Spacing();
-    }
+    // Achievement badges (FC / AP images) moved to the Music Selection page
+    // — one pair per game, configured once instead of per-chart.
 
     // ── HUD Text: Score & Combo ─────────────────────────────────────────────
     if (ImGui::CollapsingHeader("HUD — Score & Combo", ImGuiTreeNodeFlags_DefaultOpen)) {
@@ -2027,6 +2000,16 @@ void SongEditor::renderGameModeConfig(Engine* engine) {
     }
 
 
+    // ── Material Builder ───────────────────────────────────────────────────
+    // Project-level material asset CRUD — create / edit / compile custom
+    // materials here. Moved off the Start Screen editor so gameplay authors
+    // don't have to bounce between pages to tune note/track visuals.
+    if (ImGui::CollapsingHeader("Material Builder")) {
+        if (engine) engine->startScreenEditor().renderMaterials(engine);
+        else        ImGui::TextDisabled("Engine unavailable");
+        ImGui::Spacing();
+    }
+
     // ── Materials ──────────────────────────────────────────────────────────
     // Per-slot, per-difficulty visual overrides. Defaults come from the mode's
     // slot table (renderer/MaterialSlots.cpp). Overrides serialize into the
@@ -2063,8 +2046,8 @@ void SongEditor::renderGameModeConfig(Engine* engine) {
         // assignment surface now.
         MaterialAssetLibrary* lib = engine ? &engine->materialLibrary() : nullptr;
 
-        ImGui::TextDisabled("Assign project material assets to slots. Edit the");
-        ImGui::TextDisabled("materials themselves on the Start Screen -> Materials tab.");
+        ImGui::TextDisabled("Assign project material assets to slots.");
+        ImGui::TextDisabled("Edit the materials themselves in the Material Builder above.");
         ImGui::Spacing();
 
         // Walk slots in declared order. When we enter a run that shares a

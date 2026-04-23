@@ -85,3 +85,7 @@ The JSON unified parser accepts both legacy and new arc field names so charts ro
 ## ChartLoader JSON Parser Safety
 
 All `findValue`/`getVal` lambdas have bounds checks: `pos >= size()` guard after whitespace skip, `find()` return check for closing quote. Prevents out-of-bounds reads on malformed JSON.
+
+## AudioEngine seek + duration (2026-04-23)
+
+`AudioEngine::playFrom(startSec)` and `AudioEngine::durationSeconds()` added. `playFrom` reads the loaded sound's sample rate via `ma_sound_get_data_format(&m_impl->sound, nullptr, nullptr, &sampleRate, nullptr, 0)` (falls back to 44100 if the format call fails), clamps negative start to 0, computes `frame = startSec * sampleRate`, calls `ma_sound_seek_to_pcm_frame` followed by `ma_sound_start`, sets `m_playing = true`. `durationSeconds()` uses `ma_sound_get_length_in_seconds` on a `const_cast`'d `&m_impl->sound` (miniaudio's signature is non-const). Used by `MusicSelectionEditor::updateAudioPreview` to play a 30-second preview clip starting at `SongInfo::previewStart` when the player dwells on a song — the preview start is auto-detected by summing `MarkerFeature.strength` over a sliding window in SongEditor's new "Preview Clip" section.

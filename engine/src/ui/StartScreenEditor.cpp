@@ -6,12 +6,14 @@
 #include "renderer/ShaderCompiler.h"
 #include "editor/ShaderGenClient.h"
 #include "editor/AIEditorConfig.h"
+#include "ui/PreviewAspect.h"
 #include <imgui.h>
 #include <nlohmann/json.hpp>
 #include <fstream>
 #include <filesystem>
 #include <algorithm>
 #include <cstring>
+#include <functional>
 #include <cstdio>
 #include <cstdlib>
 #include <iostream>
@@ -444,25 +446,12 @@ void StartScreenEditor::render(Engine* engine) {
     ImGui::SameLine();
 
     ImGui::BeginChild("Properties", ImVec2(propsW, topH), true);
-    if (ImGui::BeginTabBar("start_props_tabs")) {
-        if (ImGui::BeginTabItem("Start Screen")) {
-            renderProperties();
-            ImGui::EndTabItem();
-        }
-        // Force-open the Materials tab when a .mat tile in the assets panel
-        // is clicked. Reset the flag after the first pass so subsequent
-        // clicks on other tabs (Start Screen) stick.
-        ImGuiTabItemFlags matFlags = ImGuiTabItemFlags_None;
-        if (m_materialsTabRequested) {
-            matFlags = ImGuiTabItemFlags_SetSelected;
-            m_materialsTabRequested = false;
-        }
-        if (ImGui::BeginTabItem("Materials", nullptr, matFlags)) {
-            renderMaterials(engine);
-            ImGui::EndTabItem();
-        }
-        ImGui::EndTabBar();
-    }
+    // Material builder moved to the SongEditor (gameplay) page — this
+    // panel is purely start-screen properties now.
+    renderProperties();
+    // Request flag is obsolete; swallow any stale true so the click on a
+    // MAT tile no longer tries to open a non-existent tab.
+    m_materialsTabRequested = false;
     ImGui::EndChild();
 
     // Horizontal splitter
@@ -489,28 +478,6 @@ void StartScreenEditor::render(Engine* engine) {
         m_statusMsg   = "Saved!";
         m_statusTimer = 2.f;
     }
-    ImGui::SameLine();
-    if (ImGui::Button("Load")) {
-        load(m_projectPath);
-        m_statusMsg   = "Loaded!";
-        m_statusTimer = 2.f;
-    }
-    ImGui::SameLine();
-    if (ImGui::Button("Reset")) {
-        m_logoType = LogoType::Text;
-        m_logoText[0] = '\0';
-        m_logoColor[0] = m_logoColor[1] = m_logoColor[2] = m_logoColor[3] = 1.f;
-        m_logoFontSize = 32.f;
-        m_logoBold = m_logoItalic = false;
-        m_logoPos[0] = 0.5f; m_logoPos[1] = 0.3f;
-        m_logoScale = 1.f;
-        m_logoGlow = false;
-        strcpy(m_tapText, "Tap to Start");
-        m_tapTextPos[0] = 0.5f; m_tapTextPos[1] = 0.8f;
-        m_tapTextSize = 24;
-        m_transition = TransitionEffect::Fade;
-        m_transitionDur = 0.5f;
-    }
     if (m_statusTimer > 0.f) {
         ImGui::SameLine();
         ImGui::TextColored(ImVec4(0.4f, 1.f, 0.4f, 1.f), "%s", m_statusMsg.c_str());
@@ -531,10 +498,24 @@ void StartScreenEditor::render(Engine* engine) {
 
 void StartScreenEditor::renderPreview() {
 
+    // Aspect-ratio controls row. Device frame follows the author's choice so
+    // what they see here matches what ships on the target phone/tablet.
+    if (m_engine)
+        previewAspect::renderControls(m_engine->previewAspect());
+    ImGui::Spacing();
+
     ImVec2 previewSize = ImGui::GetContentRegionAvail();
+    previewAspect::FitResult fit = m_engine
+        ? previewAspect::fitAndLetterbox(m_engine->previewAspect(), previewSize)
+        : previewAspect::FitResult{ImGui::GetCursorScreenPos(), previewSize};
     ImDrawList* dl = ImGui::GetWindowDrawList();
-    ImVec2 p = ImGui::GetCursorScreenPos();
-    float pw = previewSize.x, ph = previewSize.y;
+    ImVec2 p = fit.origin;
+    float pw = fit.size.x, ph = fit.size.y;
+
+    // Clip the whole scene draw to the letterboxed rect — otherwise logo
+    // text and other content drawn with normalized positions near the edge
+    // would bleed into the letterbox bars.
+    dl->PushClipRect(p, ImVec2(p.x + pw, p.y + ph), true);
 
     // Background
     switch (m_bgType) {
@@ -591,6 +572,13 @@ void StartScreenEditor::renderPreview() {
             (int)(m_logoColor[0]*255), (int)(m_logoColor[1]*255),
             (int)(m_logoColor[2]*255), (int)(m_logoColor[3]*255));
         ImVec2 textSz = logoFont->CalcTextSizeA(fontSize, FLT_MAX, 0.f, m_logoText);
+        // If the text would overflow the scene width, shrink the font so it
+        // fits instead of clipping. Leaves a small 2% margin on each side.
+        float maxTextW = pw * 0.96f;
+        if (textSz.x > maxTextW && textSz.x > 0.f) {
+            fontSize *= (maxTextW / textSz.x);
+            textSz    = logoFont->CalcTextSizeA(fontSize, FLT_MAX, 0.f, m_logoText);
+        }
         ImVec2 textPos(logoX - textSz.x * 0.5f, logoY - textSz.y * 0.5f);
         if (m_logoGlow) {
             ImU32 gc = IM_COL32(
@@ -624,9 +612,17 @@ void StartScreenEditor::renderPreview() {
     ImFont* tapFont = m_imgui ? m_imgui->getLogoFont(m_tapTextSize) : ImGui::GetFont();
     float   tapFontSize = static_cast<float>(m_tapTextSize);
     ImVec2 tapSz = tapFont->CalcTextSizeA(tapFontSize, FLT_MAX, 0.f, m_tapText);
+    // Same fit-to-width rule as the logo.
+    float tapMaxW = pw * 0.96f;
+    if (tapSz.x > tapMaxW && tapSz.x > 0.f) {
+        tapFontSize *= (tapMaxW / tapSz.x);
+        tapSz        = tapFont->CalcTextSizeA(tapFontSize, FLT_MAX, 0.f, m_tapText);
+    }
     dl->AddText(tapFont, tapFontSize,
                 ImVec2(textX - tapSz.x * 0.5f, textY - tapSz.y * 0.5f),
                 IM_COL32(255, 255, 255, 255), m_tapText);
+
+    dl->PopClipRect();
 }
 
 // ── renderGamePreview ─────────────────────────────────────────────────────────
@@ -679,6 +675,11 @@ void StartScreenEditor::renderGamePreview(ImVec2 p, ImVec2 size) {
         ImU32 col = IM_COL32((int)(m_logoColor[0]*255), (int)(m_logoColor[1]*255),
                              (int)(m_logoColor[2]*255), (int)(m_logoColor[3]*255));
         ImVec2 textSz = logoFont->CalcTextSizeA(fontSize, FLT_MAX, 0.f, m_logoText);
+        float maxTextW = pw * 0.96f;
+        if (textSz.x > maxTextW && textSz.x > 0.f) {
+            fontSize *= (maxTextW / textSz.x);
+            textSz    = logoFont->CalcTextSizeA(fontSize, FLT_MAX, 0.f, m_logoText);
+        }
         ImVec2 textPos(logoX - textSz.x * 0.5f, logoY - textSz.y * 0.5f);
         if (m_logoGlow) {
             ImU32 gc = IM_COL32((int)(m_logoGlowColor[0]*255), (int)(m_logoGlowColor[1]*255),
@@ -699,6 +700,11 @@ void StartScreenEditor::renderGamePreview(ImVec2 p, ImVec2 size) {
     ImFont* tapFont = m_imgui ? m_imgui->getLogoFont(m_tapTextSize) : ImGui::GetFont();
     float tapFontSize = static_cast<float>(m_tapTextSize);
     ImVec2 tapSz = tapFont->CalcTextSizeA(tapFontSize, FLT_MAX, 0.f, m_tapText);
+    float tapMaxW = pw * 0.96f;
+    if (tapSz.x > tapMaxW && tapSz.x > 0.f) {
+        tapFontSize *= (tapMaxW / tapSz.x);
+        tapSz        = tapFont->CalcTextSizeA(tapFontSize, FLT_MAX, 0.f, m_tapText);
+    }
     dl->AddText(tapFont, tapFontSize,
                 ImVec2(textX - tapSz.x * 0.5f, textY - tapSz.y * 0.5f),
                 IM_COL32(255, 255, 255, 255), m_tapText);
@@ -710,8 +716,25 @@ void StartScreenEditor::renderProperties() {
     ImGui::Text("Properties");
     ImGui::Separator();
 
+    // Small inline "Default" pill — drawn inside each section body (first
+    // line) so it's fully inside the content region (no scrollbar clipping)
+    // and its click cannot be stolen by the CollapsingHeader's hit area.
+    auto renderDefaultBtn = [&](const char* id, std::function<void()> reset) {
+        ImGui::PushID(id);
+        if (ImGui::SmallButton("Default")) reset();
+        ImGui::PopID();
+        ImGui::SameLine();
+        ImGui::TextDisabled("(reset this section)");
+        ImGui::Spacing();
+    };
+
     // ── Background ────────────────────────────────────────────────────────────
     if (ImGui::CollapsingHeader("Background", ImGuiTreeNodeFlags_DefaultOpen)) {
+        renderDefaultBtn("bgdef", [&]() {
+            m_bgFile[0] = '\0';
+            if (m_ctx) unloadBackground(*m_ctx, *m_bufMgr);
+            m_bgType = BgType::None;
+        });
         // Drop zone — drag a thumbnail from the asset panel below onto this area
         const float zoneW = ImGui::GetContentRegionAvail().x - 74.f;
         const float zoneH = 54.f;
@@ -764,18 +787,45 @@ void StartScreenEditor::renderProperties() {
 
     // ── Logo ──────────────────────────────────────────────────────────────────
     if (ImGui::CollapsingHeader("Logo", ImGuiTreeNodeFlags_DefaultOpen)) {
+        renderDefaultBtn("logodef", [&]() {
+            m_logoType = LogoType::Text;
+            m_logoText[0] = '\0';
+            m_logoColor[0] = m_logoColor[1] = m_logoColor[2] = m_logoColor[3] = 1.f;
+            m_logoFontSize = 32.f;
+            m_logoBold = m_logoItalic = false;
+            m_logoPos[0] = 0.5f; m_logoPos[1] = 0.3f;
+            m_logoScale = 1.f;
+            m_logoGlow = false;
+            m_logoGlowColor[0] = 1.f; m_logoGlowColor[1] = 0.8f;
+            m_logoGlowColor[2] = 0.2f; m_logoGlowColor[3] = 0.8f;
+            m_logoGlowRadius = 8.f;
+            m_logoImageFile[0] = '\0';
+            if (m_ctx) unloadLogoImage(*m_ctx, *m_bufMgr);
+        });
         const char* logoTypes[] = {"Text", "Image"};
         int lt = static_cast<int>(m_logoType);
         if (ImGui::Combo("Logo Type", &lt, logoTypes, 2))
             m_logoType = static_cast<LogoType>(lt);
 
+        // Hard limits on anything that controls rendered text size. Kept
+        // here (not at load/save) so even programmatic edits or stale
+        // saved values get clamped back into range on the next frame.
+        constexpr float kLogoFontMax = 96.f;
+        constexpr float kLogoScaleMax = 3.f;
+        constexpr int   kTapTextMax  = 72;
+        if (m_logoFontSize > kLogoFontMax) m_logoFontSize = kLogoFontMax;
+        if (m_logoScale    > kLogoScaleMax) m_logoScale   = kLogoScaleMax;
+        if (m_tapTextSize  > kTapTextMax)   m_tapTextSize = kTapTextMax;
+
         if (m_logoType == LogoType::Text) {
             ImGui::InputText("Text##logo", m_logoText, 256);
-            ImGui::SliderFloat("Font Size", &m_logoFontSize, 12.f, 96.f);
-            ImGui::ColorEdit4("Color##logo", m_logoColor);
-            ImGui::Checkbox("Bold", &m_logoBold);
+            // Font Size + Bold on one row; Color on its own row.
+            ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 80.f);
+            ImGui::SliderFloat("##fsize", &m_logoFontSize, 12.f, kLogoFontMax, "%.0f px");
             ImGui::SameLine();
-            ImGui::Checkbox("Italic", &m_logoItalic);
+            ImGui::Checkbox("Bold", &m_logoBold);
+            ImGui::ColorEdit4("Color##logo", m_logoColor,
+                              ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_AlphaBar);
         } else {
             // Image logo — drag from asset panel
             const float lzoneW = ImGui::GetContentRegionAvail().x - 74.f;
@@ -824,30 +874,45 @@ void StartScreenEditor::renderProperties() {
             ImGui::EndGroup();
         }
 
-        ImGui::Separator();
-        ImGui::SliderFloat2("Position##logo", m_logoPos, 0.f, 1.f);
-        ImGui::SliderFloat("Scale##logo", &m_logoScale, 0.1f, 10.f);
-        ImGui::Separator();
+        // Position + Scale on compact rows.
+        ImGui::SliderFloat2("Position##logo", m_logoPos, 0.f, 1.f, "%.2f");
+        ImGui::SliderFloat("Scale##logo", &m_logoScale, 0.1f, kLogoScaleMax, "%.2fx");
+        // Glow: single-line toggle with compact color + radius beneath.
         ImGui::Checkbox("Glow / Outline", &m_logoGlow);
         if (m_logoGlow) {
-            ImGui::ColorEdit4("Glow Color", m_logoGlowColor);
-            ImGui::SliderFloat("Glow Radius", &m_logoGlowRadius, 1.f, 32.f);
+            ImGui::SameLine();
+            ImGui::ColorEdit4("##glowcol", m_logoGlowColor,
+                              ImGuiColorEditFlags_NoInputs |
+                              ImGuiColorEditFlags_NoLabel);
+            ImGui::SliderFloat("Glow Radius", &m_logoGlowRadius, 1.f, 32.f, "%.0f");
         }
     }
 
     ImGui::Spacing();
 
     // ── Tap Text ──────────────────────────────────────────────────────────────
+    // Per user request: only size is editable here. Position + content are
+    // fixed (centered, "Tap to Start") so the start screen stays uniform.
     if (ImGui::CollapsingHeader("Tap Text", ImGuiTreeNodeFlags_DefaultOpen)) {
-        ImGui::InputText("Text##tap", m_tapText, 256);
-        ImGui::SliderFloat2("Position##tap", m_tapTextPos, 0.f, 1.f);
-        ImGui::SliderInt("Size##tap", &m_tapTextSize, 12, 120);
+        renderDefaultBtn("tapdef", [&]() {
+            std::strcpy(m_tapText, "Tap to Start");
+            m_tapTextPos[0] = 0.5f; m_tapTextPos[1] = 0.8f;
+            m_tapTextSize = 24;
+        });
+        constexpr int kTapMax = 72;
+        if (m_tapTextSize > kTapMax) m_tapTextSize = kTapMax;
+        ImGui::SliderInt("Size##tap", &m_tapTextSize, 12, kTapMax, "%d px");
     }
 
     ImGui::Spacing();
 
     // ── Transition ────────────────────────────────────────────────────────────
     if (ImGui::CollapsingHeader("Transition Effect", ImGuiTreeNodeFlags_DefaultOpen)) {
+        renderDefaultBtn("transdef", [&]() {
+            m_transition    = TransitionEffect::Fade;
+            m_transitionDur = 0.5f;
+            m_customScript[0] = '\0';
+        });
         const char* effects[] = {"Fade to Black", "Slide Left", "Zoom In", "Ripple", "Custom"};
         int eff = static_cast<int>(m_transition);
         ImGui::Combo("Effect", &eff, effects, 5);
@@ -863,6 +928,13 @@ void StartScreenEditor::renderProperties() {
 
     // ── Audio ─────────────────────────────────────────────────────────────────
     if (ImGui::CollapsingHeader("Audio", ImGuiTreeNodeFlags_DefaultOpen)) {
+        renderDefaultBtn("audiodef", [&]() {
+            m_bgMusic[0]     = '\0';
+            m_tapSfx[0]      = '\0';
+            m_bgMusicVolume  = 1.f;
+            m_bgMusicLoop    = true;
+            m_tapSfxVolume   = 1.f;
+        });
         // helper to draw a small audio drop zone
         auto audioZone = [&](const char* label, char* buf, float& vol, bool* loop) {
             ImGui::TextDisabled("%s", label);
@@ -909,6 +981,310 @@ void StartScreenEditor::renderProperties() {
         audioZone("Background Music", m_bgMusic, m_bgMusicVolume, &m_bgMusicLoop);
         audioZone("Tap Sound Effect", m_tapSfx,  m_tapSfxVolume,  nullptr);
     }
+}
+
+// ── drawMaterialPreview ──────────────────────────────────────────────────────
+//
+// Approximate what a material will look like when applied to its target slot.
+// We don't re-run the actual fragment shader here — instead we categorize the
+// target slot into a shape family (note / hold body / arc / disk / track / ...),
+// fill with the tint (+ optional texture), and layer an animated effect for
+// kinds that are time-dependent (Scroll / Pulse / Glow / Gradient).
+
+namespace {
+
+enum class PreviewShape {
+    NoteTap, NoteFlick, HoldBody, Arc, ArcTap, Track,
+    JudgmentBar, Disk, ScanLine, Default
+};
+
+PreviewShape pickPreviewShape(const std::string& slug) {
+    auto has = [&](const char* s) { return slug.find(s) != std::string::npos; };
+    // Order matters — more-specific keywords first.
+    if (has("arctap"))                                         return PreviewShape::ArcTap;
+    if (has("arc"))                                            return PreviewShape::Arc;
+    if (has("disk") || has("ring"))                            return PreviewShape::Disk;
+    if (has("scan"))                                           return PreviewShape::ScanLine;
+    if (has("flick"))                                          return PreviewShape::NoteFlick;
+    if (has("hold"))                                           return PreviewShape::HoldBody;
+    if (has("judgment") || has("judge_bar") || has("bar"))     return PreviewShape::JudgmentBar;
+    if (has("track") || has("ground") || has("surface") ||
+        has("sky") || has("post"))                             return PreviewShape::Track;
+    if (has("tap") || has("click") || has("note") ||
+        has("slide"))                                          return PreviewShape::NoteTap;
+    return PreviewShape::Default;
+}
+
+inline ImU32 mulAlpha(ImU32 c, float a) {
+    int alpha = (int)((float)((c >> 24) & 0xFF) * a);
+    if (alpha < 0) alpha = 0;
+    if (alpha > 255) alpha = 255;
+    return (c & 0x00FFFFFF) | ((ImU32)alpha << 24);
+}
+
+inline ImU32 scaleRGB(ImU32 c, float m) {
+    int a = (c >> 24) & 0xFF;
+    int b = (int)(((c >> 16) & 0xFF) * m);
+    int g = (int)(((c >>  8) & 0xFF) * m);
+    int r = (int)(((c >>  0) & 0xFF) * m);
+    auto clamp8 = [](int v) { return v < 0 ? 0 : (v > 255 ? 255 : v); };
+    return IM_COL32(clamp8(r), clamp8(g), clamp8(b), a);
+}
+
+} // namespace
+
+void StartScreenEditor::drawMaterialPreview(const MaterialAsset& m, ImVec2 size) {
+    ImVec2 p0 = ImGui::GetCursorScreenPos();
+    drawMaterialPreviewAt(m, p0, size);
+    ImGui::Dummy(size);
+}
+
+void StartScreenEditor::drawMaterialPreviewAt(const MaterialAsset& m, ImVec2 p0, ImVec2 size) {
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    ImVec2 p1 = ImVec2(p0.x + size.x, p0.y + size.y);
+
+    // Transparent-checker backdrop so the material's alpha reads correctly.
+    const float c = 8.f;
+    for (int yy = 0; (yy * c) < size.y; ++yy) {
+        for (int xx = 0; (xx * c) < size.x; ++xx) {
+            bool dark = ((xx + yy) & 1) != 0;
+            ImVec2 a(p0.x + xx * c, p0.y + yy * c);
+            ImVec2 b(std::min(p1.x, a.x + c), std::min(p1.y, a.y + c));
+            dl->AddRectFilled(a, b, dark ? IM_COL32(40, 40, 48, 255)
+                                         : IM_COL32(28, 28, 34, 255));
+        }
+    }
+    dl->AddRect(p0, p1, IM_COL32(90, 95, 110, 255), 4.f, 0, 1.f);
+
+    // Resolve colors & animation inputs.
+    const float  t     = (float)ImGui::GetTime();
+    const float  tintR = m.tint[0], tintG = m.tint[1];
+    const float  tintB = m.tint[2], tintA = std::max(0.05f, m.tint[3]);
+    const ImU32  tint  = IM_COL32((int)(tintR * 255), (int)(tintG * 255),
+                                   (int)(tintB * 255), (int)(tintA * 255));
+
+    VkDescriptorSet tex = VK_NULL_HANDLE;
+    if (!m.texturePath.empty())
+        tex = getThumb(m.texturePath);
+
+    PreviewShape shape = pickPreviewShape(m.targetSlotSlug);
+
+    // Shape-specific bounding rect inside the preview box.
+    const float pad = 10.f;
+    ImVec2 sp0(p0.x + pad, p0.y + pad);
+    ImVec2 sp1(p1.x - pad, p1.y - pad);
+
+    // Compute a rect that matches the shape's aspect ratio so notes don't look
+    // square and tracks don't look stubby.
+    auto rectForShape = [&](PreviewShape s, ImVec2& a, ImVec2& b) {
+        float w = sp1.x - sp0.x, h = sp1.y - sp0.y;
+        float cx = (sp0.x + sp1.x) * 0.5f, cy = (sp0.y + sp1.y) * 0.5f;
+        float sw = w, sh = h;
+        switch (s) {
+            case PreviewShape::NoteTap:
+            case PreviewShape::NoteFlick:   sw = w * 0.85f; sh = h * 0.30f; break;
+            case PreviewShape::HoldBody:    sw = w * 0.28f; sh = h * 0.85f; break;
+            case PreviewShape::Track:       sw = w * 0.65f; sh = h * 0.85f; break;
+            case PreviewShape::JudgmentBar: sw = w * 0.90f; sh = h * 0.10f; break;
+            case PreviewShape::ScanLine:    sw = w * 0.06f; sh = h * 0.90f; break;
+            default:                        sw = w * 0.80f; sh = h * 0.55f; break;
+        }
+        a = ImVec2(cx - sw * 0.5f, cy - sh * 0.5f);
+        b = ImVec2(cx + sw * 0.5f, cy + sh * 0.5f);
+    };
+
+    // Kind-driven fill color — Pulse modulates brightness, Gradient overridden later.
+    ImU32 fill = tint;
+    if (m.kind == MaterialKind::Pulse) {
+        // params[1]=decay, params[2]=peakMult (approximation)
+        float peak  = m.params[2] > 0.01f ? m.params[2] : 1.6f;
+        float decay = m.params[1] > 0.01f ? m.params[1] : 3.0f;
+        float phase = std::fmod(t * 1.5f, 1.0f);
+        float mul   = 1.0f + (peak - 1.0f) * std::exp(-phase * decay);
+        fill = scaleRGB(tint, mul);
+    } else if (m.kind == MaterialKind::Glow) {
+        // params[0]=intensity — pre-brighten the base fill.
+        float intensity = m.params[0] > 0.01f ? m.params[0] : 1.3f;
+        fill = scaleRGB(tint, intensity);
+    }
+
+    // ── Draw each shape family ─────────────────────────────────────────────
+    auto drawTextured = [&](ImVec2 a, ImVec2 b, float rounding) {
+        if (tex) {
+            // Tint the texture by multiplying with fill color.
+            dl->AddImageRounded((ImTextureID)(uint64_t)tex, a, b,
+                                 ImVec2(0, 0), ImVec2(1, 1), fill, rounding);
+        } else {
+            dl->AddRectFilled(a, b, fill, rounding);
+        }
+    };
+
+    auto strokeRect = [&](ImVec2 a, ImVec2 b, float rounding) {
+        dl->AddRect(a, b, mulAlpha(IM_COL32(255, 255, 255, 255), 0.5f * tintA),
+                    rounding, 0, 1.f);
+    };
+
+    switch (shape) {
+        case PreviewShape::NoteTap:
+        case PreviewShape::NoteFlick: {
+            ImVec2 a, b; rectForShape(shape, a, b);
+            drawTextured(a, b, 6.f);
+            strokeRect(a, b, 6.f);
+            if (shape == PreviewShape::NoteFlick) {
+                // Arrow wedge on the right, to hint at "flick"
+                float mx = b.x + 2.f, cy = (a.y + b.y) * 0.5f;
+                float h  = (b.y - a.y) * 0.9f;
+                dl->AddTriangleFilled(ImVec2(mx, cy - h * 0.5f),
+                                       ImVec2(mx, cy + h * 0.5f),
+                                       ImVec2(mx + h * 0.7f, cy), fill);
+            }
+            break;
+        }
+        case PreviewShape::HoldBody: {
+            ImVec2 a, b; rectForShape(shape, a, b);
+            drawTextured(a, b, 4.f);
+            // Caps at top + bottom for visual reading.
+            float capH = (b.y - a.y) * 0.06f;
+            ImU32 capCol = scaleRGB(fill, 1.4f);
+            dl->AddRectFilled(a, ImVec2(b.x, a.y + capH), capCol, 4.f);
+            dl->AddRectFilled(ImVec2(a.x, b.y - capH), b, capCol, 4.f);
+            strokeRect(a, b, 4.f);
+            break;
+        }
+        case PreviewShape::Track: {
+            // Trapezoid converging toward the top (receding playfield look).
+            float cx = (sp0.x + sp1.x) * 0.5f;
+            float topW = (sp1.x - sp0.x) * 0.30f;
+            float botW = (sp1.x - sp0.x) * 0.80f;
+            ImVec2 tl(cx - topW * 0.5f, sp0.y + 6.f);
+            ImVec2 tr(cx + topW * 0.5f, sp0.y + 6.f);
+            ImVec2 br(cx + botW * 0.5f, sp1.y - 6.f);
+            ImVec2 bl(cx - botW * 0.5f, sp1.y - 6.f);
+            if (tex) {
+                dl->AddImageQuad((ImTextureID)(uint64_t)tex, tl, tr, br, bl,
+                                  ImVec2(0, 0), ImVec2(1, 0),
+                                  ImVec2(1, 1), ImVec2(0, 1), fill);
+            } else {
+                dl->AddQuadFilled(tl, tr, br, bl, fill);
+            }
+            dl->AddQuad(tl, tr, br, bl,
+                        mulAlpha(IM_COL32(255, 255, 255, 255), 0.4f * tintA), 1.f);
+            break;
+        }
+        case PreviewShape::JudgmentBar: {
+            ImVec2 a, b; rectForShape(shape, a, b);
+            drawTextured(a, b, 2.f);
+            // Soft glow halo above/below
+            ImU32 halo = mulAlpha(fill, 0.35f);
+            dl->AddRectFilled(ImVec2(a.x, a.y - 6.f),
+                              ImVec2(b.x, a.y),        halo);
+            dl->AddRectFilled(ImVec2(a.x, b.y),
+                              ImVec2(b.x, b.y + 6.f),  halo);
+            break;
+        }
+        case PreviewShape::ScanLine: {
+            ImVec2 a, b; rectForShape(shape, a, b);
+            // Animate x-position back-and-forth.
+            float cx  = (sp0.x + sp1.x) * 0.5f;
+            float amp = (sp1.x - sp0.x) * 0.40f;
+            float ox  = std::sin(t * 1.4f) * amp;
+            a.x += ox; b.x += ox;
+            // Clip to the preview rect so the swept line + ghost trail
+            // never paint outside the tile.
+            dl->PushClipRect(p0, p1, true);
+            drawTextured(a, b, 2.f);
+            for (int i = 1; i <= 4; ++i) {
+                float dx = -std::sin(t * 1.4f) > 0 ? -i * 6.f : i * 6.f;
+                dl->AddRectFilled(ImVec2(a.x + dx, a.y),
+                                  ImVec2(b.x + dx, b.y),
+                                  mulAlpha(fill, 0.12f - i * 0.02f));
+            }
+            dl->PopClipRect();
+            break;
+        }
+        case PreviewShape::Arc: {
+            // Bezier curve sweeping across the preview.
+            ImVec2 a(sp0.x + 6.f, sp1.y - 10.f);
+            ImVec2 d(sp1.x - 6.f, sp0.y + 10.f);
+            ImVec2 b(sp0.x + (sp1.x - sp0.x) * 0.35f, sp0.y + 10.f);
+            ImVec2 c(sp0.x + (sp1.x - sp0.x) * 0.65f, sp1.y - 10.f);
+            dl->AddBezierCubic(a, b, c, d, fill, 8.f);
+            // Outer glow halo
+            dl->AddBezierCubic(a, b, c, d, mulAlpha(fill, 0.25f), 18.f);
+            break;
+        }
+        case PreviewShape::ArcTap: {
+            float cx = (sp0.x + sp1.x) * 0.5f, cy = (sp0.y + sp1.y) * 0.5f;
+            float r  = std::min(sp1.x - sp0.x, sp1.y - sp0.y) * 0.25f;
+            ImVec2 top(cx, cy - r), right(cx + r, cy);
+            ImVec2 bot(cx, cy + r), left (cx - r, cy);
+            dl->AddQuadFilled(top, right, bot, left, fill);
+            dl->AddQuad      (top, right, bot, left,
+                              mulAlpha(IM_COL32(255, 255, 255, 255), 0.6f * tintA), 1.f);
+            break;
+        }
+        case PreviewShape::Disk: {
+            float cx = (sp0.x + sp1.x) * 0.5f, cy = (sp0.y + sp1.y) * 0.5f;
+            float R  = std::min(sp1.x - sp0.x, sp1.y - sp0.y) * 0.45f;
+            float r  = R * 0.55f;
+            dl->AddCircleFilled(ImVec2(cx, cy), R, fill, 48);
+            dl->AddCircleFilled(ImVec2(cx, cy), r, IM_COL32(20, 20, 26, 255), 48);
+            dl->AddCircle(ImVec2(cx, cy), R,
+                          mulAlpha(IM_COL32(255, 255, 255, 255), 0.5f * tintA),
+                          48, 1.5f);
+            break;
+        }
+        default: {
+            ImVec2 a, b; rectForShape(shape, a, b);
+            drawTextured(a, b, 4.f);
+            strokeRect(a, b, 4.f);
+            break;
+        }
+    }
+
+    // ── Kind-specific overlays (animated) ──────────────────────────────────
+    if (m.kind == MaterialKind::Scroll) {
+        // Moving diagonal stripes drawn on top with additive feel (semi-transparent).
+        float speed = m.params[0] != 0.f ? m.params[0] : 0.35f;
+        float off   = std::fmod(t * speed * 40.f, 24.f);
+        ImU32 stripe = mulAlpha(IM_COL32(255, 255, 255, 255), 0.18f);
+        dl->PushClipRect(p0, p1, true);
+        for (float x = p0.x - size.y + off; x < p1.x; x += 24.f) {
+            dl->AddLine(ImVec2(x, p0.y), ImVec2(x + size.y, p1.y), stripe, 6.f);
+        }
+        dl->PopClipRect();
+    } else if (m.kind == MaterialKind::Glow) {
+        // Radial bright halo in the center.
+        float cx = (p0.x + p1.x) * 0.5f, cy = (p0.y + p1.y) * 0.5f;
+        float R  = std::min(size.x, size.y) * 0.45f;
+        ImU32 halo = mulAlpha(fill, 0.35f);
+        dl->PushClipRect(p0, p1, true);
+        for (int i = 0; i < 5; ++i) {
+            float r = R * (0.3f + i * 0.18f);
+            dl->AddCircleFilled(ImVec2(cx, cy), r,
+                                mulAlpha(halo, 1.f - i * 0.2f), 48);
+        }
+        dl->PopClipRect();
+    } else if (m.kind == MaterialKind::Gradient) {
+        // Vertical gradient overlay — blend tint (top) → params[0..2] (bottom).
+        float br = m.params[0], bg = m.params[1], bb = m.params[2];
+        ImU32 bot = IM_COL32((int)(br * 255), (int)(bg * 255),
+                             (int)(bb * 255), (int)(tintA * 255));
+        dl->AddRectFilledMultiColor(p0, p1, tint, tint, bot, bot);
+    }
+
+    // Kind-name label in the top-left for quick identification.
+    const char* kindName = "Unlit";
+    switch (m.kind) {
+        case MaterialKind::Glow:     kindName = "Glow";     break;
+        case MaterialKind::Scroll:   kindName = "Scroll";   break;
+        case MaterialKind::Pulse:    kindName = "Pulse";    break;
+        case MaterialKind::Gradient: kindName = "Gradient"; break;
+        case MaterialKind::Custom:   kindName = "Custom";   break;
+        default: break;
+    }
+    dl->AddText(ImVec2(p0.x + 6.f, p0.y + 4.f),
+                IM_COL32(220, 230, 255, 200), kindName);
 }
 
 // ── renderMaterials ───────────────────────────────────────────────────────────
@@ -987,6 +1363,14 @@ void StartScreenEditor::renderMaterials(Engine* engine) {
     }
 
     ImGui::Text("Editing: %s", m_editingMaterial.name.c_str());
+
+    // Live preview — mirrors the material's tint/kind/texture against a
+    // shape that matches the target slot. Updates every frame so animated
+    // kinds (Scroll / Pulse / Glow / ScanLine shape) read correctly.
+    ImGui::Spacing();
+    ImGui::TextDisabled("Preview");
+    ImVec2 previewSize(std::min(320.f, ImGui::GetContentRegionAvail().x - 10.f), 140.f);
+    drawMaterialPreview(m_editingMaterial, previewSize);
     ImGui::Separator();
 
     // ── Compatibility: which (mode, slot) this material applies to. ──────────
@@ -1411,9 +1795,24 @@ void StartScreenEditor::renderAssets() {
         return;
     }
 
-    // Render each group as a horizontal strip of thumbnails (draggable)
+    // Render each group as a flowing grid of thumbnails (draggable). Tiles
+    // wrap to the next row when the next one wouldn't fit, so nothing hides
+    // behind the right edge even on narrow windows.
     const float thumbSize = 80.f;
+    const float tileSpacing = 6.f;
     std::string toDelete;
+
+    // Called after each EndGroup — puts the next tile inline if space
+    // remains, otherwise lets ImGui's default cursor flow drop to the
+    // next row.
+    auto flowNext = [&]() {
+        float lastEndX  = ImGui::GetItemRectMax().x;
+        float rightEdge = ImGui::GetWindowPos().x +
+                          ImGui::GetWindowContentRegionMax().x;
+        if (lastEndX + tileSpacing + thumbSize <= rightEdge)
+            ImGui::SameLine(0.f, tileSpacing);
+    };
+
     auto drawThumbs = [&](const std::vector<std::string>& files) {
         if (files.empty()) return;
         for (int i = 0; i < (int)files.size(); ++i) {
@@ -1440,7 +1839,16 @@ void StartScreenEditor::renderAssets() {
             if (ImGui::IsItemHovered()) {
                 dl->AddRect(thumbPos, ImVec2(thumbPos.x + thumbSize, thumbPos.y + thumbSize),
                             IM_COL32(100, 160, 255, 200), 4.f, 0, 2.f);
-                ImGui::SetTooltip("%s", f.c_str());
+                // Large texture preview so the user can see detail that the
+                // 80px thumbnail collapses away.
+                if (thumb) {
+                    ImGui::BeginTooltip();
+                    ImGui::TextUnformatted(f.c_str());
+                    ImGui::Image((ImTextureID)(uint64_t)thumb, ImVec2(256.f, 256.f));
+                    ImGui::EndTooltip();
+                } else {
+                    ImGui::SetTooltip("%s", f.c_str());
+                }
             }
             if (ImGui::BeginDragDropSource()) {
                 ImGui::SetDragDropPayload("ASSET_PATH", f.c_str(), f.size() + 1);
@@ -1460,10 +1868,11 @@ void StartScreenEditor::renderAssets() {
             ImGui::TextDisabled("%s", lbl.c_str());
 
             ImGui::EndGroup();
-            ImGui::SameLine(0.f, 6.f);
+            flowNext();
             ImGui::PopID();
         }
         ImGui::NewLine();
+        ImGui::Spacing();
     };
 
     drawThumbs(m_assets.images);
@@ -1505,9 +1914,10 @@ void StartScreenEditor::renderAssets() {
         ImGui::SetCursorPosX(ImGui::GetCursorPosX() + (thumbSize - lsz.x) * 0.5f);
         ImGui::TextDisabled("%s", lbl.c_str());
         ImGui::EndGroup();
-        ImGui::SameLine(0.f, 6.f);
+        flowNext();
         ImGui::PopID();
     }
+    if (!m_assets.audios.empty()) { ImGui::NewLine(); ImGui::Spacing(); }
 
     // Material tiles — clicking one opens the Materials editor tab with
     // that asset selected. Rendered with a distinctive "MAT" icon so they
@@ -1522,17 +1932,46 @@ void StartScreenEditor::renderAssets() {
         ImGui::InvisibleButton("##m", ImVec2(thumbSize, thumbSize));
         bool clicked = ImGui::IsItemHovered() && ImGui::IsMouseClicked(0);
         ImDrawList* dl = ImGui::GetWindowDrawList();
-        dl->AddRectFilled(thumbPos, ImVec2(thumbPos.x + thumbSize, thumbPos.y + thumbSize),
-                          IM_COL32(50, 30, 70, 255), 4.f);
-        const char* icon = "MAT";
-        ImVec2 mizs = ImGui::CalcTextSize(icon);
-        dl->AddText(ImVec2(thumbPos.x + thumbSize * 0.5f - mizs.x * 0.5f,
-                           thumbPos.y + thumbSize * 0.5f - mizs.y * 0.5f),
-                    IM_COL32(220, 180, 255, 220), icon);
+
+        // Render a real material preview inside the tile so the user can
+        // identify materials at a glance. Falls back to the old "MAT" icon
+        // only if the library lookup fails (e.g. orphan .mat file on disk).
+        const MaterialAsset* matPtr = m_engine
+            ? m_engine->materialLibrary().get(stem) : nullptr;
+        if (matPtr) {
+            drawMaterialPreviewAt(*matPtr, thumbPos,
+                                  ImVec2(thumbSize, thumbSize));
+        } else {
+            dl->AddRectFilled(thumbPos,
+                              ImVec2(thumbPos.x + thumbSize, thumbPos.y + thumbSize),
+                              IM_COL32(50, 30, 70, 255), 4.f);
+            const char* icon = "MAT";
+            ImVec2 mizs = ImGui::CalcTextSize(icon);
+            dl->AddText(ImVec2(thumbPos.x + thumbSize * 0.5f - mizs.x * 0.5f,
+                               thumbPos.y + thumbSize * 0.5f - mizs.y * 0.5f),
+                        IM_COL32(220, 180, 255, 220), icon);
+        }
         if (ImGui::IsItemHovered()) {
             dl->AddRect(thumbPos, ImVec2(thumbPos.x + thumbSize, thumbPos.y + thumbSize),
                         IM_COL32(200, 140, 255, 200), 4.f, 0, 2.f);
-            ImGui::SetTooltip("%s\n(click to edit)", f.c_str());
+            // Render a live material preview in the tooltip so the user can
+            // judge the material without entering the editor.
+            const MaterialAsset* ma = m_engine
+                ? m_engine->materialLibrary().get(stem) : nullptr;
+            if (ma) {
+                ImGui::BeginTooltip();
+                ImGui::TextUnformatted(f.c_str());
+                if (!ma->targetMode.empty() || !ma->targetSlotSlug.empty()) {
+                    ImGui::TextDisabled("target: %s / %s",
+                        ma->targetMode.empty()     ? "(any)" : ma->targetMode.c_str(),
+                        ma->targetSlotSlug.empty() ? "(any)" : ma->targetSlotSlug.c_str());
+                }
+                drawMaterialPreview(*ma, ImVec2(260.f, 140.f));
+                ImGui::TextDisabled("(click to edit)");
+                ImGui::EndTooltip();
+            } else {
+                ImGui::SetTooltip("%s\n(click to edit)", f.c_str());
+            }
         }
         if (clicked) {
             m_selectedMaterial = stem;
@@ -1554,7 +1993,7 @@ void StartScreenEditor::renderAssets() {
         ImGui::SetCursorPosX(ImGui::GetCursorPosX() + (thumbSize - mlsz.x) * 0.5f);
         ImGui::TextDisabled("%s", lbl.c_str());
         ImGui::EndGroup();
-        ImGui::SameLine(0.f, 6.f);
+        flowNext();
         ImGui::PopID();
     }
 

@@ -49,13 +49,28 @@ public:
     float transitionDuration() const { return m_transitionDur; }
     void importFiles(const std::vector<std::string>& srcPaths);
 
+    // Project-level Material asset CRUD panel. Lives on the SongEditor
+    // (gameplay) page now — exposed here so that editor can call in.
+    // Reads/writes through Engine::materialLibrary().
+    void renderMaterials(Engine* engine);
+
+    // Position-based material preview (public so other editors — notably
+    // MusicSelectionEditor — can share the same tile render logic).
+    void drawMaterialPreviewAt(const MaterialAsset& m, ImVec2 p0, ImVec2 size);
+
 private:
     void renderPreview();
     void renderProperties();
     void renderAssets();
-    // Project-level Material asset CRUD panel. Lives in the Properties
-    // split as a sibling tab. Reads/writes through Engine::materialLibrary().
-    void renderMaterials(Engine* engine);
+
+    // Draw a synthetic preview of a material into a fixed-size rect at the
+    // current cursor position. Shape follows the material's target slot
+    // (note / track / arc / disk / ...), fill follows tint + texture + kind
+    // (Scroll animates stripes, Pulse modulates brightness, etc.). Used in
+    // both the Materials editor and the Assets browser tooltip.
+    void drawMaterialPreview(const MaterialAsset& m, ImVec2 size);
+    // drawMaterialPreviewAt declared above (public) so other editors
+    // can share the tile render logic.
 
     void loadBackground(VulkanContext& ctx, BufferManager& bufMgr, ImGuiLayer& imgui);
     void loadLogoImage (VulkanContext& ctx, BufferManager& bufMgr, ImGuiLayer& imgui);

@@ -3,7 +3,7 @@
 A C++20/Vulkan-based rhythm game engine with a Unity Hub-style editor for mobile rhythm game development.  
 Supports **BanG Dream**, **Arcaea**, **Cytus**, and **Lanota** as plugin game modes (Phigros renderer exists but is not currently reachable from the UI).
 
-**Last updated:** 2026-04-19
+**Last updated:** 2026-04-23
 
 ---
 
@@ -216,12 +216,12 @@ ProjectHub → StartScreenEditor → MusicSelectionEditor → SongEditor → (Te
 
 | Layer | Purpose |
 |---|---|
-| **Project Hub** | Browse + create projects, folder scaffolding |
-| **Start Screen Editor** | Background, logo, tap text, transition, audio; live preview |
-| **Music Selection Editor** | Arcaea-style card stack wheels, hierarchy panel, cover picker |
+| **Project Hub** | Browse + create + import projects; search box, per-project modification timestamp, select-then-Build-APK flow |
+| **Start Screen Editor** | Background, logo, tap text, transition, audio; live preview with aspect-ratio control (landscape-only presets + custom W:H); per-section Default reset; auto text fit-to-width |
+| **Music Selection Editor** | Arcaea-style song wheel with rhombus-slot FC/AP badges next to each title; page background + frosted overlay (heavy on sides, light middle); page-level FC/AP image drop zones; AI-picked 30-second audio preview that plays in real game / test game |
 | **Song Editor** | DAW-style layout with per-mode features (see below) |
 | **Test Game** | Green button on all editor pages; launches child process of `MusicGameEngineTest.exe --test <project>` |
-| **Asset Browser** | Unified import system shared across all pages, "All Files" default |
+| **Asset Browser** | Unified import system shared across all pages, "All Files" default; MAT tiles render live material previews that match the slot's target shape (note / track / arc / disk / ScanLine sweep) |
 
 **SongEditor features:**
 - DAW-style layout: scene preview + chart timeline simultaneous, left sidebar config, waveform strip
@@ -233,6 +233,8 @@ ProjectHub → StartScreenEditor → MusicSelectionEditor → SongEditor → (Te
 - Multi-waypoint hold authoring via drag-to-record
 - **Materials panel** — per-slot visual overrides (Unlit / Glow / Scroll / Pulse / Gradient / Custom), project-level `.mat` asset library shared across charts
 - **AI Shader Generator** — for Custom-kind materials: describe an effect in English, worker writes & compiles a `.frag` with glslc-error retry loop
+- **Music-selection preview clip (AI-picked)** — Auto-Detect button slides a 30-second window over the hardest-difficulty AI-marker strengths and selects the peak-energy region as the song's preview start; Start + Length sliders for manual tuning. The preview is played by the Music Selection page in real-game / test-game mode only.
+- **Material Builder** — relocated from Start Screen; full CRUD (Unlit / Glow / Scroll / Pulse / Gradient / Custom) lives with the rest of the gameplay-authoring controls
 - **Circle mode:** keyframed disk animation (rotate/scale/move) with easing
 - **ScanLine mode:** paginated page-based authoring, per-page speed overrides, variable-speed keyframes, Cytus-style slides (LMB+RMB), multi-sweep holds
 - **3D DropNotes mode:** multi-waypoint arc editor (click-to-place, chain merge on import), per-waypoint height handles, ArcTap click-to-place on parent arc

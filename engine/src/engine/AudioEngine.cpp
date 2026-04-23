@@ -72,6 +72,28 @@ void AudioEngine::stop() {
     m_playing = false;
 }
 
+void AudioEngine::playFrom(double startSec) {
+    if (!m_impl || !m_impl->soundLoaded) return;
+    ma_uint32 sampleRate = 0;
+    ma_sound_get_data_format(&m_impl->sound, nullptr, nullptr,
+                             &sampleRate, nullptr, 0);
+    if (sampleRate == 0) sampleRate = 44100;
+    if (startSec < 0.0) startSec = 0.0;
+    ma_uint64 frame = (ma_uint64)(startSec * (double)sampleRate);
+    ma_sound_seek_to_pcm_frame(&m_impl->sound, frame);
+    ma_sound_start(&m_impl->sound);
+    m_playing = true;
+}
+
+double AudioEngine::durationSeconds() const {
+    if (!m_impl || !m_impl->soundLoaded) return 0.0;
+    float lengthSec = 0.f;
+    if (ma_sound_get_length_in_seconds(
+            const_cast<ma_sound*>(&m_impl->sound), &lengthSec) != MA_SUCCESS)
+        return 0.0;
+    return (double)lengthSec;
+}
+
 void AudioEngine::setMusicVolume(float v) {
     if (v < 0.f) v = 0.f;
     if (v > 1.f) v = 1.f;

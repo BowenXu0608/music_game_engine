@@ -3,6 +3,8 @@
 #include <imgui.h>
 #include <algorithm>
 #include <chrono>
+#include <ctime>
+#include <cstring>
 #include <fstream>
 #include <filesystem>
 #include <nlohmann/json.hpp>
@@ -154,6 +156,43 @@ fs::path stageProjectForPackaging(const fs::path& projectRoot,
 
 // ── scan ─────────────────────────────────────────────────────────────────────
 
+namespace {
+
+// Walk the project folder and return the most-recent file write time.
+// Falls back to the folder's own mtime if iteration fails.
+fs::file_time_type latestMtime(const fs::path& root) {
+    std::error_code ec;
+    fs::file_time_type latest = fs::last_write_time(root, ec);
+    fs::recursive_directory_iterator it(root, fs::directory_options::skip_permission_denied, ec);
+    if (ec) return latest;
+    for (; it != fs::recursive_directory_iterator(); it.increment(ec)) {
+        if (ec) { ec.clear(); continue; }
+        auto t = it->last_write_time(ec);
+        if (!ec && t > latest) latest = t;
+    }
+    return latest;
+}
+
+// Convert filesystem file_time to a localtime-formatted string + raw seconds.
+// Using duration-offset trick (no MSVC clock_cast required on older runtimes).
+void formatMtime(fs::file_time_type ft, std::string& out, long long& rawSec) {
+    auto sctp = std::chrono::time_point_cast<std::chrono::system_clock::duration>(
+        ft - fs::file_time_type::clock::now() + std::chrono::system_clock::now());
+    std::time_t tt = std::chrono::system_clock::to_time_t(sctp);
+    rawSec = static_cast<long long>(tt);
+    char buf[64] = {};
+    std::tm tmv{};
+#ifdef _WIN32
+    localtime_s(&tmv, &tt);
+#else
+    tmv = *std::localtime(&tt);
+#endif
+    std::strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M", &tmv);
+    out = buf;
+}
+
+} // namespace
+
 void ProjectHub::scanProjects() {
     if (m_scanned) return;
     m_projects.clear();
@@ -174,9 +213,17 @@ void ProjectHub::scanProjects() {
             info.path         = fs::absolute(entry.path()).string();
             info.defaultChart = j.value("defaultChart", "");
             info.shaderPath   = j["paths"].value("shaders", "../../build/shaders");
+            formatMtime(latestMtime(entry.path()), info.lastModified, info.lastModifiedRaw);
             m_projects.push_back(std::move(info));
         } catch (...) {}
     }
+
+    // Newest-modified first — users usually want to see what they just touched.
+    std::sort(m_projects.begin(), m_projects.end(),
+              [](const ProjectInfo& a, const ProjectInfo& b) {
+                  return a.lastModifiedRaw > b.lastModifiedRaw;
+              });
+
     m_scanned = true;
 }
 
@@ -336,11 +383,53 @@ void ProjectHub::render(Engine* engine) {
 
     ImGui::SetCursorPosY(50);
     ImGui::Text("Music Game Engine - Project Hub");
+    ImGui::TextDisabled("Click a project to select. Double-click to open.");
     ImGui::Separator();
     ImGui::Spacing();
 
-    if (ImGui::Button("+ Create Game", ImVec2(150, 36)))
+    // ── Action bar: search • Create • Add File • (Open/Build APK when selected)
+    ImGui::SetNextItemWidth(260);
+    ImGui::InputTextWithHint("##search", "Search projects...",
+                             m_searchBuf, sizeof(m_searchBuf));
+    ImGui::SameLine();
+    if (ImGui::Button("+ Create Game", ImVec2(150, 28)))
         m_showCreateDialog = true;
+    ImGui::SameLine();
+    if (ImGui::Button("+ Add File", ImVec2(120, 28))) {
+        m_showAddFileDialog = true;
+        m_addFileError.clear();
+    }
+
+    const bool hasSelection =
+        m_selectedIdx >= 0 && m_selectedIdx < (int)m_projects.size();
+
+    if (hasSelection) {
+        const ProjectInfo& sel = m_projects[m_selectedIdx];
+        ImGui::SameLine();
+        ImGui::Dummy(ImVec2(16, 0));
+        ImGui::SameLine();
+
+        if (ImGui::Button(("Open: " + sel.name).c_str(), ImVec2(0, 28))) {
+            m_selectedProject = sel;
+            m_projectSelected = true;
+            if (engine) {
+                engine->openProject(sel.path);
+                engine->startScreenEditor().load(sel.path);
+                engine->switchLayer(EditorLayer::StartScreen);
+            }
+            if (m_launchCallback) m_launchCallback(sel);
+        }
+
+        ImGui::SameLine();
+        bool disableApk = m_apkRunning;
+        if (disableApk) ImGui::BeginDisabled();
+        ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.95f, 0.30f, 0.75f, 0.90f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.00f, 0.45f, 0.85f, 1.00f));
+        if (ImGui::Button(("Build APK: " + sel.name).c_str(), ImVec2(0, 28)))
+            startApkBuild(sel);
+        ImGui::PopStyleColor(2);
+        if (disableApk) ImGui::EndDisabled();
+    }
 
     ImGui::Spacing();
     ImGui::Separator();
@@ -348,41 +437,203 @@ void ProjectHub::render(Engine* engine) {
 
     if (m_projects.empty()) {
         ImGui::TextDisabled("No projects found. Create one to get started.");
-    } else {
-        for (const auto& proj : m_projects) {
-            ImGui::PushID(proj.name.c_str());
-            if (ImGui::Button(proj.name.c_str(), ImVec2(300, 50))) {
+        ImGui::End();
+        renderCreateDialog(engine);
+        renderAddFileDialog();
+        renderApkDialog();
+        return;
+    }
+
+    // Case-insensitive substring match against project name.
+    std::string query = m_searchBuf;
+    std::transform(query.begin(), query.end(), query.begin(),
+                   [](unsigned char c) { return (char)std::tolower(c); });
+
+    int visibleCount = 0;
+    for (size_t i = 0; i < m_projects.size(); ++i) {
+        const auto& proj = m_projects[i];
+        if (!query.empty()) {
+            std::string lower = proj.name;
+            std::transform(lower.begin(), lower.end(), lower.begin(),
+                           [](unsigned char c) { return (char)std::tolower(c); });
+            if (lower.find(query) == std::string::npos) continue;
+        }
+        ++visibleCount;
+
+        ImGui::PushID((int)i);
+        const bool selected = (int)i == m_selectedIdx;
+
+        const ImVec2 rowPos = ImGui::GetCursorScreenPos();
+        const float  rowW   = ImGui::GetContentRegionAvail().x;
+        const ImVec2 rowSize(rowW, 56.f);
+
+        // Selection highlight overlay (drawn behind the interactive row).
+        if (selected) {
+            ImDrawList* dl = ImGui::GetWindowDrawList();
+            dl->AddRectFilled(rowPos,
+                              ImVec2(rowPos.x + rowW, rowPos.y + rowSize.y),
+                              IM_COL32(0, 120, 200, 70), 6.f);
+            dl->AddRect(rowPos,
+                        ImVec2(rowPos.x + rowW, rowPos.y + rowSize.y),
+                        IM_COL32(0, 210, 255, 255), 6.f, 0, 2.f);
+            dl->AddRectFilled(rowPos,
+                              ImVec2(rowPos.x + 4, rowPos.y + rowSize.y),
+                              IM_COL32(255, 80, 200, 255));
+        }
+
+        bool clicked = ImGui::Selectable("##proj_row", selected,
+                                          ImGuiSelectableFlags_AllowDoubleClick,
+                                          rowSize);
+        bool dbl = clicked && ImGui::IsMouseDoubleClicked(0);
+
+        // Overlay row content.
+        ImGui::SetCursorScreenPos(ImVec2(rowPos.x + 14, rowPos.y + 8));
+        ImGui::Text("%s", proj.name.c_str());
+        ImGui::SetCursorScreenPos(ImVec2(rowPos.x + 14, rowPos.y + 30));
+        ImGui::TextDisabled("v%s   |   Modified: %s",
+                            proj.version.c_str(),
+                            proj.lastModified.empty() ? "-" : proj.lastModified.c_str());
+
+        // Reset cursor below the row so ImGui lays out the next item correctly.
+        ImGui::SetCursorScreenPos(ImVec2(rowPos.x, rowPos.y + rowSize.y + 4));
+
+        if (clicked) {
+            m_selectedIdx = (int)i;
+            if (dbl && engine) {
                 m_selectedProject = proj;
                 m_projectSelected = true;
-                if (engine) {
-                    // Point the engine-wide material asset library at the
-                    // selected project before the editors start reading
-                    // chart data — migration relies on it being loaded.
-                    engine->openProject(proj.path);
-                    engine->startScreenEditor().load(proj.path);
-                    engine->switchLayer(EditorLayer::StartScreen);
-                }
+                engine->openProject(proj.path);
+                engine->startScreenEditor().load(proj.path);
+                engine->switchLayer(EditorLayer::StartScreen);
                 if (m_launchCallback) m_launchCallback(proj);
             }
-            ImGui::SameLine();
-            ImGui::Text("v%s", proj.version.c_str());
-            ImGui::SameLine();
-            ImGui::Dummy(ImVec2(20, 0));
-            ImGui::SameLine();
-            bool disableApk = m_apkRunning;
-            if (disableApk) ImGui::BeginDisabled();
-            if (ImGui::Button("Build APK", ImVec2(110, 28))) {
-                startApkBuild(proj);
-            }
-            if (disableApk) ImGui::EndDisabled();
-            ImGui::PopID();
         }
+
+        ImGui::PopID();
+    }
+
+    if (visibleCount == 0) {
+        ImGui::TextDisabled("No projects match '%s'.", m_searchBuf);
     }
 
     ImGui::End();
 
     renderCreateDialog(engine);
+    renderAddFileDialog();
     renderApkDialog();
+}
+
+// ── import existing project by path ──────────────────────────────────────────
+
+bool ProjectHub::importProject(const std::string& srcPath) {
+    fs::path src = srcPath;
+    // Trim stray surrounding quotes (common when users paste from Explorer).
+    std::string s = srcPath;
+    if (s.size() >= 2 && s.front() == '"' && s.back() == '"')
+        s = s.substr(1, s.size() - 2);
+    src = s;
+
+    std::error_code ec;
+    if (!fs::exists(src, ec)) {
+        m_addFileError = "Path does not exist.";
+        return false;
+    }
+
+    // Accept either a folder containing project.json, or a direct
+    // project.json file (in which case we import its parent folder).
+    fs::path srcDir;
+    if (fs::is_regular_file(src) && src.filename() == "project.json")
+        srcDir = src.parent_path();
+    else if (fs::is_directory(src) && fs::exists(src / "project.json"))
+        srcDir = src;
+    else {
+        m_addFileError =
+            "Invalid format: folder must contain a project.json file.";
+        return false;
+    }
+
+    std::string folderName = srcDir.filename().string();
+    if (folderName.empty()) {
+        m_addFileError = "Could not determine project folder name.";
+        return false;
+    }
+
+    fs::path dst = fs::path("../../Projects") / folderName;
+    if (fs::exists(dst)) {
+        m_addFileError = "A project named '" + folderName + "' already exists.";
+        return false;
+    }
+
+    try {
+        fs::create_directories(dst.parent_path());
+        fs::copy(srcDir, dst,
+                 fs::copy_options::recursive |
+                 fs::copy_options::overwrite_existing);
+    } catch (const std::exception& e) {
+        m_addFileError = std::string("Copy failed: ") + e.what();
+        return false;
+    }
+
+    m_addFileError.clear();
+    m_scanned = false;  // force rescan
+    return true;
+}
+
+// ── add file dialog ──────────────────────────────────────────────────────────
+
+void ProjectHub::renderAddFileDialog() {
+    if (!m_showAddFileDialog) return;
+
+    ImVec2 center{ImGui::GetIO().DisplaySize.x * 0.5f,
+                  ImGui::GetIO().DisplaySize.y * 0.5f};
+    ImGui::SetNextWindowPos(center, ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+    ImGui::SetNextWindowSize(ImVec2(520, 240), ImGuiCond_Always);
+    ImGui::Begin("Add Project from File", nullptr,
+                 ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
+                 ImGuiWindowFlags_NoCollapse);
+
+    ImGui::TextWrapped(
+        "Paste the path to a project folder or its project.json file. "
+        "The folder must contain a valid project.json to be imported.");
+    ImGui::Spacing();
+    ImGui::SetNextItemWidth(-1);
+    bool hitEnter = ImGui::InputTextWithHint(
+        "##addpath", "C:/path/to/MyProject  (or project.json)",
+        m_addFilePath, sizeof(m_addFilePath),
+        ImGuiInputTextFlags_EnterReturnsTrue);
+
+    ImGui::Spacing();
+    ImGui::Separator();
+    ImGui::Spacing();
+
+    if (!m_addFileError.empty()) {
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.f, 0.35f, 0.35f, 1.f));
+        ImGui::TextWrapped("%s", m_addFileError.c_str());
+        ImGui::PopStyleColor();
+        ImGui::Spacing();
+    }
+
+    bool canImport = m_addFilePath[0] != '\0';
+    if (!canImport) ImGui::BeginDisabled();
+    bool doImport = ImGui::Button("Import", ImVec2(110, 32)) ||
+                    (hitEnter && canImport);
+    if (!canImport) ImGui::EndDisabled();
+
+    if (doImport) {
+        if (importProject(m_addFilePath)) {
+            m_showAddFileDialog = false;
+            std::memset(m_addFilePath, 0, sizeof(m_addFilePath));
+        }
+    }
+
+    ImGui::SameLine();
+    if (ImGui::Button("Cancel", ImVec2(110, 32))) {
+        m_showAddFileDialog = false;
+        m_addFileError.clear();
+        std::memset(m_addFilePath, 0, sizeof(m_addFilePath));
+    }
+
+    ImGui::End();
 }
 
 // ── APK build ────────────────────────────────────────────────────────────────

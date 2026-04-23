@@ -289,3 +289,63 @@ Reference-driven rebalance of note types + lane distribution, with LLM narration
 **Files:** `engine/src/editor/ChartStyle.{h,cpp}`. SongEditor gained pimpl `m_style` (`StyleState` in .cpp) as the third AI panel alongside `m_copilot` + `m_audit`; also a new `Engine* m_engineCached` member refreshed each frame in `render()` so the panel can reach `engine->musicSelectionEditor().sets()` without changing `renderProperties()`' signature. `MusicSelectionEditor` gained `const std::vector<MusicSetInfo>& sets() const`.
 
 **Scope** — deliberately minimal: fingerprint is ratios + histograms (no motif / phrasing analysis); candidates are project-scoped (no external-file picker); one target difficulty at a time (no multi-difficulty fan-out). Backlog items 2–5 on the AI-agent list (replay coaching, auto-metadata, lyric sync, voice authoring) are deferred per user direction.
+
+---
+
+## Editor UI polish pass (2026-04-23)
+
+Cross-page work that brings the three non-gameplay layers up to the same quality as SongEditor and reshuffles responsibilities between pages.
+
+### Global palette (`ImGuiLayer.cpp`)
+
+`ImGuiLayer::init` overrides `StyleColorsDark()` with a black-canvas palette: `WindowBg` ≈ 0.03 RGB, `FrameBg` 0.10, cyan primary button (0,0.55,0.85), magenta active (0.95,0.30,0.75), neutral-gray `Header` family (0.22–0.70 RGB, 0.55–0.75 α) so selection hover doesn't read purple, purple-free scrollbar/separator/tab/resize-grip cascade. Rounding bumped (Frame=4, Window=6, Popup=6). Text 0.96 RGB; disabled 0.54. `AndroidEngine.cpp` keeps the stock dark theme — only editor windows see the new palette.
+
+### Project Hub (`ProjectHub.{h,cpp}`)
+
+- `ProjectInfo` gained `lastModified` (formatted `YYYY-MM-DD HH:MM`) + `lastModifiedRaw`. `scanProjects()` walks each project via `fs::recursive_directory_iterator` with `skip_permission_denied`, converts `fs::file_time_type` → `system_clock` via the duration-offset trick (avoids MSVC `clock_cast` availability issues), sorts newest-first.
+- Action bar: `InputTextWithHint` search (case-insensitive substring) + `+ Create Game` + `+ Add File`. Rows use `Selectable` with `AllowDoubleClick` — single-click selects (cyan outline + magenta left bar + tinted fill via `ImDrawList`), double-click opens the editor. `Build APK: <name>` magenta button appears in the action bar only when a project is selected; per-row APK buttons removed.
+- `importProject(srcPath)` accepts either a folder containing `project.json` or the `project.json` file itself, strips surrounding quotes, validates format, copies into `Projects/` via `fs::copy(recursive | overwrite_existing)`, forces a rescan on success.
+
+### Shared editor preview aspect (`ui/PreviewAspect.h` + `Engine::PreviewAspect`)
+
+`Engine::PreviewAspect { int w, h, presetIdx }` added to `Engine.h` with `previewAspect()` accessor so Start Screen and Music Selection share one ratio state. Header exposes:
+
+- `presets(count)` — 9 landscape-only entries (16:9 1920×1080 / 16:10 / 4:3 / 3:2 / 18:9 / 19.5:9 / 20:9 / 21:9 / 1:1) + `Custom`. Portrait ratios deliberately omitted (game is landscape-only).
+- `enforceLandscape(a)` — clamps after every edit: `h = min(w,h)`, also applied at read-time in `fitAndLetterbox` so stale portrait state from older saves can't leak into the rendered rect.
+- `renderControls(a)` — preset `Combo` + two `InputInt` boxes + `(landscape only)` hint. Editing an input snaps `presetIdx` to `Custom`.
+- `fitAndLetterbox(a, avail, color)` returns `{origin, size}` of the fitted sub-rect and paints the four letterbox bars around it.
+
+Both `StartScreenEditor::renderPreview()` and `MusicSelectionEditor::renderPreview()` call `renderControls` at the top then draw the scene inside `fitAndLetterbox`. `PushClipRect(origin, origin+size)` wraps the scene draw so logo text, wheels, cover art can't bleed into the letterbox bars.
+
+### Start Screen Editor properties
+
+- Italic checkbox removed from Logo. Tap Text section keeps only the Size slider (Text content + Position removed).
+- **Per-section `Default` pills** render as the first line inside each `if(open){}` body of every CollapsingHeader (Background / Logo / Tap Text / Transition Effect / Audio). Placing them inside the body avoids both scrollbar clipping and the CollapsingHeader's full-width hit area stealing the click. Load + Reset removed from the bottom nav — per-section Default handles resets.
+- **Hard caps enforced every frame** inside `renderProperties()`: `m_logoFontSize ≤ 96`, `m_logoScale ≤ 3.0`, `m_tapTextSize ≤ 72`. Over-sized values from stale saves get clamped on the next frame.
+- **Text fit-to-width**: if `CalcTextSizeA(fontSize).x > pw * 0.96`, `fontSize` is scaled by `pw*0.96 / textSize.x` before draw. Applied to both logo and tap text in `renderPreview` and `renderGamePreview` so nothing is clipped.
+
+### Materials relocated — Start Screen → Song Editor
+
+`StartScreenEditor::renderMaterials(Engine*)` and `drawMaterialPreviewAt(MaterialAsset, p0, size)` are now **public**. Start Screen's tab bar is gone — properties pane renders directly. SongEditor's properties pane grew a `Material Builder` CollapsingHeader that calls `engine->startScreenEditor().renderMaterials(engine)`. Per-chart FC/AP Achievements section deleted from SongEditor (moved to Music Selection, one pair per game).
+
+### Assets grid material previews
+
+MAT tiles render live `drawMaterialPreviewAt()` previews instead of the old static "MAT" disc. `drawMaterialPreviewAt()` chooses a shape family from `MaterialAsset::targetSlotSlug` (substring match): NoteTap (rectangle), NoteFlick (rectangle + triangle arrow), HoldBody (tall rect with bright caps), Arc (`AddBezierCubic` with halo), ArcTap (diamond via `AddQuadFilled`), Track (`AddImageQuad` trapezoid), JudgmentBar (thin rect + halo bands), Disk (ring), ScanLine (animated sweep clipped to tile via `PushClipRect`), plus Default. Kind overlays applied on top: Scroll animates diagonal stripes, Pulse modulates brightness via `1 + (peak-1)*exp(-phase*decay)`, Glow adds radial halo rings, Gradient applies vertical color blend. Checker backdrop so alpha is readable. Tiles hover-tooltip at 260×140 with target mode/slot line. Texture tiles hover at 256×256. All tiles flow-wrap via shared `flowNext()` lambda (`GetItemRectMax().x + spacing + tileW ≤ GetWindowPos().x + GetWindowContentRegionMax().x` → `SameLine`, else drop to next row).
+
+### Music Selection Editor
+
+- Cover-path text hidden (both Song and Set panels — thumbnail + Clear remain).
+- Assets panel displays materials too, using the public `StartScreenEditor::drawMaterialPreviewAt()`.
+- Vertical-layout fix: `ImGui::Dummy(avail)` removed from end of `renderPreview` (was double-reserving height on top of the aspect-controls row, spawning a scrollbar). Center stack (cover + difficulty + play) vertically centered inside `ph`.
+- **Page Background + frosted overlay**: `m_pageBackground` persisted as top-level `background` in `music_selection.json`; drop zone in Hierarchy panel. When set, `renderPreview` and `renderGamePreview` paint the background over the whole scene, then layer 5 horizontal bands — left 18% heavy frost (α 190), 18 px gradient heavy→light, middle light frost (α 55), 18 px gradient light→heavy, right 18% heavy frost. 2 px dark vertical shadow lines at each boundary give the frost panels visible depth. (Earlier attempt used bright 1-px highlight lines with `+0.5f` / `-0.5f` sub-pixel offsets — removed because the fractional rasterization made left and right look asymmetric.)
+- **Achievement badges (page-level)**: `m_fcImage` / `m_apImage` persisted as top-level `fcImage` / `apImage`. Hierarchy panel shows two 96×96 square drop zones with **aspect-fit display** via `getThumb` → `m_thumbCache` → `Texture.width/height` → `scale = min(zoneSide/imgW, zoneSide/imgH)` centered. Toggle button "Preview Badges in Scene" lives inside the Hierarchy panel.
+- Per-difficulty stats added to `SongInfo`: `scoreEasy / scoreMedium / scoreHard` + `achievementEasy / achievementMedium / achievementHard`. Judgement system writes these; UI is read-only (per-difficulty score/achievement editor was added + removed per user feedback — belongs to the runtime, not the author).
+- **Song wheel card redesign**: layout = `[cover 25%] [text column] [rhombus pair + padding]`. Rhombus sized first (`rhombusH = min(sh*1.6, cardW*0.20)`, rhombusW = rhombusH, 25% overlap), text column takes leftover width. Two Arcaea-style diamonds to the right of name+score drawn via `AddQuadFilled` (backing: cyan tint for FC unlocked, gold for AP, dark-gray when locked) + `AddImageQuad` (badge image clipped to the diamond's 4 vertices using uv `{0.5,0} {1,0.5} {0.5,1} {0,0.5}`; full alpha when unlocked, 25% when locked) + `AddQuad` outline (white unlocked, gray locked). AP implies FC. Per-card `PushClipRect` using the card's screen bounding rect so long names don't spill. Name pinned to `quadCY - sh*0.30`, score to `quadCY + sh*0.15` — overlap fixed. Preview toggle inside Hierarchy panel force-sets `fcUnlocked = apUnlocked = true` in the wheel so every card's slots light up.
+
+### Audio preview (AI-picked)
+
+- `AudioEngine` gained `playFrom(startSec)` — reads sample rate via `ma_sound_get_data_format`, computes frame = `startSec * sampleRate`, calls `ma_sound_seek_to_pcm_frame` + `ma_sound_start`. Also `durationSeconds()` via `ma_sound_get_length_in_seconds`.
+- `SongInfo` gained `previewStart` (default `-1` = auto) + `previewDuration` (default 30 s), persisted as `previewStart` / `previewDuration` keys.
+- `MusicSelectionEditor::updateAudioPreview(dt)` called every frame from `render()`: resets dwell on selection change (stops current clip), after 500 ms of dwell loads the song's audio (caches path via `m_previewPath` to avoid re-decoding), calls `ae.playFrom(previewStart)` (falls back to 25% of duration if unset), schedules stop after `previewDuration` seconds. Gated on `engine->isTestMode()` — the editor's authoring preview box stays silent; only full-screen test-game mode and real Android play the clip.
+- Default selection set to set 0 / song 0 when the page loads with nothing selected.
+- **SongEditor → Audio → Preview Clip section**: `Start (s)` slider (0..duration-previewDuration) + `Length (s)` slider (10–45 s cap) + `Auto-Detect` button. Auto-detect slides a `previewDuration` window over `m_diffMarkers[Hard]` + `m_diffFeatures[Hard]`, picks the window with the highest sum of `MarkerFeature.strength` as the peak-energy region. Falls back to 25% duration when no analysis data exists. Range summary: `X s → Y s (song: Z s)`.
