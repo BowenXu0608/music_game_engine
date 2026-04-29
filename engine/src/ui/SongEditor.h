@@ -6,6 +6,7 @@
 #include "engine/AudioAnalyzer.h"
 #include "game/chart/ChartTypes.h"
 #include "game/chart/ScanPageUtils.h"
+#include "renderer/MaterialSlots.h"
 #include "renderer/vulkan/TextureManager.h"
 #include <vulkan/vulkan.h>
 #include <GLFW/glfw3.h>
@@ -111,6 +112,24 @@ public:
 
     void render(Engine* engine);
 
+    // Draw the Copilot panel as a floating right-side overlay window. Used by
+    // the Engine so the chat sidebar is reachable from every editor page
+    // (ProjectHub, Start Screen, Music Selection, Settings). SongEditor's own
+    // render() already hosts Copilot in its sidebar, so the Engine skips this
+    // when it is the active layer.
+    void renderCopilotOverlay(Engine* engine);
+
+    // Width (pixels) the Copilot overlay currently occupies on the right side
+    // of the display. Other editor pages subtract this from their full-width
+    // window so their content never renders underneath the sidebar.
+    float copilotOverlayWidth() const;
+
+    // Each frame, non-SongEditor pages tell the overlay how many pixels of
+    // vertical space to leave free at the bottom (their Assets strip + nav
+    // bar height) so the overlay behaves like the inline Copilot on
+    // SongEditor: top body column only, Assets strip spans full width below.
+    void setOverlayBottomReserve(float px) { m_overlayBottomReserve = px; }
+
     void initVulkan(VulkanContext& ctx, BufferManager& bufMgr, ImGuiLayer& imgui,
                     GLFWwindow* window = nullptr);
     void shutdownVulkan(VulkanContext& ctx, BufferManager& bufMgr);
@@ -120,10 +139,31 @@ public:
     const std::string& projectPath() const { return m_projectPath; }
     void importFiles(const std::vector<std::string>& srcPaths);
 
+    // Public flush hook for the Engine's auto-save / window-close / crash
+    // path. Writes per-difficulty chart JSONs but skips the "Saved!" status
+    // toast so autosave doesn't visually compete with foreground edits.
+    // Safe to call when no song is loaded — becomes a no-op.
+    void flushChartsForAutoSave();
+
 private:
     std::string browseFile(const wchar_t* filter, const std::string& destSubdir);
     void renderProperties();
-    void renderGameModeConfig(Engine* engine);
+    void renderGameModeConfig(Engine* engine, bool structureOnly = false,
+                              bool presentationOnly = false);
+    // Left-sidebar "Note" tab: per-note-type sections (Click / Hold / Flick
+    // / Slide / Arc / ArcTap depending on game mode). Each section owns the
+    // settings for that note type — material-slot pickers, Hold-corner
+    // default, plus the lane-layout knobs at the top.
+    void renderNotePage(Engine* engine);
+    // Left-sidebar "Material" tab: project-wide material asset CRUD.
+    // Defers rendering to StartScreenEditor::renderMaterials which already
+    // owns the asset-library UI.
+    void renderMaterialBuilderPage(Engine* engine);
+    // Shared one-slot material picker used by both the Basic tab's full
+    // Materials block and the Note tab's per-type sections.
+    void renderMaterialSlotPicker(Engine* engine, MaterialModeKey modeKey,
+                                  const MaterialSlotInfo& slot);
+    void renderAiPanels();
     void renderGameModePreview(ImDrawList* dl, ImVec2 origin, ImVec2 size);
     void renderChartTimeline(ImDrawList* dl, ImVec2 origin, ImVec2 size, Engine* engine);
     void renderWaveform(ImDrawList* dl, ImVec2 origin, ImVec2 size, Engine* engine);
@@ -156,6 +196,12 @@ private:
     int inferLaneFromCentroid(float centroid, int laneCount, int prevLane,
                               bool antiJack) const;
 
+    // Run Chart Audit on the current difficulty's markers (notes intentionally
+    // empty so the marker-side density block always fires) and drop weakest-
+    // strength markers inside each flagged hotspot until the rate falls to
+    // m_autoMarkerThinNps. Snapshots into m_thinUndo* for one-shot undo.
+    void thinMarkersInDensityHotspots();
+
     SongInfo*      m_song        = nullptr;
     std::string    m_projectPath;
 
@@ -168,6 +214,31 @@ private:
     // ── Panel split ──────────────────────────────────────────────────────────
     float m_sidebarW  = 280.f;  // Left sidebar width in pixels (draggable)
     float m_sceneSplit = 0.35f; // Scene / Timeline vertical split in center area
+    bool  m_assetsBarOpen = true;  // Bottom Assets strip expanded?
+    float m_assetsBarH   = 200.f;  // Height when expanded
+    bool  m_copilotBarOpen = true; // Right Copilot sidebar expanded?
+    float m_copilotBarW   = 300.f; // Width when expanded (draggable)
+
+    // Right-sidebar page selector. Copilot is the default; Audit hosts the
+    // chart-audit metrics + issue list that used to live in a toolbar popup.
+    // m_rightSidebarTab tracks the currently-active tab; it's updated by
+    // BeginTabItem returning true (i.e., the user's click). The "pending"
+    // flag is set by external triggers (e.g. the toolbar Audit button) to
+    // force the matching tab on the next frame via ImGuiTabItemFlags_SetSelected.
+    // Without this gate, SetSelected would fire every frame and override the
+    // user's tab clicks, causing both tabs' content to appear to fight.
+    enum class RightSidebarTab { Copilot, Audit };
+    RightSidebarTab m_rightSidebarTab        = RightSidebarTab::Copilot;
+    bool            m_rightSidebarTabPending = false;
+
+    // Overlay (docked sidebar) state - shared across all non-SongEditor pages.
+    bool  m_overlayOpen   = true;
+    float m_overlayFullW  = 320.f;
+    float m_overlayStripW = 28.f;
+    // Reserved pixels at the bottom of the viewport so the overlay leaves
+    // room for each page's Assets strip + nav bar. Set every frame by the
+    // active page before Engine.cpp calls renderCopilotOverlay().
+    float m_overlayBottomReserve = 0.f;
 
     // ── Chart timeline state ─────────────────────────────────────────────────
     float m_timelineScrollX  = 0.f;    // horizontal scroll offset in seconds
@@ -223,6 +294,12 @@ private:
     // Default laneSpan for newly placed notes (Circle mode). 1, 2, or 3 lanes.
     int       m_defaultLaneSpan = 1;
 
+    // Default per-segment transition style for newly authored Hold waypoints.
+    // Picked in the Note tab's Hold section; applied when the drag-to-record
+    // gesture pushes a new waypoint. "Apply to All Holds" rewrites every
+    // existing hold waypoint's style to this value.
+    EditorHoldTransition m_defaultHoldTransition = EditorHoldTransition::Curve;
+
     // ── Circle-mode disk animation authoring ─────────────────────────────
     // Per-difficulty keyframe lists, matching the m_diffNotes convention.
     // Copied into ChartData::diskAnimation on export, and read back on load
@@ -231,6 +308,7 @@ private:
     std::unordered_map<int, std::vector<DiskMoveEvent>>     m_diffDiskMove;
     std::unordered_map<int, std::vector<DiskScaleEvent>>    m_diffDiskScale;
 
+public:  // Phase 7: Copilot extended apply path mutates these.
     std::vector<DiskRotationEvent>& diskRot()       { return m_diffDiskRot  [(int)m_currentDifficulty]; }
     std::vector<DiskMoveEvent>&     diskMove()      { return m_diffDiskMove [(int)m_currentDifficulty]; }
     std::vector<DiskScaleEvent>&    diskScale()     { return m_diffDiskScale[(int)m_currentDifficulty]; }
@@ -243,13 +321,16 @@ private:
     const std::vector<DiskScaleEvent>&    diskScale() const {
         return const_cast<SongEditor*>(this)->m_diffDiskScale[(int)m_currentDifficulty];
     }
+private:
 
     // Per-difficulty scan-line speed events (Cytus mode only).
     std::unordered_map<int, std::vector<ScanSpeedEvent>> m_diffScanSpeed;
+public:  // Phase 7: Copilot extended apply path mutates these.
     std::vector<ScanSpeedEvent>& scanSpeed() { return m_diffScanSpeed[(int)m_currentDifficulty]; }
     const std::vector<ScanSpeedEvent>& scanSpeed() const {
         return const_cast<SongEditor*>(this)->m_diffScanSpeed[(int)m_currentDifficulty];
     }
+private:
     int m_selectedScanSpeedKf = -1;
 
     // Phase table for variable-speed scan line (rebuilt when speed events change).
@@ -266,12 +347,14 @@ private:
     // speed overrides. m_scanPageTable is rebuilt lazily from timingPoints +
     // overrides + song end time.
     std::unordered_map<int, std::vector<ScanPageOverride>> m_diffScanPages;
+public:  // Phase 7: Copilot extended apply path mutates these.
     std::vector<ScanPageOverride>& scanPages() {
         return m_diffScanPages[(int)m_currentDifficulty];
     }
     const std::vector<ScanPageOverride>& scanPages() const {
         return const_cast<SongEditor*>(this)->m_diffScanPages[(int)m_currentDifficulty];
     }
+private:
 
     int                        m_scanCurrentPage    = 0;
     std::vector<ScanPageInfo>  m_scanPageTable;
@@ -337,6 +420,30 @@ private:
     bool       m_scanSlideDragging = false;
     EditorNote m_scanSlideDraft{};
     bool       m_scanSlideGoingUp  = false;
+
+    // Driven by the sidebar's "Preview Clip" group: true while the cursor
+    // is inside the group OR while a click has pinned it. The pin sticks
+    // through cursor-out and is only cleared by a click landing outside the
+    // group, mirroring a "sticky popover" pattern.
+    bool       m_showPreviewLabel = false;
+    bool       m_pinPreviewLabel  = false;
+
+    // ── Chart-audit problem-range highlight ─────────────────────────────────
+    // Same hover-or-pin logic as the Preview Clip overlay: hovering an audit
+    // issue button paints a translucent band on the waveform spanning that
+    // issue's [timeStart, timeEnd] in a category-specific color. Clicking
+    // the button pins it through cursor-out; clicking anywhere else clears
+    // the pin. Both the inline toolbar audit popup and the right-sidebar
+    // Chart Audit panel feed this state.
+    struct AuditHighlight {
+        bool  active    = false;
+        float timeStart = 0.f;
+        float timeEnd   = 0.f;
+        unsigned int fillColor = 0;  // ImU32
+        unsigned int edgeColor = 0;
+    };
+    AuditHighlight m_auditHover;
+    AuditHighlight m_auditPin;
 
     // ── Arc editing state (Arcaea 3D mode) ──────────────────────────────────
     bool       m_arcPlacing     = false;  // click-to-place in progress
@@ -411,6 +518,10 @@ private:
     struct CopilotState;
     std::unique_ptr<CopilotState> m_copilot;
     void renderCopilotPanel();
+    // Right-sidebar Audit tab — same content as the old toolbar popup
+    // (metrics + clickable issue buttons that paint colored bands on the
+    // waveform via m_auditHover/m_auditPin).
+    void renderAuditSidebarTab();
     void pollCopilot();
 
     // ── Chart Audit (read-only quality review, pimpl-hidden) ────────────────
@@ -433,6 +544,14 @@ private:
     bool  m_autoAntiJack      = true;   // nudge same-lane repeats
     float m_autoLaneCooldownMs = 80.f;  // 0..400 — min ms between notes on same lane
     float m_autoScanTimeGapMs  = 60.f;  // 0..300 — min ms between any two ScanLine notes
+    float m_autoMarkerThinNps  = 4.f;   // 1..10 — target NPS inside flagged density hotspots
+
+    // Single-shot Thin Markers undo. Snapshot is per-difficulty (the difficulty
+    // active at click time); Undo button only enables when this matches the
+    // currently selected difficulty so we don't restore into the wrong stream.
+    std::vector<float>           m_thinUndoMarkers;
+    std::vector<MarkerFeature>   m_thinUndoFeatures;
+    int                          m_thinUndoDifficulty = -1;
 
     // ── Test Game popup ──────────────────────────────────────────────────────
     bool m_showTestError = false;

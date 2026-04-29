@@ -1393,3 +1393,180 @@ CMake glob picks up the new PreviewAspect.h inclusion from editor sources withou
 ### Iteration count
 
 The session ran through roughly 25 user-facing iterations because screenshot-driven feedback found problems layer by layer — e.g., badges went through six placements (pop-up → center overlay → cover corner → song-wheel chip → song-wheel circle → rhombus-behind-title → rhombus-right-of-title) before landing where the user wanted them, and the Default button needed three layout attempts to survive the CollapsingHeader hit area + scrollbar. The final code only keeps the last of each attempt; intermediate decisions and why they were rejected are captured here.
+
+## 2026-04-26 — UTF-8 plumbing, audit overhaul, sidebar tabs, page-transition fixes
+
+Long screenshot-driven session on `song-editor-layout`. Roughly broken into four areas: page-transition stutter fixes, a CP_ACP→UTF-8 audit across every code path that touches an audio filename, a Chart Audit overhaul (markers + density retune + sidebar tab + colored waveform highlights + click-pin overlays), and several smaller editor-UI cleanups. All build + verified on the `test` project.
+
+### Copilot sidebar overlay — page-transition stutter (`engine/src/engine/Engine.cpp`, `engine/src/ui/SongEditor.cpp`, `MusicSelectionEditor.cpp`, `StartScreenEditor.cpp`)
+
+Switching between editor layers (Hub / Start Screen / Music Selection / Settings / SongEditor) caused a one-frame visual snap of the docked Copilot overlay. Two cross-frame timing bugs:
+
+1. **`m_currentLayer` could change mid-frame.** A button inside page A's render could call `switchLayer(B)`. `Engine::update()` already had `switch (m_currentLayer)` route to A, but the trailing overlay-decision check `if (m_currentLayer != SongEditor && …)` then read the *new* B — so on transitions involving SongEditor (no overlay) ↔ MS/SS/Settings (overlay), one frame ended up with the wrong combination of page+overlay. Fixed by snapshotting `const EditorLayer renderedLayer = m_currentLayer;` once at the top of the frame and using it for both the page-render switch and the overlay decision. Page render and overlay decision are now atomic per frame.
+
+2. **`m_overlayBottomReserve` formula depended on `GetCursorScreenPos()`.** Both `MusicSelectionEditor::render()` and `StartScreenEditor::render()` computed `bottomReserve = workSize.y - (GetCursorScreenPos().y + topH)` mid-render. The cursor's screen Y depended on whatever window-padding/scrollbar layout work had run by that point, so the reserve drifted between frames on the same page. Replaced with the stable expression `navH + 8 + assetsH + 4` derived from constants the page already knew. Same value every frame regardless of earlier layout.
+
+Net effect: overlay paints with consistent state on every frame, including the first frame of a new layer. No more snap.
+
+### Combo HUD glow stack (`engine/src/ui/SongEditor.cpp`, around line 4060)
+
+Combo-number rendering inherited the full HUD config including `glow=true` + `glowRadius`. `drawHudText`'s glow renderer paints **8 offset copies** of the glyph around the original (`offsets[][2]` ring at `SongEditor.cpp:4043–4046`). On the single-character "0" that read as a halo; on the wider "COMBO" label below it the 8 copies were visually distinct and stacked into a blurry mess.
+
+Three iterations with the user clarifying intent each turn:
+1. First removed the "COMBO" label entirely → user said keep it.
+2. Re-added with `glow=false` + `bold=false` only on the label → user said the number's halo is also wrong.
+3. Final: stripped glow + bold from both the number and the label, drew them as one entity. Number drawn once; label drawn at `+1.0 × numberFs / size.y` normalized below, scaled to 0.4× the font size.
+
+### `MusicSelectionEditor::save` UTF-8 crash + the 6-step Save-button rabbit hole (`engine/src/ui/MusicSelectionEditor.cpp`)
+
+User clicked **Save**; engine terminated with `[json.exception.type_error.316] invalid UTF-8 byte at index 14: 0xE9`. `nlohmann::json::dump()` rejects non-UTF-8 bytes by default, and the song list contained a CP936 (GBK) Chinese filename stored as the raw narrow bytes returned by `fs::path::string()`.
+
+First attempted fix was wrong and destructive: passed `error_handler_t::replace` to `dump()`. That silently substitutes U+FFFD into your data and writes the **mangled** version to disk — when the user clicked Save, it overwrote the working `music_selection.json` with `���&amp;amp+China+Blue+...`. User reported "you just lost all my record music." Recovery + correct fix:
+
+1. **Restored** `Projects/test/music_selection.json` from git (it was tracked; 305-line committed version recovered intact).
+2. **Reverted** the `error_handler_t::replace` call.
+3. Added `static std::string toUtf8(const std::string&)` in `MusicSelectionEditor.cpp` that detects valid UTF-8 with a manual scanner and, on failure, transcodes via `MultiByteToWideChar(CP_ACP, …)` → `WideCharToMultiByte(CP_UTF8, …)`. ASCII passes through unchanged.
+4. Wrapped every string field flowing into the JSON tree with `toUtf8(...)` — set name, song name/artist, cover/audio/chart paths, gameMode fcImage/apImage/backgroundImage, every `noteAssets` map entry, and the top-level `m_pageBackground` / `m_fcImage` / `m_apImage`.
+5. Wrapped `dump()` in `try/catch`. If anything *still* throws (shouldn't, but defense in depth), the file is **not written** — preserving existing on-disk data — and the error is logged to stderr.
+
+**Lesson recorded for the future:** never use a silent replace handler on user-data writes; mangling > throwing. If a write path can't validate, fail loud and refuse to write.
+
+### CP_ACP / UTF-8 audit across the audio path
+
+Same root cause as the Save crash — Windows `fs::path::string()` round-trips through CP_ACP (CP936 on this machine), so any non-ASCII audio filename came out as GBK bytes that downstream UTF-8 consumers couldn't decode. Symptoms cascaded across **four** different "audio file not found / failed to decode" errors, each at a different layer:
+
+1. **`SongEditor::browseFile` (`SongEditor.cpp:553`)** returned the relative path via `fs::relative(...).string()` (CP_ACP). Anything assigned to `m_song->audioFile` from the file-picker dialog was GBK. Replaced with `wstring → WideCharToMultiByte(CP_UTF8, …)` so the picker hands back UTF-8.
+
+2. **`SongEditor::canonicalUtf8` helper (new, `SongEditor.cpp:35–73`)** replaces both calls to `fs::canonical(fullAudioPath).string()`. On Windows it round-trips through `wstring`: UTF-8 input → `MultiByteToWideChar(CP_UTF8, …)` → `fs::path(wstring)` → `fs::canonical` → `WideCharToMultiByte(CP_UTF8, …)` → UTF-8 output. Falls back to `CP_ACP` decoding when the input bytes aren't valid UTF-8 (so already-set CP936 paths in the current session still resolve).
+
+3. **`AudioAnalyzer::runSubprocess` (`AudioAnalyzer.cpp`)** built the command line as `std::string` and launched via `CreateProcessA`, which interpreted the UTF-8 path bytes as `CP_ACP` for the child. Switched to `CreateProcessW`: convert UTF-8 path → `wstring` via `MultiByteToWideChar(CP_UTF8, …)`, build `cmdW` end-to-end as wide, launch with `STARTUPINFOW` + `CREATE_UNICODE_ENVIRONMENT`. Also injected `PYTHONUTF8=1` + `PYTHONIOENCODING=utf-8` into the child's env so the JSON the script prints back through the pipe stays UTF-8.
+
+4. **`tools/analyze_audio.py`** still failed on CP936 filenames even with the path correct — `miniaudio.decode_file` uses miniaudio's C-level `fopen`, which on Windows uses `CP_ACP` regardless of Python's encoding. `os.path.isfile` succeeded but `decode_file` returned `MA_DOES_NOT_EXIST` (-7). Fixed by reading the bytes in Python (`open(path, "rb").read()`, which honors `PYTHONUTF8=1`) and passing them to `miniaudio.decode(bytes_obj, ...)` — bypasses the C-level fopen entirely.
+
+5. **`AudioEngine::load` (`AudioEngine.cpp:35`)** went through `ma_sound_init_from_file`, which uses miniaudio's `ma_default_vfs_open__win32` → `CreateFileA` (CP_ACP). Empty waveform when the song's audioFile had non-ASCII chars. Switched to `ma_sound_init_from_file_w` after converting UTF-8 → `wstring` (`miniaudio.h` confirms it goes through `CreateFileW`). Same change applied to `AudioEngine::decodeWaveform` via `ma_decoder_init_file_w`.
+
+After these five fixes the analyzer, waveform, audio playback, and Save round-trip all work on `中村由利子+-+Whispering+Eyes.mp3` and `伍佰+&amp;amp;+China+Blue+-+白鸽.mp3`.
+
+### Chart Audit overhaul — markers, density retune, sidebar tab, colored highlights
+
+**Markers as first-class audit input.** `AuditMetrics` (in `engine/src/editor/ChartAudit.h`) gained a `const std::vector<float>& markers` parameter to `computeAuditMetrics`, defaulted to `{}` so existing call sites compile unchanged. New fields: `markerCount`, `peakMarkerRate2s`, `avgMarkerRate`, `markerDensityHotspots`, `markerDeadZones`, `unalignedNotes`. The audit now usefully reviews marker-only charts (immediately after Analyze Beats, before any notes are placed) — it speaks about the analyzer's output instead of saying the chart is empty.
+
+**Density retune.** The single 4 s × ≥24-event scan (≈6 NPS sustained) missed brief 10–12 NPS spikes and mid-density problem stretches. Refactored into a reusable `scanWindow(winSec, threshold, out)` lambda and run twice:
+- **Sustained:** 4 s × ≥16 events (≈4 NPS sustained) — flags mid-density passages the old threshold ignored.
+- **Burst:** 1 s × ≥8 events (≈8 NPS spike) — flags short jolts that don't sustain for 4 s.
+
+The two result lists are unioned: bursts that overlap a sustained run get absorbed (the wider, more useful range wins); bursts that don't get appended. Final list is sorted by start time. Marker density hotspots use the same 4 s × ≥16 threshold for consistency.
+
+**Marker evaluations hide once notes exist.** User directive: when authoring starts, the audit should focus on the chart, not on the analyzer's raw beat stream. `computeAuditMetrics` zeros `markerCount` / `avgMarkerRate` / `peakMarkerRate2s` and skips populating `markerDensityHotspots` / `markerDeadZones` when `notes` is non-empty. Every UI / prompt site that gates on `markerCount > 0` or iterates one of those vectors auto-hides as a result.
+
+**Orphan markers + coverage % removed entirely** (later iteration). User: "When I evaluate the marks, there should not have notes" — orphan-marker-runs (markers with no nearby note) and "Marker coverage by notes" only make sense when *both* sides exist, but by the user's contract they don't coexist. Dropped the `OrphanRun` struct, the `orphanMarkerRuns` vector, and `markersWithNote` / `notesWithoutMarker` fields. `unalignedNotes` (notes that drift off any analyzer marker) **stays** because it's a *note*-quality observation, not a marker evaluation, so it keeps surfacing once authoring starts. The `coverage` category is gone from the LLM system-prompt schema; `alignment` (off-beat notes) remains.
+
+**Per-issue colored waveform highlights with hover/click-pin.** New state on SongEditor: `AuditHighlight { active, timeStart, timeEnd, fillColor, edgeColor }`, `m_auditHover`, `m_auditPin`. Each issue button (jacks / crossovers / density / dead zones / marker hotspots / marker dead zones / off-beat notes, plus AI-issued issues from `renderAuditPanel`) sets `m_auditHover = h` on hover and `m_auditPin = h` on click. `m_auditHover.active` is reset to `false` at the very top of `SongEditor::render()`; at the very end, if `IsMouseClicked(0)` fired and nothing asserted hover, `m_auditPin.active` clears (click-outside dismiss). `renderWaveform` paints the band: `m_auditHover` if active, else `m_auditPin` if active, else nothing. Drawn under the preview-clip overlay so the brighter blue band always reads as on top when both happen to coexist.
+
+Color palette in new `auditCategoryColor(cat, fill, edge)` (`SongEditor.cpp` near top): `density`/`marker_density` red-orange, `jack` orange, `crossover` cyan, `pacing`/`dead_zone` gray, `difficulty` amber, `alignment` yellow, `other` neutral. Translucent fill (alpha 60–70) + brighter edge lines (alpha 200–230). Stable per-category so users learn the mapping by sight.
+
+**Audit moved from floating popup → right-sidebar tab.** The toolbar Audit button used to open a 360×160 floating popup that competed with the canvas. Right sidebar (`SECopilot` child window) now hosts an `ImGui::BeginTabBar` with two tabs: **Copilot** and **Audit**. The Audit tab calls new method `renderAuditSidebarTab()` which renders the same metrics summary + clickable issue list (no popup framing). Toolbar Audit button now sets `m_rightSidebarTab = Audit` + `m_rightSidebarTabPending = true` + `m_copilotBarOpen = true`; the tab bar consumes the pending flag once via `ImGuiTabItemFlags_SetSelected` and clears it. **Critical**: SetSelected must be one-shot, not asserted every frame — applying it every frame fights user clicks on the other tab and both tab bodies execute in the same frame, producing the "huge crush, two pages overlapping" the user reported. The pending-flag pattern eliminates that.
+
+### Preview-clip overlay — sidebar-driven hover + click-pin (`engine/src/ui/SongEditor.cpp`, `SongEditor.h`)
+
+Final design after several iterations:
+- Default: nothing on the waveform — no blue band, no edge lines, no "Preview Clip" text.
+- Hover the **sidebar's "Preview Clip" group** (header + Start slider + Auto button + Length slider, wrapped in `BeginGroup`/`EndGroup`) → entire overlay (fill + edges + label) appears as one unit.
+- Move cursor off the group → overlay vanishes.
+- **Click anywhere inside the group** → overlay pins. Cursor can leave; overlay stays.
+- **Click anywhere else** → pin cleared, overlay vanishes.
+
+Implementation: members `m_showPreviewLabel` + `m_pinPreviewLabel`. After `EndGroup`, `IsItemHovered(AllowWhenBlockedByActiveItem | AllowWhenBlockedByPopup)` reads `hoveringGroup` (the active-item flag keeps it true while a slider is being dragged). On `IsMouseClicked(Left)` press edge, `m_pinPreviewLabel = hoveringGroup`. `m_showPreviewLabel = hoveringGroup || m_pinPreviewLabel`. The waveform painter is then a pure consumer — `if (m_showPreviewLabel) { … paint everything … }`.
+
+All hit-testing on the waveform side was removed; the sidebar group is the single source of truth.
+
+### Chart-audit problem-range pin uses the same hover/click-pin contract as the preview clip overlay
+
+Both overlays follow the same shape now: hover a UI element → highlight; click → pin; click outside → unpin. Visually distinct (preview clip = blue, audit categories = palette colors) but UX-consistent.
+
+### Files touched (this session)
+
+- **New / heavily edited**: `engine/src/editor/ChartAudit.{h,cpp}` (markers, density retune, marker-evaluation gating, orphan removal).
+- **Edited**:
+  - `engine/src/engine/Engine.cpp` — captured-layer rendering for atomic page+overlay state.
+  - `engine/src/engine/AudioEngine.cpp` + `.h` (CP_ACP→UTF-8 path conversion + `ma_*_init_file_w`).
+  - `engine/src/engine/AudioAnalyzer.cpp` — `CreateProcessW`, UTF-8 wide cmdline, `PYTHONUTF8=1`.
+  - `engine/src/ui/SongEditor.{h,cpp}` — `canonicalUtf8`, `browseFile` UTF-8 return, `m_showPreviewLabel`/`m_pinPreviewLabel`, `RightSidebarTab` enum + pending flag, `AuditHighlight` + hover/pin pipeline, `auditCategoryColor`, `renderAuditSidebarTab`, combo-HUD glow strip.
+  - `engine/src/ui/MusicSelectionEditor.cpp` — `toUtf8` helper, JSON UTF-8 transcoding, `try/catch` around `dump()`, stable bottom-reserve formula.
+  - `engine/src/ui/StartScreenEditor.cpp` — stable bottom-reserve formula.
+  - `tools/analyze_audio.py` — `open()`+`miniaudio.decode(bytes)` instead of `decode_file`.
+
+### Iteration count + lessons
+
+About 30 build-run-screenshot cycles across the day. Three notable confusions worth recording:
+1. **Combo HUD design intent took 4 turns to land.** The user's "remove the wrong thing" message read both ways depending on which bug they cared about. Lesson: when the feedback is ambiguous and code touched is small, ask before changing.
+2. **Preview-clip overlay design took 5 turns** for the same reason — "hide the cover too" / "the cover should work as the label" / "two pages overlapping" each implied a different model. The "repeat what I said and don't change anything before I agree" mid-turn was the right intervention from the user; once we re-stated the design back together, the final implementation went in cleanly.
+3. **Replace-handler on JSON dump = data loss.** Tempting because it stops the throw, but it silently mangles user data on disk. The right pattern is transcode-on-write at every boundary that crosses CP_ACP / UTF-8, plus throw-on-failure with the file write skipped.
+
+## 2026-04-26 — Marker thinning + auto-save (`song-editor-layout`)
+
+Two compact features, both safety-net flavored: act on Chart Audit's marker-side density flags instead of just displaying them, and stop relying on the user pressing the green Save button.
+
+### Marker thinning — `Thin` / `Undo` toolbar buttons
+
+Closes the loop opened by the Chart Audit overhaul: the marker-side density block already flagged dense passages of analyzer output, but the user could only see them — not act on them. New toolbar entries between `Clr Mrk` and `Place`:
+
+- **Algorithm** (`SongEditor::thinMarkersInDensityHotspots`, `SongEditor.cpp`) — calls `computeAuditMetrics({}, dur, mk)` with notes intentionally empty so the marker-side density block fires even when the chart already has authored notes (`ChartAudit.cpp`'s gating suppresses marker hotspots once notes exist). For each `markerDensityHotspots` range, sorts in-range markers by `MarkerFeature.strength` ascending — markers with no feature sort to position 0 (preferred for removal). Drops the weakest until `count <= floor(0.9 × m_autoMarkerThinNps × width)`.
+- **Why iterate** — the audit's hotspot reports a *peak window count*, not a range total. Thinning to exactly `target × width` lets surviving markers re-cluster into a tighter 4 s window and re-trip the threshold. Iterates up to 8 passes, re-auditing each time, stopping when hotspots empty or no marker dropped that pass. The 0.9 margin gives the next audit pass slack.
+- **Single-shot undo** — `m_thinUndoMarkers` / `m_thinUndoFeatures` / `m_thinUndoDifficulty` snapshot is taken **only on first mutation per session** (when `snapshotExists == false`). All iterative passes inside one click share the snapshot, and a second `Thin` click after a partial converge does NOT overwrite the original-marker snapshot. That fixed the user-reported "Undo doesn't work" — the original code was overwriting the snapshot on every click, so Undo could only revert the most recent thin pass.
+- **Tuning** — `m_autoMarkerThinNps` (default 4 /s, range 1–10) added to the existing AI Place-All popup ("AI" toolbar button → "Thin markers target NPS" slider). Reset-defaults restores 4. To thin further, lower the slider and re-click `Thin` — Undo still walks all the way back to the original analyze output.
+
+### Wrong-toolbar bug, then moved to right toolbar
+
+First attempt put the buttons in the Scene-panel header next to `Analyze Beats` / `Clear Markers` — not visible in the screenshot the user sent. Real toolbar is `renderNoteToolbar` (above the timeline strip). Moved the buttons there. **Lesson:** SongEditor has *two* "Analyze Beats" surfaces (Scene header `Analyze Beats / Clear Markers` and timeline toolbar `Analyze / Clr Mrk`). Always ask which one the user is looking at — or grep the screenshot's button labels (`Analyzin / Clr Mrk` are the toolbar's, `Analyze Beats / Clear Markers` the Scene header's).
+
+### Auto-save — 30 s debounced, drag-safe, crash-safe
+
+Pure safety net — manual `Save` button still works the same. Plumbing in `Engine` (`Engine.h` / `Engine.cpp`); editors expose flush hooks (`SongEditor::flushChartsForAutoSave` is a public delegate to private `exportAllCharts`).
+
+- **Cadence — 30 s.** Sweet spot between editor-class apps (VSCode 1 s, IntelliJ 15 s) and DAWs (Reaper 60 s). Chart edits are slow and deliberate; 30 s caps a crash to half a minute of work without hammering disk during continuous note placement.
+- **Drag-safe.** `if (ImGui::IsAnyMouseDown()) { m_autoSaveTimer = kAutoSaveIntervalSec - 0.5f; return; }`. Defers the flush 0.5 s past mouse-up. Without this an autosave could fire mid-hold-stretch and write a half-extended hold.
+- **Layer-gated.** Skips during `EditorLayer::GamePlay` so the disk write can't jitter the audio thread.
+- **Dirty detection (hybrid).** Ambient: `ImGui::IsMouseReleased(0|1|2)` outside Gameplay flips `m_editorDirty = true` each frame. Cheap, broad, and false positives only cost one extra cadence-rate disk write. Explicit: `markEditorDirty()` calls at the surgical mutators (`thinMarkersInDensityHotspots`, Analyze-Beats result callback). Wider point-instrumentation can be added later — the ambient catch covers everything in the meantime.
+- **Flush — `Engine::performAutoSaveNow(reason)`** wraps `m_songEditor.flushChartsForAutoSave()` and `m_musicSelectionEditor.save()` in **independent try/catch** so a throw in one editor doesn't skip the other. Both editors already follow the user-data-writes-fail-loud rule internally (transcode at boundary + try/catch around `dump()` + refuse-to-write-on-throw); the outer try/catch is the crash-hook safety net. Posts a 3 s pale-blue `Auto-saved (reason)` toast on the SongEditor status row, distinct from the green manual-save / analyze toast palette.
+
+### Crash hooks
+
+Installed once after window creation (`Engine::installCrashHooks` called from `init()`):
+
+- `glfwSetWindowCloseCallback` → flush before X-button close.
+- `SetUnhandledExceptionFilter` (Win) → flush, then `EXCEPTION_CONTINUE_SEARCH` so debugger / WER still gets the crash.
+- `SetConsoleCtrlHandler` (Win) → catches Ctrl+C and console-window close.
+- `std::set_terminate` → catches unhandled C++ exceptions, then `std::abort`.
+- `mainLoop` post-loop → final `if (m_editorDirty) performAutoSaveNow("exit")` for the clean-shutdown path.
+
+All four hooks reach the engine via `Engine::s_autosaveInstance` (file-static, set in ctor, cleared in dtor; first instance wins). Each crash-hook call to `performAutoSaveNow` is itself wrapped in `try/catch` because callbacks fired during stack unwind cannot throw further. `performAutoSaveNow` is idempotent (clears `m_editorDirty`) so cascading triggers (window-close + post-loop final flush) don't double-write.
+
+### Files touched (this session)
+
+- **Edited**:
+  - `engine/src/ui/SongEditor.{h,cpp}` — toolbar buttons (`Thin`/`Undo` between `Clr Mrk` and `Place`), `m_autoMarkerThinNps` slider in AI popup, `thinMarkersInDensityHotspots`, `m_thinUndo*` snapshot fields, `flushChartsForAutoSave` public hook, autosave toast in status row, `markEditorDirty` calls on Analyze-result + Thin success.
+  - `engine/src/engine/Engine.{h,cpp}` — `markEditorDirty`, `performAutoSaveNow`, `tickAutoSave`, `installCrashHooks`, `s_autosaveInstance`, `kAutoSaveIntervalSec`, `m_editorDirty`, `m_autoSaveTimer`, `m_autoSaveStatusMsg`, `m_autoSaveStatusTimer`, `autoSaveStatusActive` / `autoSaveStatusMsg` accessors. `mainLoop` calls `tickAutoSave(dt)` and post-loop final flush. `init()` calls `installCrashHooks()` after window creation.
+
+### Lessons
+
+1. **The audit's hotspot count is *peak window*, not range total.** First thinning attempt (drop to `target × width`) didn't actually clear the audit — surviving markers re-clustered into tighter windows. Iteration + 0.9 margin was the fix. Worth remembering for any "thin to threshold" loop against a sliding-window detector.
+2. **One-shot undo must snapshot only on first mutation.** Original code overwrote the snapshot on every click, so iterative usage broke Undo. Fixed by gating snapshot on "no snapshot exists for this difficulty yet."
+3. **Two "Analyze Beats" toolbars exist in SongEditor.** Scene header and `renderNoteToolbar`. Read the screenshot before placing buttons.
+4. **Crash-hook callbacks can't throw.** Each `performAutoSaveNow` call from inside `Engine_AutoSaveExceptionFilter` / `Engine_AutoSaveCtrlHandler` / `Engine_AutoSaveTerminateHandler` is wrapped in its own `try/catch`. The terminate handler also calls `std::abort()` after flushing because returning from `set_terminate` is undefined behavior.
+
+---
+
+## 2026-04-26 (later) — Asset-tile tooltip cleanup
+
+Asset tiles in the bottom Assets strip used to hover-tooltip the full relative path (`assets/audio/foo.mp3`). For real-world filenames coming from WeChat / browser saves — e.g. `_cgi-bin_mmwebwx-bin_webwxgetmsgimg__&MsgID=7360904274095902613&skey=...&mmweb_appid=wx_webfilehelper.jpg` — the tooltip overflowed the screen. Two-step fix:
+
+1. **Path → filename.** Every `SetTooltip("%s", f.c_str())` / `TextUnformatted(f.c_str())` on an asset tile now passes `name` (already computed at each site as `fs::path(f).filename().string()`). Drag-drop payloads, deletion, and persisted song fields keep the full relative path.
+2. **Filename clamp.** Added `shortenForTooltip(s, maxLen=48)` in `engine/src/ui/AssetBrowser.h`. Drops the middle of the stem and keeps head + `...` + extension. All tooltip sites route through it.
+
+### Files touched
+
+- `engine/src/ui/AssetBrowser.h` — new `shortenForTooltip()` helper.
+- `engine/src/ui/MusicSelectionEditor.cpp` — 3 tooltip sites (image, audio, material — both rich and fallback branches).
+- `engine/src/ui/StartScreenEditor.cpp` — 3 tooltip sites (same coverage).
+- `engine/src/ui/SongEditor.cpp` — 3 tooltip sites (same coverage).

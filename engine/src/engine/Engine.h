@@ -194,4 +194,31 @@ public:
     // running. Saves music_selection.json first so the child sees the latest
     // edits. Returns true on success.
     bool spawnTestGameProcess(const std::string& projectPath);
+
+    // ── Auto-save ──────────────────────────────────────────────────────────
+    // Editor mutators (note edit, marker thin, song-field tweak, etc.) call
+    // markEditorDirty() so the next autosave tick flushes; performAutoSaveNow
+    // is the unified flush path used by the timer, the window-close hook, and
+    // the unhandled-exception filter. The dirty flag is cleared inside the
+    // flush; the 30 s timer resets every time we go from clean → dirty.
+    void markEditorDirty();
+    void performAutoSaveNow(const char* reason);
+    bool autoSaveStatusActive() const { return m_autoSaveStatusTimer > 0.f; }
+    const std::string& autoSaveStatusMsg() const { return m_autoSaveStatusMsg; }
+
+    // Public so the file-static OS-level crash callbacks (window-close,
+    // SetUnhandledExceptionFilter, SetConsoleCtrlHandler, std::set_terminate)
+    // can target the live engine — they can't capture `this`.
+    static Engine* s_autosaveInstance;
+
+private:
+    // Cross-call state lives on the instance; static pointer above is for
+    // the OS-level callbacks.
+    bool   m_editorDirty             = false;
+    float  m_autoSaveTimer           = 0.f;
+    static constexpr float kAutoSaveIntervalSec = 30.f;
+    float  m_autoSaveStatusTimer     = 0.f;   // for the bottom status line
+    std::string m_autoSaveStatusMsg;
+    void   tickAutoSave(float dt);
+    void   installCrashHooks();
 };

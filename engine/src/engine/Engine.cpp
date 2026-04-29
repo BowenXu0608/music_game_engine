@@ -7,12 +7,15 @@
 #include "game/chart/ChartLoader.h"
 #include "input/TouchTypes.h"
 #include "input/ScreenMetrics.h"
+#include <imgui.h>
 #include <stdexcept>
 #include <iostream>
 #include <algorithm>
 #include <vector>
 #include <string>
 #include <unordered_set>
+#include <exception>
+#include <cstdlib>
 #include <glm/glm.hpp>
 #include <filesystem>
 #ifdef _WIN32
@@ -35,15 +38,112 @@ std::string chartPathForDifficulty(const SongInfo& song, Difficulty diff) {
 }
 } // anonymous namespace
 
+Engine* Engine::s_autosaveInstance = nullptr;
+
 Engine::Engine() {
 #ifdef _WIN32
     OleInitialize(nullptr);
 #endif
+    // First-instance wins for the static crash-hook target. Multi-instance
+    // engines aren't a thing in this project; if it ever becomes one, this
+    // is fine — only the first will get crash-flushed, and that's the one
+    // owning the editor state worth saving anyway.
+    if (!s_autosaveInstance) s_autosaveInstance = this;
 }
 Engine::~Engine() {
+    if (s_autosaveInstance == this) s_autosaveInstance = nullptr;
 #ifdef _WIN32
     OleUninitialize();
 #endif
+}
+
+void Engine::markEditorDirty() {
+    // Going clean → dirty resets the timer so the next 30 s window starts now,
+    // not from whenever the previous save fired. Subsequent dirty-while-dirty
+    // flips are no-ops; we keep the older timestamp so a long edit session
+    // still saves on schedule.
+    if (!m_editorDirty) m_autoSaveTimer = 0.f;
+    m_editorDirty = true;
+}
+
+void Engine::performAutoSaveNow(const char* reason) {
+    // Skip during gameplay — there is nothing editor-side to persist and the
+    // disk write would jitter the audio thread.
+    if (m_currentLayer == EditorLayer::GamePlay) return;
+    // Wrap each editor save in its own try/catch so a thrown exception in
+    // SongEditor's chart export doesn't skip the music_selection.json flush
+    // (and vice versa). Both editors already use the user-data-writes-fail-
+    // loud pattern internally — this is just an extra safety net at the
+    // crash-hook callsite.
+    try { m_songEditor.flushChartsForAutoSave(); } catch (...) {}
+    try { m_musicSelectionEditor.save();          } catch (...) {}
+    m_editorDirty       = false;
+    m_autoSaveTimer     = 0.f;
+    m_autoSaveStatusMsg = std::string("Auto-saved (") + (reason ? reason : "auto") + ")";
+    m_autoSaveStatusTimer = 3.f;
+    std::cout << "[Engine] " << m_autoSaveStatusMsg << "\n";
+}
+
+void Engine::tickAutoSave(float dt) {
+    if (m_autoSaveStatusTimer > 0.f) m_autoSaveStatusTimer -= dt;
+    // Ambient dirty detection: a mouse-up anywhere in the editor layers is
+    // strong evidence that the user just did something. Beats instrumenting
+    // every push_back/erase site individually — false positives (e.g.
+    // clicking a tab) cost at most one extra 30 s-cadence disk write.
+    if (m_currentLayer != EditorLayer::GamePlay) {
+        for (int b = 0; b < 3; ++b) {
+            if (ImGui::IsMouseReleased(b)) { markEditorDirty(); break; }
+        }
+    }
+    if (!m_editorDirty) return;
+    if (m_currentLayer == EditorLayer::GamePlay) return;
+    m_autoSaveTimer += dt;
+    if (m_autoSaveTimer < kAutoSaveIntervalSec) return;
+    // Drag-safe gate: don't fire mid-gesture. ImGui's drag flag covers note
+    // placement, hold stretching, splitter drag, slider scrub. Reset the
+    // sub-second portion of the timer so we retry on the next frame after
+    // mouse-up rather than waiting another full 30 s.
+    if (ImGui::IsAnyMouseDown()) { m_autoSaveTimer = kAutoSaveIntervalSec - 0.5f; return; }
+    performAutoSaveNow("auto");
+}
+
+#ifdef _WIN32
+static LONG WINAPI Engine_AutoSaveExceptionFilter(EXCEPTION_POINTERS* info) {
+    if (Engine::s_autosaveInstance) {
+        try { Engine::s_autosaveInstance->performAutoSaveNow("crash"); } catch (...) {}
+    }
+    return EXCEPTION_CONTINUE_SEARCH;  // let the OS / debugger handle it
+}
+static BOOL WINAPI Engine_AutoSaveCtrlHandler(DWORD ctrl) {
+    if (Engine::s_autosaveInstance) {
+        try { Engine::s_autosaveInstance->performAutoSaveNow("ctrl"); } catch (...) {}
+    }
+    return FALSE;  // let other handlers run; default is process termination
+}
+#endif
+
+static void Engine_AutoSaveTerminateHandler() {
+    if (Engine::s_autosaveInstance) {
+        try { Engine::s_autosaveInstance->performAutoSaveNow("terminate"); } catch (...) {}
+    }
+    std::abort();
+}
+
+static void Engine_AutoSaveWindowCloseCallback(GLFWwindow* w) {
+    if (Engine::s_autosaveInstance) {
+        try { Engine::s_autosaveInstance->performAutoSaveNow("close"); } catch (...) {}
+    }
+    // Honor the close request — GLFW will set ShouldClose, mainLoop exits.
+    glfwSetWindowShouldClose(w, GLFW_TRUE);
+}
+
+void Engine::installCrashHooks() {
+#ifdef _WIN32
+    SetUnhandledExceptionFilter(&Engine_AutoSaveExceptionFilter);
+    SetConsoleCtrlHandler(&Engine_AutoSaveCtrlHandler, TRUE);
+#endif
+    std::set_terminate(&Engine_AutoSaveTerminateHandler);
+    if (m_window) glfwSetWindowCloseCallback(m_window, &Engine_AutoSaveWindowCloseCallback);
 }
 
 void Engine::init(uint32_t width, uint32_t height, const std::string& title,
@@ -72,6 +172,10 @@ void Engine::init(uint32_t width, uint32_t height, const std::string& title,
     m_clock.start();
     m_audio.init();
     m_imgui.init(m_window, m_renderer.context(), m_renderer.swapchainRenderPass());
+
+    // Install crash-safety + window-close hooks once the GLFW window exists.
+    // Done here (not in the ctor) because m_window is null until init().
+    installCrashHooks();
 
     m_input.init();
 
@@ -247,7 +351,13 @@ void Engine::mainLoop() {
 
         float dt = m_clock.tick();
         update(dt);
+        tickAutoSave(dt);
         render();
+    }
+    // Final flush — covers the normal X-button path. The window-close
+    // callback also fires here, but it's idempotent (clears m_editorDirty).
+    if (m_editorDirty) {
+        try { performAutoSaveNow("exit"); } catch (...) {}
     }
     vkDeviceWaitIdle(m_renderer.context().device());
 }
@@ -420,7 +530,15 @@ void Engine::render() {
 
     m_imgui.beginFrame();
 
-    switch (m_currentLayer) {
+    // Capture the layer at frame start. A button inside a page's render() may
+    // call switchLayer() and flip m_currentLayer mid-frame; without this
+    // snapshot the page-render switch and the overlay-decision check below
+    // would disagree about which page is "active" this frame, producing a
+    // one-frame stutter where the overlay paints with stale state belonging
+    // to the previous page.
+    const EditorLayer renderedLayer = m_currentLayer;
+
+    switch (renderedLayer) {
         case EditorLayer::ProjectHub:
             m_hub.render(this);
             break;
@@ -442,6 +560,15 @@ void Engine::render() {
             break;
         default:
             break;
+    }
+
+    // Copilot overlay on Start Screen / Music Selection / Settings. Song
+    // Editor hosts Copilot inline in its right sidebar; Project Hub and
+    // GamePlay deliberately skip it.
+    if (renderedLayer != EditorLayer::SongEditor &&
+        renderedLayer != EditorLayer::GamePlay &&
+        renderedLayer != EditorLayer::ProjectHub) {
+        m_songEditor.renderCopilotOverlay(this);
     }
 
     m_imgui.endFrame();

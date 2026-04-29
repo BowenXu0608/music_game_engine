@@ -244,24 +244,47 @@ Natural-language → compiled `.spv` custom-kind shader, in the Materials tab's 
 
 **Bug fix as side effect:** on Windows, `_popen` wraps commands in `cmd.exe /c`, which strips the outer `"..."` pair when the command starts with `"` but doesn't end with `"`. This mangled the glslc path into `glslc.exe"` on every invocation. Fixed in `ShaderCompiler.cpp` by wrapping the whole `cmdStr` in an extra outer quote pair on Windows. The hand-written Compile button was latently broken by the same bug and is now fixed.
 
-### Chart Audit (SongEditor Properties, 2026-04-19)
+### Chart Audit (SongEditor Properties, 2026-04-19; overhauled 2026-04-26)
 
-Read-only AI quality review. Point at the current chart, get a structured report with density spikes, jacks, crossovers, dead zones, difficulty concerns. Complements the Autocharter (generation) and Copilot (edit) — Audit never mutates the chart.
+Read-only AI quality review. Point at the current chart, get a structured report with density spikes, jacks, crossovers, dead zones, off-beat notes, difficulty concerns. Complements the Autocharter (generation) and Copilot (edit) — Audit never mutates the chart.
 
 **Hybrid design — local scan + LLM narrate.** Small local models (qwen2.5:3b) hallucinate timestamps when asked to reason over raw note lists, and the full chart often blows the context window. Fix: pre-digest facts in C++; the model only prioritizes + writes prose with the timestamps we already gave it.
 
-- `computeAuditMetrics(notes, duration)` → concrete violations:
-  - **Density hotspots**: 4s sliding windows with ≥ 24 notes, merged into contiguous runs.
+- `computeAuditMetrics(notes, duration, markers={})` → concrete violations:
+  - **Density hotspots** are scanned twice and unioned: a **sustained** pass (4 s × ≥16 events ≈ 4 NPS sustained) and a **burst** pass (1 s × ≥8 events ≈ 8 NPS spike). Bursts overlapping a sustained run are absorbed into the wider range; non-overlapping bursts append. List sorted by start time. The single 4 s × ≥24 (≈6 NPS) pass it replaced missed brief 10–12 NPS spikes that were clearly authoring problems.
   - **Jacks**: ≥ 3 consecutive same-lane notes, each within 500 ms of the prior.
   - **Crossovers**: adjacent notes with `|dLane| ≥ 3` within 150 ms.
   - **Dead zones**: gaps > 8 s between onsets.
   - **Peak NPS** (2 s sliding window, onset-driven) + **Avg NPS** + type counts.
-- `describeMetricsForPrompt` caps the text block (12 density / 12 jacks / 12 crossovers / 6 dead zones) to keep the user message small.
-- `parseAuditReport` extracts the first `{..}` envelope (same pattern as `ChartEditOps`) → `{summary, issues:[{severity, time, end_time, category, message}]}`.
+  - **Marker-only stats** (filled only when `notes.empty()` and `markers` non-empty): `markerCount`, `avgMarkerRate`, `peakMarkerRate2s`, `markerDensityHotspots` (4 s × ≥16), `markerDeadZones`. Used for the "Analyze Beats just finished, no chart yet" workflow so the audit can comment on whether the song's musical density is playable on this difficulty before any notes are placed. As soon as `notes` is non-empty these are zeroed/cleared so every UI / prompt site that gates on `markerCount > 0` auto-hides — by user contract, "evaluation for marks" is hidden once authoring begins.
+  - **`unalignedNotes`**: notes whose nearest analyzer marker is > 120 ms away. *Note*-quality observation, not a marker evaluation, so this stays visible whenever it has content. Surfaces as `Off-beat note @t=… lane=… (Δms off)` in the sidebar.
+- `describeMetricsForPrompt` caps the text block (12 density / 12 jacks / 12 crossovers / 6 dead zones / 12 unaligned-notes / 12 marker hotspots / 6 marker dead zones) to keep the user message small.
+- `parseAuditReport` extracts the first `{..}` envelope (same pattern as `ChartEditOps`) → `{summary, issues:[{severity, time, end_time, category, message}]}`. Categories: `density|jack|crossover|pacing|difficulty|alignment|other`. (Earlier `coverage` category for orphan-marker runs was removed 2026-04-26 — orphan markers were a notes-vs-markers comparison that has no use case under "evaluate markers without notes".)
 
-**UI:** Collapsing header "Chart Audit" below "Editor Copilot". Audit button fires the request; response parses to a report. Rendering: summary at top, one row per issue with severity tag (HIGH red / MED amber / LOW blue) + clickable `[time]` button that seeks `m_sceneTime` and scrolls the timeline to `max(0, time - 2s)` + category + message.
+**UI — right-sidebar Audit tab (since 2026-04-26).** Used to be a floating popup; now hosted as a `BeginTabItem("Audit")` in the right sidebar's `TabBar` alongside `BeginTabItem("Copilot")`. Toolbar Audit button no longer opens a popup — it sets `m_rightSidebarTab = Audit` + `m_rightSidebarTabPending = true` + `m_copilotBarOpen = true`. The tab bar consumes the pending flag once via `ImGuiTabItemFlags_SetSelected` and clears it. **`SetSelected` must be one-shot**, not asserted every frame, otherwise it fights user clicks on the other tab and both tab bodies execute in the same frame (the "two pages overlapping" symptom).
 
-**Files:** `engine/src/editor/ChartAudit.{h,cpp}`. SongEditor gained pimpl `m_audit` (`AuditState` in .cpp) alongside `m_copilot`, with the same forward-declared-unique_ptr pattern + `pollAudit()` + `renderAuditPanel()` wiring. Duration comes from `m_waveform.durationSeconds` (lazy-loaded) with fallback to last-note time. Shares `ai_editor_config.json` via `aiConfigPath()`.
+`renderAuditSidebarTab()` renders the metrics summary at the top + a `BeginChild` issue list that fills the rest of the tab (`ImVec2(-1, -1)`). Each issue is a `SmallButton` with the same hover-to-highlight + click-to-pin contract as the Preview Clip overlay (see "Sidebar-driven hover/click-pin overlays" below). Clicking also seeks `m_sceneTime` to the issue start and scrolls the timeline to `max(0, time - 2s)`. The AI-generated issues panel (`renderAuditPanel`) uses the same hover/pin pipeline, so hovering the wrapped message text also paints the band.
+
+**Files:** `engine/src/editor/ChartAudit.{h,cpp}`. SongEditor gained pimpl `m_audit` (`AuditState` in .cpp) alongside `m_copilot`, with the same forward-declared-unique_ptr pattern + `pollAudit()` + `renderAuditPanel()` (LLM-driven) + `renderAuditSidebarTab()` (local-metrics-only) wiring. Duration comes from `m_waveform.durationSeconds` (lazy-loaded) with fallback to last-note time and to last-marker time when notes are empty. Shares `ai_editor_config.json` via `aiConfigPath()`.
+
+### Sidebar-driven hover/click-pin overlays (Preview Clip + Chart Audit, 2026-04-26)
+
+Two waveform overlays share the same UX contract: a translucent colored band with edge lines that paints across `[timeStart, timeEnd]` on the bottom waveform strip, gated by a sidebar interaction.
+
+**Trigger contract:**
+- Default: nothing painted.
+- Hover the source UI element → overlay appears.
+- Move cursor off → overlay disappears.
+- Click on the source element → overlay pins (cursor can leave; band stays).
+- Click anywhere outside the source → pin cleared, band vanishes.
+
+**Preview Clip** — source is the sidebar "Preview Clip" group (header + Start slider + Auto button + Length slider, wrapped in `BeginGroup`/`EndGroup`). State: `m_showPreviewLabel`, `m_pinPreviewLabel`. After `EndGroup`, `IsItemHovered(AllowWhenBlockedByActiveItem | AllowWhenBlockedByPopup)` reads `hoveringGroup` (the active-item flag keeps it true while a slider is being dragged); on `IsMouseClicked(Left)` press edge, `m_pinPreviewLabel = hoveringGroup`; `m_showPreviewLabel = hoveringGroup || m_pinPreviewLabel`. Waveform painter is a pure consumer — fill + edges + "Preview Clip" label all gated on the same flag.
+
+**Chart Audit** — source is any audit issue button (in the sidebar Audit tab or the AI issues panel). State: `m_auditHover`, `m_auditPin` (each an `AuditHighlight` struct: `active, timeStart, timeEnd, fillColor, edgeColor`). `m_auditHover.active` resets to `false` at the top of `SongEditor::render()`; each issue button asserts it via `if (ImGui::IsItemHovered()) m_auditHover = h;`; click sets `m_auditPin = h`. End-of-frame check `if (IsMouseClicked(Left) && !m_auditHover.active) m_auditPin.active = false;` handles click-outside dismiss. Waveform painter consumes `m_auditHover` if active, else `m_auditPin`, else nothing.
+
+**Color palette** in `auditCategoryColor(cat, fill, edge)` (top of `SongEditor.cpp`): `density`/`marker_density` red-orange, `jack` orange, `crossover` cyan, `pacing`/`dead_zone` gray, `difficulty` amber, `alignment` yellow, `other` neutral. Translucent fill (alpha 60–70) + brighter edge (alpha 200–230). Stable mapping so users learn it by sight.
+
+The audit band paints **under** the preview-clip band so they coexist legibly when both happen to be active.
 
 ### Style Transfer (SongEditor Properties, 2026-04-19)
 
@@ -349,3 +372,36 @@ MAT tiles render live `drawMaterialPreviewAt()` previews instead of the old stat
 - `MusicSelectionEditor::updateAudioPreview(dt)` called every frame from `render()`: resets dwell on selection change (stops current clip), after 500 ms of dwell loads the song's audio (caches path via `m_previewPath` to avoid re-decoding), calls `ae.playFrom(previewStart)` (falls back to 25% of duration if unset), schedules stop after `previewDuration` seconds. Gated on `engine->isTestMode()` — the editor's authoring preview box stays silent; only full-screen test-game mode and real Android play the clip.
 - Default selection set to set 0 / song 0 when the page loads with nothing selected.
 - **SongEditor → Audio → Preview Clip section**: `Start (s)` slider (0..duration-previewDuration) + `Length (s)` slider (10–45 s cap) + `Auto-Detect` button. Auto-detect slides a `previewDuration` window over `m_diffMarkers[Hard]` + `m_diffFeatures[Hard]`, picks the window with the highest sum of `MarkerFeature.strength` as the peak-energy region. Falls back to 25% duration when no analysis data exists. Range summary: `X s → Y s (song: Z s)`.
+
+### Marker thinning — `Thin` / `Undo` toolbar buttons (2026-04-26)
+
+Closes the "AI density audit can mutate markers" loop. The Chart Audit's marker-side density block (4 s × ≥16 events) already flagged dense passages of analyzer output; thinning lets the user act on those flags directly.
+
+- **Toolbar layout (`SongEditor.cpp` `renderNoteToolbar`)** — `Marker · Click · Hold · Flick · Analyze · Clr Mrk · Thin · Undo · Place · AI · Clr Note · Audit`. `Thin` is disabled when `markers().empty()`; `Undo` is disabled unless a snapshot exists *for the current difficulty*. `Clr Mrk` also wipes the snapshot so a stale one can't restore over a fresh Analyze Beats.
+- **Algorithm (`thinMarkersInDensityHotspots`)** — computes `computeAuditMetrics({}, dur, mk)` (notes intentionally empty so the marker-side density block fires even when the chart already has authored notes — `ChartAudit.cpp` suppresses marker hotspots once notes exist). For each `markerDensityHotspots` range, sorts in-range markers by `MarkerFeature.strength` ascending (no-feature → 0, preferred for removal) and drops the weakest until `count <= floor(0.9 × m_autoMarkerThinNps × width)`. The 0.9 margin matters: the audit reports *peak window count*, not range total, so aiming exactly for the threshold lets surviving markers re-cluster into a tighter 4 s window and re-trip. **Iterates up to 8 passes**, re-auditing each time, stopping when hotspots empty or no marker dropped that pass. Status reports `Thinned N markers in K pass(es) (target X/s). Remaining hotspots: M.`
+- **Single-shot undo** — snapshot (`m_thinUndoMarkers`, `m_thinUndoFeatures`, `m_thinUndoDifficulty`) is taken **only on first mutation per session** (i.e. when `snapshotExists == false`). All iterative passes inside one click share the snapshot, and a second `Thin` click after a partial converge does not overwrite the original-marker snapshot. `Undo` restores both arrays atomically and clears the snapshot.
+- **Tuning** — `m_autoMarkerThinNps` (default 4 /s, range 1–10) lives in the existing AI tuning popup ("AI" toolbar button → "Thin markers target NPS" slider). Reset-defaults restores 4. Lower the slider and re-click `Thin` to thin further from the already-thinned state — `Undo` still walks all the way back to the original analyze output.
+
+### Auto-save (2026-04-26)
+
+Crash-safe + drag-safe persistence of in-flight editor state.
+
+- **Cadence — 30 s, debounced.** `Engine::tickAutoSave(dt)` runs every frame; `m_autoSaveTimer` increments only while `m_editorDirty == true`. Going clean → dirty resets the timer to 0 (next save fires 30 s after the *first* edit, not relative to the previous save). Dirty-while-dirty is a no-op so a long edit session still saves on schedule.
+- **Drag-safe gate** — `if (ImGui::IsAnyMouseDown()) { m_autoSaveTimer = kAutoSaveIntervalSec - 0.5f; return; }` defers the flush until 0.5 s after mouse-up. Covers note placement, hold stretching, splitter drag, slider scrub. Without this the autosave could fire mid-gesture and write a partial-state hold/arc.
+- **Layer gate** — never fires during `EditorLayer::GamePlay` (no editor data to persist; disk write would jitter the audio thread).
+- **Dirty detection (hybrid)** —
+  - **Ambient**: `tickAutoSave` checks `ImGui::IsMouseReleased(0|1|2)` outside Gameplay each frame and calls `markEditorDirty()`. False positives (clicking a tab, resizing a splitter) cost at most one extra cadence-rate disk write.
+  - **Explicit `markEditorDirty()` calls** at high-signal mutators: `thinMarkersInDensityHotspots`, the Analyze-Beats result callback. Wider point-instrumentation can be added later — the ambient catch covers everything in the meantime.
+- **Flush path — `Engine::performAutoSaveNow(reason)`** wraps `m_songEditor.flushChartsForAutoSave()` (new public delegating to private `exportAllCharts()`) and `m_musicSelectionEditor.save()` in **independent try/catch** so a throw in one editor does not skip the other. Both editors already follow the user-data-writes-fail-loud rule internally — the outer try/catch is the crash-hook safety net. Clears `m_editorDirty`, resets the timer, and posts a 3 s pale-blue toast `Auto-saved (reason)` to the SongEditor status row (distinct from the green manual-save toast).
+- **Crash hooks (`Engine::installCrashHooks`)** — installed once after window creation:
+  - `glfwSetWindowCloseCallback` → flush before X-button close.
+  - `SetUnhandledExceptionFilter` (Win) → flush, then `EXCEPTION_CONTINUE_SEARCH` so debugger / WER still gets the crash.
+  - `SetConsoleCtrlHandler` (Win) → catches Ctrl+C and console-window close.
+  - `std::set_terminate` → catches unhandled C++ exceptions (e.g. `noexcept` violation), then `std::abort`.
+  - `mainLoop` exit → final `if (m_editorDirty) performAutoSaveNow("exit")` as belt-and-suspenders for the clean-shutdown path.
+  - All four call into the same `performAutoSaveNow`, which is itself idempotent (clears `m_editorDirty` so the post-loop final flush is a no-op when the close-callback already fired).
+- **Static instance pointer** — `Engine::s_autosaveInstance` (set in ctor, cleared in dtor) lets the file-static OS callbacks reach the live engine without capturing `this`. First-instance wins; multi-engine isn't a thing in this project.
+
+### Asset-tile hover tooltips (2026-04-26)
+
+Asset tiles in the Assets strip (SongEditor / MusicSelection / StartScreen) hover-tooltip the **filename** only, never the full relative path. Filenames are then clamped via `shortenForTooltip(s, maxLen=48)` in `engine/src/ui/AssetBrowser.h` — head + `...` + extension — because real-world filenames from WeChat / browser saves can run hundreds of characters and would overflow the screen otherwise. Drag-drop `ASSET_PATH` payloads, deletion targets, and persisted song fields keep using the **full** relative path; only the visible tooltip text changes. Three tooltip families per editor are routed through this helper: image tile, audio tile, and material tile (rich-preview branch + plain-fallback branch).

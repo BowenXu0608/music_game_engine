@@ -1,6 +1,7 @@
 #pragma once
 #include <string>
 #include <vector>
+#include <map>
 #include <functional>
 #include <future>
 
@@ -34,11 +35,16 @@ struct GameModeConfig {
     float badMs     = 150.f;  // +/- 150ms
     // Beyond badMs = Miss
 
-    // Score per judgment
+    // Score per judgment (usually auto-derived from totalScore / event count,
+    // but still stored so users can manually override).
     int perfectScore = 1000;
     int goodScore    = 600;
     int badScore     = 200;
     // Miss = 0
+
+    // Total max score for an All-Perfect run. Editor derives per-judgment
+    // values from this and the current note/sample-point count.
+    int totalScore = 1000000;
 
     // Achievement images (relative paths from project root)
     std::string fcImage;   // Full Combo badge image
@@ -70,6 +76,17 @@ struct GameModeConfig {
     float diskBaseRadius   = 2.4f;   // outer hit-ring radius  (world units)
     float diskRingSpacing  = 0.6f;   // spacing between extra rings
     float diskInitialScale = 1.0f;   // initial scale applied before keyframes
+
+    // ── Per-note-type asset overrides ───────────────────────────────────
+    // Set from the Song Editor's Note tab (drag-drop or Browse). Keyed by
+    // note-type display name (e.g. "Click Note", "Hold Note", "Arc Note").
+    // Values are project-relative paths. These are assignment-only today —
+    // the renderer/audio system will pick them up once it's wired through.
+    struct NoteTypeAssets {
+        std::string texturePath;   // image dragged onto the note type
+        std::string sfxPath;       // hit-sound audio for the note type
+    };
+    std::map<std::string, NoteTypeAssets> noteAssets;
 };
 
 // ── Project info ─────────────────────────────────────────────────────────────

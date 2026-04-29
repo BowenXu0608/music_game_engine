@@ -131,3 +131,22 @@ endif()
 add_executable(MusicGameEngineTest engine/src/main.cpp)
 target_link_libraries(MusicGameEngineTest PRIVATE MusicGameEngine)
 
+# ── Copilot skill assets ─────────────────────────────────────────────────────
+# Ship per-mode skill .md files next to the exe so the editor can read them
+# at runtime. CWD is anchored to the exe directory in main.cpp, so loading
+# resolves to "assets/copilot_skills/<mode>.md" relative to the binary.
+set(COPILOT_SKILLS_SRC ${CMAKE_CURRENT_SOURCE_DIR}/engine/assets/copilot_skills)
+add_custom_command(TARGET MusicGameEngineTest POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+            ${COPILOT_SKILLS_SRC}
+            $<TARGET_FILE_DIR:MusicGameEngineTest>/assets/copilot_skills
+    COMMENT "Copying copilot skill assets"
+)
+
+# ── Tests ────────────────────────────────────────────────────────────────────
+# Phase 1b de-risk gate: confirms ChartLoader recovers every field the
+# Copilot will need to emit in Phase 4-6 (arcs, slides, hold waypoints,
+# disk animation, scan-speed events).
+add_executable(ChartRoundtripTest engine/tests/chart_roundtrip_test.cpp)
+target_link_libraries(ChartRoundtripTest PRIVATE MusicGameEngine)
+

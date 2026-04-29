@@ -3,6 +3,10 @@
 #include "AudioEngine.h"
 #include <stdexcept>
 #include <algorithm>
+#ifdef _WIN32
+#include <windows.h>
+#include <string>
+#endif
 
 struct AudioEngine::Impl {
     ma_engine   engine;
@@ -38,9 +42,31 @@ bool AudioEngine::load(const std::string& path) {
         ma_sound_uninit(&m_impl->sound);
         m_impl->soundLoaded = false;
     }
+#ifdef _WIN32
+    // miniaudio's narrow ma_sound_init_from_file uses CreateFileA which
+    // interprets the path as CP_ACP, so non-ASCII filenames stored as UTF-8
+    // (e.g. 中村由利子+-+Whispering+Eyes.mp3) fail to open. Convert to wide
+    // and use the _w variant which goes through CreateFileW directly.
+    int wlen = MultiByteToWideChar(CP_UTF8, 0, path.data(), (int)path.size(), nullptr, 0);
+    bool used_w = false;
+    if (wlen > 0) {
+        std::wstring wPath(wlen, L'\0');
+        MultiByteToWideChar(CP_UTF8, 0, path.data(), (int)path.size(), &wPath[0], wlen);
+        if (ma_sound_init_from_file_w(&m_impl->engine, wPath.c_str(), 0, nullptr, nullptr,
+                                      &m_impl->sound) == MA_SUCCESS) {
+            used_w = true;
+        }
+    }
+    if (!used_w) {
+        if (ma_sound_init_from_file(&m_impl->engine, path.c_str(), 0, nullptr, nullptr,
+                                     &m_impl->sound) != MA_SUCCESS)
+            return false;
+    }
+#else
     if (ma_sound_init_from_file(&m_impl->engine, path.c_str(), 0, nullptr, nullptr,
                                  &m_impl->sound) != MA_SUCCESS)
         return false;
+#endif
     m_impl->soundLoaded = true;
     ma_sound_set_volume(&m_impl->sound, m_musicVolume);
     return true;
@@ -172,8 +198,22 @@ WaveformData AudioEngine::decodeWaveform(const std::string& path, uint32_t bucke
 
     ma_decoder_config cfg = ma_decoder_config_init(ma_format_f32, 1, 0); // mono, native rate
     ma_decoder decoder;
-    if (ma_decoder_init_file(path.c_str(), &cfg, &decoder) != MA_SUCCESS)
-        return out;
+    bool decoder_ok = false;
+#ifdef _WIN32
+    // Same UTF-8 issue as AudioEngine::load — ma_decoder_init_file goes through
+    // CreateFileA / CP_ACP, which fails on non-ASCII paths stored as UTF-8.
+    int wlen = MultiByteToWideChar(CP_UTF8, 0, path.data(), (int)path.size(), nullptr, 0);
+    if (wlen > 0) {
+        std::wstring wPath(wlen, L'\0');
+        MultiByteToWideChar(CP_UTF8, 0, path.data(), (int)path.size(), &wPath[0], wlen);
+        if (ma_decoder_init_file_w(wPath.c_str(), &cfg, &decoder) == MA_SUCCESS)
+            decoder_ok = true;
+    }
+#endif
+    if (!decoder_ok) {
+        if (ma_decoder_init_file(path.c_str(), &cfg, &decoder) != MA_SUCCESS)
+            return out;
+    }
 
     ma_uint64 totalFrames = 0;
     ma_decoder_get_length_in_pcm_frames(&decoder, &totalFrames);

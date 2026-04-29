@@ -413,19 +413,38 @@ void StartScreenEditor::render(Engine* engine) {
         return;
     }
 
-    ImGui::SetNextWindowPos(ImVec2(0, 0));
-    ImGui::SetNextWindowSize(ImGui::GetIO().DisplaySize);
+    {
+        ImVec2 ds = ImGui::GetIO().DisplaySize;
+        ImGui::SetNextWindowPos(ImVec2(0, 0));
+        ImGui::SetNextWindowSize(ImVec2(ds.x, ds.y));
+    }
     ImGui::Begin("Start Screen Editor", nullptr,
-                 ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoResize);
+                 ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse |
+                 ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoBringToFrontOnFocus);
 
     ImVec2 contentSize = ImGui::GetContentRegionAvail();
     const float splitterThick = 4.f;
     const float navH  = 36.f;
-    float totalH  = contentSize.y - navH - 8.f;
-    float topH    = totalH * m_vSplit - splitterThick * 0.5f;
-    float assetsH = totalH * (1.f - m_vSplit) - splitterThick * 0.5f;
-    float previewW = contentSize.x * m_hSplit - splitterThick * 0.5f;
-    float propsW   = contentSize.x * (1.f - m_hSplit) - splitterThick * 0.5f;
+    // Copilot sidebar reservation - body row only, Assets strip full width.
+    const float copilotW = engine ? engine->songEditor().copilotOverlayWidth() : 0.f;
+    const float bodyW    = std::max(200.f, contentSize.x - copilotW);
+    // Pinned bottom Assets strip - same pattern as SongEditor.
+    const float assetsHeaderH = ImGui::GetFrameHeightWithSpacing();
+    float assetsH = m_assetsBarOpen
+        ? std::clamp(m_assetsBarH, 80.f, contentSize.y * 0.5f)
+        : assetsHeaderH;
+    float totalH  = std::max(100.f, contentSize.y - navH - 8.f - assetsH - 4.f);
+    float topH    = totalH;
+    float previewW = bodyW * m_hSplit - splitterThick * 0.5f;
+    float propsW   = bodyW * (1.f - m_hSplit) - splitterThick * 0.5f;
+
+    // Tell the overlay how many pixels to leave free at the bottom. Computed
+    // from stable inputs (no GetCursorScreenPos dependency) so the overlay
+    // height is consistent across page transitions and does not snap when
+    // navigating in or out of this page.
+    if (engine) {
+        engine->songEditor().setOverlayBottomReserve(navH + 8.f + assetsH + 4.f);
+    }
 
     // ── Top row: Preview | vsplitter | Properties ─────────────────────────────
     ImGui::BeginChild("Preview", ImVec2(previewW, topH), true);
@@ -437,7 +456,7 @@ void StartScreenEditor::render(Engine* engine) {
     // Vertical splitter
     ImGui::InvisibleButton("vsplit", ImVec2(splitterThick, topH));
     if (ImGui::IsItemActive()) {
-        m_hSplit += ImGui::GetIO().MouseDelta.x / contentSize.x;
+        m_hSplit += ImGui::GetIO().MouseDelta.x / std::max(1.f, bodyW);
         m_hSplit = std::clamp(m_hSplit, 0.2f, 0.8f);
     }
     if (ImGui::IsItemHovered() || ImGui::IsItemActive())
@@ -454,18 +473,15 @@ void StartScreenEditor::render(Engine* engine) {
     m_materialsTabRequested = false;
     ImGui::EndChild();
 
-    // Horizontal splitter
-    ImGui::InvisibleButton("hsplit", ImVec2(contentSize.x, splitterThick));
-    if (ImGui::IsItemActive()) {
-        m_vSplit += ImGui::GetIO().MouseDelta.y / totalH;
-        m_vSplit = std::clamp(m_vSplit, 0.3f, 0.9f);
-    }
-    if (ImGui::IsItemHovered() || ImGui::IsItemActive())
-        ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeNS);
-
-    // ── Bottom strip: Assets ──────────────────────────────────────────────────
+    // ── Bottom strip: pinned Assets (always docked, collapsible) ────────────
     ImGui::BeginChild("Assets", ImVec2(contentSize.x, assetsH), true);
-    renderAssets();
+    {
+        ImGui::SetNextItemOpen(m_assetsBarOpen, ImGuiCond_Always);
+        bool open = ImGui::CollapsingHeader("Assets##ssbottom");
+        m_assetsBarOpen = open;
+        if (open)
+            renderAssets();
+    }
     ImGui::EndChild();
 
     // ── Nav bar ───────────────────────────────────────────────────────────────
@@ -1289,7 +1305,17 @@ void StartScreenEditor::drawMaterialPreviewAt(const MaterialAsset& m, ImVec2 p0,
 
 // ── renderMaterials ───────────────────────────────────────────────────────────
 
-void StartScreenEditor::renderMaterials(Engine* engine) {
+void StartScreenEditor::selectMaterialByName(const std::string& name) {
+    if (!m_engine) return;
+    if (const MaterialAsset* a = m_engine->materialLibrary().get(name)) {
+        m_selectedMaterial   = name;
+        m_editingMaterial    = *a;
+        m_materialEditLoaded = true;
+        m_materialCompileLog.clear();
+    }
+}
+
+void StartScreenEditor::renderMaterials(Engine* engine, bool hideSelector) {
     if (!engine) {
         ImGui::TextDisabled("Engine unavailable");
         return;
@@ -1334,25 +1360,32 @@ void StartScreenEditor::renderMaterials(Engine* engine) {
 
     ImGui::Separator();
 
-    // Selectable list — kept tight so the edit panel below has room.
-    float listH = ImGui::GetContentRegionAvail().y * 0.35f;
-    ImGui::BeginChild("mat_list", ImVec2(0, listH), true);
-    for (const auto& name : lib.allNames()) {
-        bool selected = (name == m_selectedMaterial);
-        if (ImGui::Selectable(name.c_str(), selected)) {
-            m_selectedMaterial = name;
-            if (const MaterialAsset* a = lib.get(name)) {
-                m_editingMaterial    = *a;
-                m_materialEditLoaded = true;
-                m_materialCompileLog.clear();
+    // Selectable list — kept tight so the edit panel below has room. Hidden
+    // when the caller drives selection through its own tile grid (e.g.
+    // SongEditor's Material tab, where clicking a MAT tile in the Assets
+    // strip loads the material into the edit form).
+    if (!hideSelector) {
+        float listH = ImGui::GetContentRegionAvail().y * 0.35f;
+        ImGui::BeginChild("mat_list", ImVec2(0, listH), true);
+        for (const auto& name : lib.allNames()) {
+            bool selected = (name == m_selectedMaterial);
+            if (ImGui::Selectable(name.c_str(), selected)) {
+                m_selectedMaterial = name;
+                if (const MaterialAsset* a = lib.get(name)) {
+                    m_editingMaterial    = *a;
+                    m_materialEditLoaded = true;
+                    m_materialCompileLog.clear();
+                }
             }
         }
+        ImGui::EndChild();
     }
-    ImGui::EndChild();
 
     // ── Edit panel for the selected material ────────────────────────────────
     if (m_selectedMaterial.empty() || !m_materialEditLoaded) {
-        ImGui::TextDisabled("Select a material (or create one) to edit.");
+        ImGui::TextDisabled(hideSelector
+            ? "Click a material tile in the Assets strip below to edit."
+            : "Select a material (or create one) to edit.");
         return;
     }
     if (!lib.get(m_selectedMaterial)) {
@@ -1486,7 +1519,7 @@ void StartScreenEditor::renderMaterials(Engine* engine) {
             fs::path absShader = fs::path(lib.projectDir()) / m_editingMaterial.customShaderPath;
             ShaderCompileResult r = compileFragmentToSpv(absShader, true);
             if (r.ok) {
-                m_materialCompileLog = "OK — " + r.spvPath;
+                m_materialCompileLog = "OK - " + r.spvPath;
                 if (!r.errorLog.empty()) m_materialCompileLog += "\n" + r.errorLog;
             } else {
                 m_materialCompileLog = "FAILED\n" + r.errorLog;
@@ -1843,11 +1876,11 @@ void StartScreenEditor::renderAssets() {
                 // 80px thumbnail collapses away.
                 if (thumb) {
                     ImGui::BeginTooltip();
-                    ImGui::TextUnformatted(f.c_str());
+                    ImGui::TextUnformatted(shortenForTooltip(name).c_str());
                     ImGui::Image((ImTextureID)(uint64_t)thumb, ImVec2(256.f, 256.f));
                     ImGui::EndTooltip();
                 } else {
-                    ImGui::SetTooltip("%s", f.c_str());
+                    ImGui::SetTooltip("%s", shortenForTooltip(name).c_str());
                 }
             }
             if (ImGui::BeginDragDropSource()) {
@@ -1898,7 +1931,7 @@ void StartScreenEditor::renderAssets() {
         if (ImGui::IsItemHovered()) {
             dl->AddRect(thumbPos, ImVec2(thumbPos.x + thumbSize, thumbPos.y + thumbSize),
                         IM_COL32(100, 160, 255, 200), 4.f, 0, 2.f);
-            ImGui::SetTooltip("%s", f.c_str());
+            ImGui::SetTooltip("%s", shortenForTooltip(name).c_str());
         }
         if (ImGui::BeginDragDropSource()) {
             ImGui::SetDragDropPayload("ASSET_PATH", f.c_str(), f.size() + 1);
@@ -1960,7 +1993,7 @@ void StartScreenEditor::renderAssets() {
                 ? m_engine->materialLibrary().get(stem) : nullptr;
             if (ma) {
                 ImGui::BeginTooltip();
-                ImGui::TextUnformatted(f.c_str());
+                ImGui::TextUnformatted(shortenForTooltip(name).c_str());
                 if (!ma->targetMode.empty() || !ma->targetSlotSlug.empty()) {
                     ImGui::TextDisabled("target: %s / %s",
                         ma->targetMode.empty()     ? "(any)" : ma->targetMode.c_str(),
@@ -1970,7 +2003,7 @@ void StartScreenEditor::renderAssets() {
                 ImGui::TextDisabled("(click to edit)");
                 ImGui::EndTooltip();
             } else {
-                ImGui::SetTooltip("%s\n(click to edit)", f.c_str());
+                ImGui::SetTooltip("%s\n(click to edit)", shortenForTooltip(name).c_str());
             }
         }
         if (clicked) {

@@ -52,7 +52,15 @@ public:
     // Project-level Material asset CRUD panel. Lives on the SongEditor
     // (gameplay) page now — exposed here so that editor can call in.
     // Reads/writes through Engine::materialLibrary().
-    void renderMaterials(Engine* engine);
+    // When hideSelector is true the inline selectable list is suppressed;
+    // callers that expose their own tile grid (SongEditor Material tab,
+    // which clicks through the Assets strip) own selection instead.
+    void renderMaterials(Engine* engine, bool hideSelector = false);
+
+    // Load `name` into the edit form so the next renderMaterials() call
+    // draws that material's settings. Called when the user clicks a MAT
+    // tile in another editor's Assets browser.
+    void selectMaterialByName(const std::string& name);
 
     // Position-based material preview (public so other editors — notably
     // MusicSelectionEditor — can share the same tile render logic).
@@ -147,6 +155,8 @@ private:
     // ── panel split ratios (draggable) ───────────────────────────────────────
     float m_hSplit = 0.60f;   // Preview / Properties horizontal split
     float m_vSplit = 0.72f;   // Top row / Assets vertical split
+    bool  m_assetsBarOpen = true;  // Bottom Assets strip expanded?
+    float m_assetsBarH   = 200.f;  // Expanded height
 
     // ── preview tab ─────────────────────────────────────────────────────────
     int  m_previewTab = 0;    // 0=Editor, 1=Game Preview

@@ -118,7 +118,7 @@ ShaderCompileResult compileFragmentToSpv(const fs::path& shaderPath, bool forceR
     // support later — glslc handles it with `-x hlsl` — but until a user
     // actually needs it, a helpful error beats silent misbehaviour.
     if (ext == ".hlsl") {
-        r.errorLog = "HLSL not supported yet — please convert to GLSL (.frag).";
+        r.errorLog = "HLSL not supported yet - please convert to GLSL (.frag).";
         return r;
     }
 
@@ -140,7 +140,7 @@ ShaderCompileResult compileFragmentToSpv(const fs::path& shaderPath, bool forceR
 
     std::string glslc = findGlslcPath();
     if (glslc.empty()) {
-        r.errorLog = "glslc not found — set VULKAN_SDK or add glslc to PATH";
+        r.errorLog = "glslc not found - set VULKAN_SDK or add glslc to PATH";
         return r;
     }
 

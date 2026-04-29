@@ -66,6 +66,20 @@
             "fcImage": "",
             "goodMs": 100.0,
             "goodScore": 600,
+            "noteAssets": {
+              "Click Note": {
+                "sfxPath": "",
+                "texturePath": ""
+              },
+              "Flick Note": {
+                "sfxPath": "",
+                "texturePath": ""
+              },
+              "Hold Note": {
+                "sfxPath": "",
+                "texturePath": ""
+              }
+            },
             "perfectMs": 50.0,
             "perfectScore": 1000,
             "scoreHud": {
@@ -92,6 +106,7 @@
               "scale": 1.0
             },
             "skyHeight": 1.0,
+            "totalScore": 1000000,
             "trackCount": 12,
             "type": "dropNotes"
           },
@@ -188,10 +203,122 @@
               "scale": 1.0
             },
             "skyHeight": 1.0,
+            "totalScore": 1000000,
             "trackCount": 7,
             "type": "dropNotes"
           },
           "name": "Ab",
+          "previewDuration": 30.0,
+          "previewStart": 0.0,
+          "score": 0,
+          "scoreEasy": 0,
+          "scoreHard": 0,
+          "scoreMedium": 0
+        },
+        {
+          "achievement": "",
+          "achievementEasy": "",
+          "achievementHard": "",
+          "achievementMedium": "",
+          "artist": "me",
+          "audioFile": "assets/audio/伍佰+&amp;amp;+China+Blue+-+白鸽.mp3",
+          "chartEasy": "assets/charts/Ac_drop2d_easy.json",
+          "chartHard": "assets/charts/Ac_drop2d_hard.json",
+          "chartMedium": "assets/charts/Ac_drop2d_medium.json",
+          "coverImage": "assets/textures/_cgi-bin_mmwebwx-bin_webwxgetmsgimg__&MsgID=6765233530389521341&skey=@crypt_fe033b05_37901c151e3a0950a9b03cdfef2f6453&mmweb_appid=wx_webfilehelper.jpg",
+          "gameMode": {
+            "apImage": "",
+            "audioOffset": 0.0,
+            "backgroundImage": "",
+            "badMs": 150.0,
+            "badScore": 200,
+            "cameraEye": [
+              0.0,
+              12.0,
+              14.0
+            ],
+            "cameraFov": 55.0,
+            "cameraTarget": [
+              0.0,
+              0.0,
+              -20.0
+            ],
+            "comboHud": {
+              "bold": true,
+              "color": [
+                1.0,
+                0.8999999761581421,
+                0.30000001192092896,
+                1.0
+              ],
+              "fontSize": 32.0,
+              "glow": true,
+              "glowColor": [
+                1.0,
+                0.800000011920929,
+                0.20000000298023224,
+                0.6000000238418579
+              ],
+              "glowRadius": 8.0,
+              "pos": [
+                0.5,
+                0.18000000715255737
+              ],
+              "scale": 1.0
+            },
+            "dimension": "2D",
+            "diskBaseRadius": 2.4000000953674316,
+            "diskInitialScale": 1.0,
+            "diskInnerRadius": 0.8999999761581421,
+            "diskRingSpacing": 0.6000000238418579,
+            "fcImage": "",
+            "goodMs": 100.0,
+            "goodScore": 600,
+            "noteAssets": {
+              "Click Note": {
+                "sfxPath": "",
+                "texturePath": ""
+              },
+              "Flick Note": {
+                "sfxPath": "",
+                "texturePath": ""
+              },
+              "Hold Note": {
+                "sfxPath": "",
+                "texturePath": ""
+              }
+            },
+            "perfectMs": 50.0,
+            "perfectScore": 1000,
+            "scoreHud": {
+              "bold": true,
+              "color": [
+                1.0,
+                1.0,
+                1.0,
+                1.0
+              ],
+              "fontSize": 24.0,
+              "glow": false,
+              "glowColor": [
+                0.0,
+                0.0,
+                0.0,
+                0.0
+              ],
+              "glowRadius": 6.0,
+              "pos": [
+                0.8500000238418579,
+                0.05999999865889549
+              ],
+              "scale": 1.0
+            },
+            "skyHeight": 1.0,
+            "totalScore": 1000000,
+            "trackCount": 7,
+            "type": "dropNotes"
+          },
+          "name": "Ac",
           "previewDuration": 30.0,
           "previewStart": 0.0,
           "score": 0,
@@ -289,6 +416,7 @@
               "scale": 1.0
             },
             "skyHeight": 1.0,
+            "totalScore": 1000000,
             "trackCount": 12,
             "type": "scanLine"
           },

@@ -11,8 +11,10 @@
 #include "editor/ChartEditOps.h"
 #include "editor/ChartSnapshot.h"
 #include "editor/ChartStyle.h"
+#include "editor/CopilotSkill.h"
 #include "game/chart/ChartLoader.h"
 #include <imgui.h>
+#include <imgui_internal.h>
 #include <filesystem>
 #include <algorithm>
 #include <cstring>
@@ -30,6 +32,68 @@
 #endif
 
 namespace fs = std::filesystem;
+
+// Canonicalize a UTF-8 file path. fs::canonical(std::string).string() on
+// Windows interprets the input bytes as CP_ACP (CP936 on a zh-CN system),
+// so a UTF-8 audio path like "assets/audio/伍佰….mp3" gets misdecoded —
+// invalid CP936 byte sequences are silently replaced with U+FFFD, the
+// resolved file is wrong, and the result re-encoded back to CP_ACP via
+// .string() loses the original characters entirely. Round-tripping through
+// wstring with explicit UTF-8 conversions keeps the bytes intact so the
+// analyzer subprocess receives a path that actually exists on disk.
+static std::string canonicalUtf8(const std::string& utf8Path) {
+#ifdef _WIN32
+    auto isValidUtf8 = [](const std::string& s) {
+        size_t i = 0;
+        while (i < s.size()) {
+            unsigned char c = (unsigned char)s[i];
+            int extra;
+            if      (c < 0x80)            extra = 0;
+            else if ((c & 0xE0) == 0xC0)  extra = 1;
+            else if ((c & 0xF0) == 0xE0)  extra = 2;
+            else if ((c & 0xF8) == 0xF0)  extra = 3;
+            else return false;
+            if (i + extra >= s.size()) return false;
+            for (int k = 1; k <= extra; ++k)
+                if ((((unsigned char)s[i + k]) & 0xC0) != 0x80) return false;
+            i += extra + 1;
+        }
+        return true;
+    };
+    auto toWide = [&](const std::string& s) -> std::wstring {
+        if (s.empty()) return L"";
+        // If the input bytes aren't valid UTF-8, treat them as CP_ACP. This
+        // covers the in-memory case where a path was set earlier this session
+        // by code that returned a CP_ACP std::string (e.g. fs::path::string()
+        // on Windows): we'd rather decode it correctly once and recover than
+        // pass U+FFFD chars on to the analyzer subprocess.
+        UINT cp = isValidUtf8(s) ? CP_UTF8 : CP_ACP;
+        int wlen = MultiByteToWideChar(cp, 0, s.data(), (int)s.size(), nullptr, 0);
+        if (wlen <= 0) return L"";
+        std::wstring w(wlen, L'\0');
+        MultiByteToWideChar(cp, 0, s.data(), (int)s.size(), &w[0], wlen);
+        return w;
+    };
+    auto fromWide = [](const std::wstring& w) -> std::string {
+        if (w.empty()) return "";
+        int u8len = WideCharToMultiByte(CP_UTF8, 0, w.data(), (int)w.size(), nullptr, 0, nullptr, nullptr);
+        if (u8len <= 0) return "";
+        std::string s(u8len, '\0');
+        WideCharToMultiByte(CP_UTF8, 0, w.data(), (int)w.size(), &s[0], u8len, nullptr, nullptr);
+        return s;
+    };
+    try {
+        fs::path p(toWide(utf8Path));
+        p = fs::canonical(p);
+        return fromWide(p.wstring());
+    } catch (...) {
+        return utf8Path;
+    }
+#else
+    try { return fs::canonical(utf8Path).string(); }
+    catch (...) { return utf8Path; }
+#endif
+}
 
 // ── Disk animation sampling helpers (used by both scene preview and
 //    chart timeline lane-mask builder) ────────────────────────────────────────
@@ -509,7 +573,21 @@ std::string SongEditor::browseFile(const wchar_t* filter, const std::string& des
             std::cout << "[SongEditor] Copy failed: " << e.what() << "\n";
             return "";
         }
-        std::string rel = fs::relative(dest, absProject).string();
+        // Convert the relative path back to UTF-8 explicitly. fs::path::string()
+        // on Windows uses CP_ACP (CP936 here), which would store non-ASCII
+        // filenames like "中村由利子+-+Whispering+Eyes.mp3" as GBK bytes — every
+        // downstream consumer (JSON save, canonicalUtf8, CreateProcessW)
+        // assumes UTF-8, so the GBK bytes get rejected by MultiByteToWideChar
+        // (CP_UTF8) and become U+FFFD replacement characters.
+        std::wstring relW = fs::relative(dest, absProject).wstring();
+        std::string rel;
+        if (!relW.empty()) {
+            int u8len = WideCharToMultiByte(CP_UTF8, 0, relW.data(), (int)relW.size(),
+                                            nullptr, 0, nullptr, nullptr);
+            rel.resize(u8len);
+            WideCharToMultiByte(CP_UTF8, 0, relW.data(), (int)relW.size(),
+                                &rel[0], u8len, nullptr, nullptr);
+        }
         std::replace(rel.begin(), rel.end(), '\\', '/');
         m_assetsScanned = false; // rescan after import
         return rel;
@@ -532,9 +610,34 @@ void SongEditor::importFiles(const std::vector<std::string>& srcPaths) {
 // ── Main render ──────────────────────────────────────────────────────────────
 // Layout: Left sidebar (props+config+assets) | Right center (scene+timeline+waveform)
 
+// Map an audit issue category (or one of the inline-popup synthetic
+// categories like "marker_density") to a translucent fill + solid edge
+// color used by the waveform problem-range highlight. Keep the palette
+// stable so users learn the mapping by sight.
+static void auditCategoryColor(const std::string& cat,
+                                unsigned int& fill, unsigned int& edge) {
+    auto rgba = [](int r, int g, int b, int a) -> unsigned int {
+        return IM_COL32(r, g, b, a);
+    };
+    if (cat == "density"        ) { fill = rgba(255,  60,  60,  70); edge = rgba(255, 100, 100, 230); return; }
+    if (cat == "jack"           ) { fill = rgba(255, 130,  60,  70); edge = rgba(255, 180,  80, 230); return; }
+    if (cat == "crossover"      ) { fill = rgba( 60, 220, 255,  70); edge = rgba( 80, 240, 255, 230); return; }
+    if (cat == "pacing"         ) { fill = rgba(160, 160, 160,  60); edge = rgba(200, 200, 200, 200); return; }
+    if (cat == "difficulty"     ) { fill = rgba(255, 200,  60,  70); edge = rgba(255, 220,  80, 230); return; }
+    if (cat == "coverage"       ) { fill = rgba(160,  80, 220,  70); edge = rgba(200, 100, 255, 230); return; }
+    if (cat == "alignment"      ) { fill = rgba(255, 220,  60,  70); edge = rgba(255, 240,  80, 230); return; }
+    if (cat == "marker_density" ) { fill = rgba(255, 110, 110,  70); edge = rgba(255, 140, 140, 230); return; }
+    if (cat == "dead_zone"      ) { fill = rgba(140, 140, 160,  60); edge = rgba(180, 180, 200, 200); return; }
+    /* other / unknown */          { fill = rgba(180, 180, 180,  60); edge = rgba(220, 220, 220, 200); }
+}
+
 void SongEditor::render(Engine* engine) {
     if (m_statusTimer > 0.f) m_statusTimer -= ImGui::GetIO().DeltaTime;
     m_hoverTime = -1.f;  // reset each frame; set by timeline/waveform hover
+    // Audit-issue hover is re-asserted each frame by the issue buttons that
+    // are currently hovered. If none assert it, it stays inactive — so the
+    // overlay falls back to whichever issue (if any) is pinned.
+    m_auditHover.active = false;
 
     // Scan assets
     if (!m_assetsScanned && !m_projectPath.empty()) {
@@ -576,23 +679,65 @@ void SongEditor::render(Engine* engine) {
     const float maxSidebarW = contentSize.x * 0.4f;
 
     m_sidebarW = std::clamp(m_sidebarW, minSidebarW, maxSidebarW);
-    float mainW = std::max(200.f, contentSize.x - m_sidebarW - splitterThick);
-    float bodyH = std::max(100.f, contentSize.y - navH - 4.f);
+
+    // Right Copilot sidebar: collapsible. When folded it becomes a narrow
+    // handle just wide enough for the toggle arrow (including window padding).
+    const float copilotCollapsedW = 34.f;
+    const float minCopilotW = 220.f;
+    const float maxCopilotW = contentSize.x * 0.4f;
+    m_copilotBarW = std::clamp(m_copilotBarW, minCopilotW, maxCopilotW);
+    float copilotW = m_copilotBarOpen ? m_copilotBarW : copilotCollapsedW;
+
+    float mainW = std::max(200.f, contentSize.x - m_sidebarW
+                                   - splitterThick - copilotW - splitterThick);
+
+    // Reserve space at the bottom for the always-docked Assets strip.
+    const float assetsHeaderH = ImGui::GetFrameHeightWithSpacing();
+    float assetsStripH = m_assetsBarOpen
+        ? std::clamp(m_assetsBarH, 80.f, contentSize.y * 0.5f)
+        : assetsHeaderH;
+    float bodyH = std::max(100.f, contentSize.y - navH - 4.f - assetsStripH - 4.f);
 
     // ══════════════════════════════════════════════════════════════════════════
     // LEFT SIDEBAR — Properties, Game Mode Config, Assets (scrollable)
     // ══════════════════════════════════════════════════════════════════════════
     ImGui::BeginChild("SESidebar", ImVec2(m_sidebarW, bodyH), true);
     {
-        renderProperties();
-        ImGui::Spacing();
-        renderGameModeConfig(engine);
-        ImGui::Spacing();
-
+        // "Editing:" header stays at the very top so the user always sees
+        // which song is being edited.
+        ImGui::Text("Editing: %s", m_song->name.c_str());
+        if (!m_song->artist.empty())
+            ImGui::TextDisabled("by %s", m_song->artist.c_str());
         ImGui::Separator();
         ImGui::Spacing();
-        if (ImGui::CollapsingHeader("Assets", ImGuiTreeNodeFlags_DefaultOpen))
-            renderAssets();
+
+        // Tabbed pages. "Basic" is the broad mode/audio/HUD/material surface;
+        // "Note" holds per-note-type authoring knobs (material, hold corner
+        // style, etc.) split into one section per note type.
+        if (ImGui::BeginTabBar("##se_sidebar_tabs", ImGuiTabBarFlags_None)) {
+            if (ImGui::BeginTabItem("Basic")) {
+                // Order: Game Mode (structure) -> Audio + BPM -> Judgment /
+                // HUD / Background / Materials -> AI panels.
+                renderGameModeConfig(engine, /*structureOnly*/ true);
+                ImGui::Spacing();
+                renderProperties();
+                ImGui::Spacing();
+                renderGameModeConfig(engine, /*structureOnly*/ false,
+                                     /*presentationOnly*/ true);
+                ImGui::Spacing();
+                renderAiPanels();
+                ImGui::EndTabItem();
+            }
+            if (ImGui::BeginTabItem("Note")) {
+                renderNotePage(engine);
+                ImGui::EndTabItem();
+            }
+            if (ImGui::BeginTabItem("Material")) {
+                renderMaterialBuilderPage(engine);
+                ImGui::EndTabItem();
+            }
+            ImGui::EndTabBar();
+        }
     }
     ImGui::EndChild();
 
@@ -683,7 +828,7 @@ void SongEditor::render(Engine* engine) {
                     if (ImGui::Button("Analyze Beats", ImVec2(110, 0))) {
                         if (m_song && !m_song->audioFile.empty()) {
                             std::string fullAudioPath = m_projectPath + "/" + m_song->audioFile;
-                            try { fullAudioPath = fs::canonical(fullAudioPath).string(); } catch (...) {}
+                            fullAudioPath = canonicalUtf8(fullAudioPath);
                             m_analyzer.setCallback([this](AudioAnalysisResult result) {
                                 if (result.success) {
                                     m_diffMarkers[(int)Difficulty::Easy]   = std::move(result.easyMarkers);
@@ -700,6 +845,7 @@ void SongEditor::render(Engine* engine) {
                                         bpmInfo += " (dynamic: " + std::to_string(m_bpmChanges.size()) + " sections)";
                                     m_statusMsg   = "Beats analyzed! " + bpmInfo;
                                     m_statusTimer = 5.f;
+                                    if (m_engineCached) m_engineCached->markEditorDirty();
                                 } else {
                                     m_analysisErrorMsg  = result.errorMessage;
                                     m_showAnalysisError = true;
@@ -787,6 +933,83 @@ void SongEditor::render(Engine* engine) {
     }
     ImGui::EndChild();
 
+    // ── Horizontal splitter (center | copilot sidebar) ──────────────────────
+    if (m_copilotBarOpen) {
+        ImGui::SameLine();
+        ImGui::InvisibleButton("se_hsplit_cop", ImVec2(splitterThick, bodyH));
+        if (ImGui::IsItemActive()) {
+            m_copilotBarW -= ImGui::GetIO().MouseDelta.x;
+            m_copilotBarW = std::clamp(m_copilotBarW, minCopilotW, maxCopilotW);
+        }
+        if (ImGui::IsItemHovered() || ImGui::IsItemActive())
+            ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // RIGHT SIDEBAR — Copilot / Audit tabs (foldable)
+    // ══════════════════════════════════════════════════════════════════════════
+    ImGui::SameLine();
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(4, 4));
+    ImGui::BeginChild("SECopilot", ImVec2(copilotW, bodyH), true);
+    {
+        // Toggle arrow always fits in the collapsed strip (34 - 2*4 padding = 26).
+        const char* toggleLabel = m_copilotBarOpen ? ">" : "<";
+        if (ImGui::Button(toggleLabel, ImVec2(24, 24)))
+            m_copilotBarOpen = !m_copilotBarOpen;
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip(m_copilotBarOpen ? "Collapse sidebar" : "Expand sidebar");
+        if (m_copilotBarOpen) {
+            ImGui::SameLine();
+            // Tab bar: Copilot (NL chart edits) and Audit (chart metrics +
+            // issue list with hover/pin waveform highlights). The toolbar
+            // Audit button switches m_rightSidebarTab and forces the bar
+            // open; we honor that here by passing SetSelected on the
+            // matching tab item.
+            if (ImGui::BeginTabBar("##right_sidebar_tabs",
+                                   ImGuiTabBarFlags_NoCloseWithMiddleMouseButton)) {
+                // Apply SetSelected only on the frame an external trigger
+                // asks for a switch (toolbar Audit button). Letting it fire
+                // every frame would override user clicks on the other tab.
+                ImGuiTabItemFlags copilotFlags = ImGuiTabItemFlags_None;
+                ImGuiTabItemFlags auditFlags   = ImGuiTabItemFlags_None;
+                if (m_rightSidebarTabPending) {
+                    if (m_rightSidebarTab == RightSidebarTab::Copilot)
+                        copilotFlags |= ImGuiTabItemFlags_SetSelected;
+                    else
+                        auditFlags   |= ImGuiTabItemFlags_SetSelected;
+                    m_rightSidebarTabPending = false;
+                }
+
+                if (ImGui::BeginTabItem("Copilot", nullptr, copilotFlags)) {
+                    m_rightSidebarTab = RightSidebarTab::Copilot;
+                    renderCopilotPanel();
+                    ImGui::EndTabItem();
+                }
+                if (ImGui::BeginTabItem("Audit", nullptr, auditFlags)) {
+                    m_rightSidebarTab = RightSidebarTab::Audit;
+                    renderAuditSidebarTab();
+                    ImGui::EndTabItem();
+                }
+                ImGui::EndTabBar();
+            }
+        }
+    }
+    ImGui::EndChild();
+    ImGui::PopStyleVar();
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // BOTTOM — Assets strip (always docked, collapsible)
+    // ══════════════════════════════════════════════════════════════════════════
+    ImGui::BeginChild("SEAssetsBar", ImVec2(contentSize.x, assetsStripH), true);
+    {
+        ImGui::SetNextItemOpen(m_assetsBarOpen, ImGuiCond_Always);
+        bool open = ImGui::CollapsingHeader("Assets##bottom");
+        m_assetsBarOpen = open;
+        if (open)
+            renderAssets();
+    }
+    ImGui::EndChild();
+
     // Persist hover time for Scene view
     if (m_hoverTime >= 0.f) m_sceneTime = m_hoverTime;
 
@@ -870,6 +1093,13 @@ void SongEditor::render(Engine* engine) {
         ImGui::SameLine();
         ImGui::TextColored(ImVec4(0.4f, 1.f, 0.4f, 1.f), "%s", m_statusMsg.c_str());
     }
+    // Auto-save toast: muted blue so it doesn't visually compete with the
+    // foreground green "Saved!" / "Beats analyzed!" status messages.
+    if (engine && engine->autoSaveStatusActive()) {
+        ImGui::SameLine();
+        ImGui::TextColored(ImVec4(0.6f, 0.85f, 1.f, 1.f),
+                           "%s", engine->autoSaveStatusMsg().c_str());
+    }
 
     // ── Error popup ─────────────────────────────────────────────────────────
     if (m_showTestError) {
@@ -912,10 +1142,10 @@ void SongEditor::render(Engine* engine) {
                 ImGui::Text("End:  %.3f s  (%.3f s long)",
                             sel.endTime, sel.endTime - sel.time);
                 if (isScanLine)
-                    ImGui::Text("Pos:  (%.2f, %.2f) → %.2f",
+                    ImGui::Text("Pos:  (%.2f, %.2f) -> %.2f",
                                 sel.scanX, sel.scanY, sel.scanEndY);
                 else
-                    ImGui::Text("Track: %d → %d", sel.track, sel.effectiveEndTrack());
+                    ImGui::Text("Track: %d -> %d", sel.track, sel.effectiveEndTrack());
             } else if (sel.type == EditorNoteType::Slide && isScanLine) {
                 ImGui::Text("End:  %.3f s  (%.3f s long)",
                             sel.endTime, sel.endTime - sel.time);
@@ -958,7 +1188,7 @@ void SongEditor::render(Engine* engine) {
                     ImGui::TextDisabled("Straight hold (no lane changes)");
                 } else {
                     ImGui::Text("Lane changes (%d segments)", (int)sel.waypoints.size() - 1);
-                    ImGui::TextDisabled("Each segment: previous lane → target lane.");
+                    ImGui::TextDisabled("Each segment: previous lane -> target lane.");
                     ImGui::TextDisabled("Drag the duration to control how long the");
                     ImGui::TextDisabled("change takes (ends at the marked time).");
                     ImGui::Spacing();
@@ -969,7 +1199,7 @@ void SongEditor::render(Engine* engine) {
                         const auto& prev = sel.waypoints[i - 1];
                         auto& cur = sel.waypoints[i];
 
-                        ImGui::Text("[%zu] lane %d → %d  @%.2fs", i,
+                        ImGui::Text("[%zu] lane %d -> %d  @%.2fs", i,
                                     prev.lane, cur.lane, cur.tOffset);
 
                         int style = (int)cur.style;
@@ -996,7 +1226,7 @@ void SongEditor::render(Engine* engine) {
 
                 // Sample points list
                 ImGui::Text("Sample Points (hold checkpoints)");
-                ImGui::TextDisabled("Players just keep holding — each tick awards combo.");
+                ImGui::TextDisabled("Players just keep holding - each tick awards combo.");
 
                 // Add-at-playhead button: the playhead time is m_sceneTime
                 float playT = m_sceneTime - sel.time;
@@ -1234,22 +1464,30 @@ void SongEditor::render(Engine* engine) {
         ImGui::End();
         if (!open) m_selectedNoteIdx = -1;
     }
+
+    // End-of-frame pin housekeeping for the audit problem-range overlay.
+    // If a left-click press happened this frame and no audit issue button
+    // claimed the hover (m_auditHover.active is set when an issue button
+    // is being hovered this frame), the click landed somewhere outside the
+    // audit lists — clear the pin so the overlay disappears.
+    if (ImGui::IsMouseClicked(ImGuiMouseButton_Left) && !m_auditHover.active) {
+        m_auditPin.active = false;
+    }
 }
 
 // ── renderProperties ─────────────────────────────────────────────────────────
 
 void SongEditor::renderProperties() {
-    ImGui::Text("Editing: %s", m_song->name.c_str());
-    if (!m_song->artist.empty())
-        ImGui::TextDisabled("by %s", m_song->artist.c_str());
-    ImGui::Separator();
-    ImGui::Spacing();
-
     // ── Audio File ───────────────────────────────────────────────────────────
-    if (ImGui::CollapsingHeader("Audio", ImGuiTreeNodeFlags_DefaultOpen)) {
+    bool audioOpen = ImGui::CollapsingHeader("Audio", ImGuiTreeNodeFlags_DefaultOpen);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Music track, sync offset, and music-selection preview clip.");
+    if (audioOpen) {
         char audioBuf[256];
         strncpy(audioBuf, m_song->audioFile.c_str(), 255); audioBuf[255] = '\0';
-        if (ImGui::InputText("Audio File", audioBuf, 256))
+        const float browseW = 72.f;
+        ImGui::SetNextItemWidth(-(browseW + ImGui::GetStyle().ItemSpacing.x));
+        if (ImGui::InputText("##audioFile", audioBuf, 256))
             m_song->audioFile = audioBuf;
 
         // Drag-drop target
@@ -1261,27 +1499,35 @@ void SongEditor::renderProperties() {
         }
 
         ImGui::SameLine();
-        if (ImGui::Button("Browse##audio")) {
+        if (ImGui::Button("Browse##audio", ImVec2(browseW, 0))) {
             std::string path = browseFile(
                 L"Audio\0*.mp3;*.ogg;*.wav;*.flac;*.aac\0All Files\0*.*\0",
                 "audio");
             if (!path.empty()) m_song->audioFile = path;
         }
 
-        if (!m_song->audioFile.empty())
-            ImGui::TextDisabled("File: %s", m_song->audioFile.c_str());
-
         ImGui::Spacing();
         ImGui::SetNextItemWidth(-1);
         ImGui::SliderFloat("Offset (s)", &m_song->gameMode.audioOffset, -2.f, 2.f, "%.3f s");
-        ImGui::TextDisabled("Delay before notes start (sync audio with chart)");
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Delay before notes start. Use to sync audio with the chart.");
 
         // ── Music-Selection Preview clip ────────────────────────────────────
         // The Music Selection page plays this clip when the player dwells
         // on the song. Start can be auto-detected from the AI markers'
         // peak-strength window, or dragged by hand.
+        // The blue overlay on the bottom waveform that shows where this
+        // clip lives is gated on this sidebar group: it's drawn only while
+        // the cursor is inside the group's bounding rect (which covers the
+        // "Preview Clip" header, the Start slider, the Auto button, and
+        // the Length slider). BeginGroup gives us a single hit-rect for the
+        // whole block.
         ImGui::Spacing();
+        ImGui::BeginGroup();
         ImGui::TextUnformatted("Preview Clip");
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Clip played on the Music Selection page while the player\n"
+                              "dwells on this song. Auto-Detect picks the strongest window.");
         float songDur = m_waveformLoaded ? (float)m_waveform.durationSeconds : 0.f;
         float& pStart = m_song->previewStart;
         float& pDur   = m_song->previewDuration;
@@ -1291,12 +1537,14 @@ void SongEditor::renderProperties() {
         float maxStart = std::max(0.f, songDur - pDur);
         if (pStart > maxStart) pStart = maxStart;
 
-        ImGui::SetNextItemWidth(-120);
-        ImGui::SliderFloat("Start (s)##preview", &pStart,
+        const float autoBtnW = 70.f;
+        const float labelResv = 70.f;   // reserve for "Start (s)" label on slider
+        ImGui::SetNextItemWidth(-(autoBtnW + labelResv + ImGui::GetStyle().ItemSpacing.x));
+        bool startChanged = ImGui::SliderFloat("Start (s)##preview", &pStart,
                            0.f, std::max(1.f, maxStart),
                            "%.2f s");
         ImGui::SameLine();
-        if (ImGui::Button("Auto-Detect##preview")) {
+        if (ImGui::Button("Auto##preview", ImVec2(autoBtnW, 0))) {
             // Pick the previewDuration-long window with the highest sum of
             // onset strengths across the hardest-difficulty markers that the
             // AI analyzer produced. If no hard markers exist, fall back to
@@ -1329,19 +1577,47 @@ void SongEditor::renderProperties() {
             } else {
                 // No analysis yet — fall back to 25% of duration.
                 pStart = songDur * 0.25f;
-                m_statusMsg = "No analyzer data — preview set to 25% of song";
+                m_statusMsg = "No analyzer data - preview set to 25% of song";
             }
+            m_timelineScrollX = std::max(0.f, pStart - 1.f);
             m_statusTimer = 3.f;
         }
-        ImGui::SliderFloat("Length (s)##preview", &pDur, 10.f, 45.f, "%.0f s");
-        if (songDur > 0.f) {
-            ImGui::TextDisabled("Range: %.1f s → %.1f s   (song: %.1f s)",
-                                 pStart, pStart + pDur, songDur);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Pick the strongest-onset window of this length.");
+        ImGui::SetNextItemWidth(-(autoBtnW + labelResv + ImGui::GetStyle().ItemSpacing.x));
+        bool lenChanged = ImGui::SliderFloat("Length (s)##preview", &pDur, 10.f, 45.f, "%.0f s");
+
+        // Linkage: when the user edits the preview clip (Start, Length, or Auto),
+        // scroll the waveform so the clip is visible.
+        if (startChanged || lenChanged) {
+            m_timelineScrollX = std::max(0.f, pStart - 1.f);
         }
+        ImGui::EndGroup();
+        // Show the waveform overlay (translucent blue band + edge lines +
+        // "Preview Clip" label) while the cursor is inside this whole
+        // sidebar group OR while a click has pinned it.
+        // ImGuiHoveredFlags_AllowWhenBlockedByActiveItem keeps the reveal
+        // alive while a slider drag is in progress, even though that slider
+        // has captured the mouse.
+        bool hoveringGroup = ImGui::IsItemHovered(
+            ImGuiHoveredFlags_AllowWhenBlockedByActiveItem |
+            ImGuiHoveredFlags_AllowWhenBlockedByPopup);
+        // Click-toggle the pin: a left-click whose press lands on the
+        // group pins it (so the overlay survives cursor-out); a left-click
+        // outside the group clears the pin. We check on the press edge so
+        // dragging a slider out of the group doesn't unpin mid-drag.
+        if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+            m_pinPreviewLabel = hoveringGroup;
+        }
+        m_showPreviewLabel = hoveringGroup || m_pinPreviewLabel;
     }
 
     // ── BPM Map (from analysis) ─────────────────────────────────────────────
-    if (m_dominantBpm > 0.f && ImGui::CollapsingHeader("BPM Map", ImGuiTreeNodeFlags_DefaultOpen)) {
+    if (m_dominantBpm > 0.f) {
+        bool bpmOpen = ImGui::CollapsingHeader("BPM Map", ImGuiTreeNodeFlags_DefaultOpen);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Dominant tempo and any detected tempo sections.");
+        if (bpmOpen) {
         ImGui::Text("Dominant BPM: %.1f", m_dominantBpm);
         if (m_bpmChanges.size() > 1) {
             ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.f, 1.f),
@@ -1374,24 +1650,389 @@ void SongEditor::renderProperties() {
             m_bpmChanges.clear();
             m_dominantBpm = 0.f;
         }
+        }
+    }
+}
+
+void SongEditor::renderAiPanels() {
+    // Copilot now lives in its own right sidebar; Audit is a toolbar button +
+    // popup; Style Transfer is inside the AI Place-All popup. Kept as a no-op
+    // hook in case the old sidebar call path is resurrected.
+}
+
+// ── note-slot helpers ────────────────────────────────────────────────────────
+
+// True if the slot belongs to a note-type section (Click/Hold/Flick/Slide/Arc/
+// ArcTap) rather than a playfield or UI slot. Tests the group name first
+// (groups like "Hold Note", "Slide Note", "Arc Note", "ArcTap Note", "Click
+// Note"), then the display name for standalone slots that sit at the top
+// level (Bandori's "Click Note" / "Flick Note", Arcaea's "Click Note" /
+// "Flick Note", etc.). "Hit Ring" and "Judgment Note" stay out of note
+// sections because they're UI elements, not authorable note types — only
+// names ending in " Note" match for the display-name fallback, and "Hit
+// Ring" doesn't; "Judgment Note" does, so it winds up as a (harmless)
+// Click-like section in Phigros mode which is currently stubbed.
+static bool isNoteSlot(const MaterialSlotInfo& slot) {
+    auto endsWithNote = [](const char* s) {
+        if (!s) return false;
+        size_t n = std::strlen(s);
+        return n >= 5 && std::strcmp(s + n - 5, " Note") == 0;
+    };
+    return endsWithNote(slot.group) || endsWithNote(slot.displayName);
+}
+
+// Does `slot` belong to the section titled `noteType` (e.g. "Hold Note")?
+// A section matches by group when the slot sits inside a group run, or by
+// display name for standalone top-level slots.
+static bool slotIsForSection(const MaterialSlotInfo& slot, const char* noteType) {
+    std::string grp = slot.group ? slot.group : "";
+    if (!grp.empty()) return grp == noteType;
+    return slot.displayName && std::string(slot.displayName) == noteType;
+}
+
+static MaterialModeKey currentMaterialModeKey(const GameModeConfig& gm) {
+    switch (gm.type) {
+        case GameModeType::DropNotes:
+            return (gm.dimension == DropDimension::ThreeD)
+                 ? MaterialModeKey::Arcaea
+                 : MaterialModeKey::Bandori;
+        case GameModeType::Circle:   return MaterialModeKey::Lanota;
+        case GameModeType::ScanLine: return MaterialModeKey::Cytus;
+    }
+    return MaterialModeKey::Bandori;
+}
+
+// ── renderMaterialSlotPicker ────────────────────────────────────────────────
+// Renders one "slot name + (default)-or-asset combo" row. Shared between the
+// Basic tab's Materials block and the Note tab's per-type sections.
+
+void SongEditor::renderMaterialSlotPicker(Engine* engine,
+                                          MaterialModeKey modeKey,
+                                          const MaterialSlotInfo& slot) {
+    auto& overrides = m_diffMaterials[(int)m_currentDifficulty];
+    MaterialAssetLibrary* lib = engine ? &engine->materialLibrary() : nullptr;
+
+    ImGui::PushID((int)slot.id);
+
+    auto it = overrides.find(slot.id);
+    std::string currentAsset = (it != overrides.end()) ? it->second.assetName
+                                                       : std::string{};
+
+    std::string slug = materialSlotSlug(slot);
+    std::vector<std::string> compatible =
+        lib ? lib->namesCompatibleWith(modeKey, slug)
+            : std::vector<std::string>{};
+
+    std::vector<const char*> items;
+    items.reserve(compatible.size() + 1);
+    items.push_back("(default)");
+    for (auto& n : compatible) items.push_back(n.c_str());
+
+    int selectedIdx = 0;
+    for (size_t i = 0; i < compatible.size(); ++i)
+        if (compatible[i] == currentAsset) { selectedIdx = (int)(i + 1); break; }
+
+    ImGui::Text("%s", slot.displayName);
+    ImGui::SetNextItemWidth(-1.f);
+    if (ImGui::Combo("##mat_picker", &selectedIdx,
+                     items.data(), (int)items.size())) {
+        if (selectedIdx == 0) {
+            overrides.erase(slot.id);
+        } else {
+            ChartData::MaterialData md;
+            md.slot      = slot.id;
+            md.assetName = compatible[selectedIdx - 1];
+            overrides[slot.id] = md;
+        }
     }
 
-    // ── Editor Copilot ──────────────────────────────────────────────────────
-    renderCopilotPanel();
+    ImGui::PopID();
+}
 
-    // ── Chart Audit ─────────────────────────────────────────────────────────
-    renderAuditPanel();
+// ── renderNotePage ───────────────────────────────────────────────────────────
+// Left-sidebar "Note" tab. Top block: lane layout knobs that apply to every
+// note type (Tracks, Sky Height in 3D Drop, Default Note Width in Circle).
+// Below that: one CollapsingHeader per note type available in the current
+// game mode. Each section carries the per-type material slots; the Hold
+// section additionally carries the default corner-transition style applied
+// to newly-authored hold waypoints.
 
-    // ── Style Transfer ──────────────────────────────────────────────────────
-    renderStylePanel();
+void SongEditor::renderNotePage(Engine* engine) {
+    if (!m_song) return;
+    GameModeConfig& gm = m_song->gameMode;
+
+    ImGui::Text("Note");
+    ImGui::Separator();
+    ImGui::Spacing();
+
+    // ── Lane layout (applies to every note type) ───────────────────────────
+    bool laneOpen = ImGui::CollapsingHeader("Lane Layout", ImGuiTreeNodeFlags_DefaultOpen);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Lane count, sky height, and default width shared across note types.");
+    if (laneOpen) {
+        ImGui::Text("Tracks");
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Number of lanes. Existing notes wrap into the new range.");
+        ImGui::SetNextItemWidth(-1);
+        int trackMax = (gm.type == GameModeType::Circle) ? 36 : 12;
+        if (gm.trackCount > trackMax) gm.trackCount = trackMax;
+        int prevTrackCount = gm.trackCount;
+        if (ImGui::SliderInt("##tracks", &gm.trackCount, 3, trackMax, "%d tracks")
+            && gm.trackCount != prevTrackCount && gm.trackCount > 0) {
+            m_laneMaskDirty = true;
+            const int newCount = gm.trackCount;
+            for (auto& [diff, list] : m_diffNotes) {
+                for (auto& en : list) {
+                    if (en.track >= newCount || en.track < 0)
+                        en.track = ((en.track % newCount) + newCount) % newCount;
+                    if (en.endTrack >= 0 && en.endTrack >= newCount)
+                        en.endTrack = ((en.endTrack % newCount) + newCount) % newCount;
+                    if (en.endTrack == en.track) en.endTrack = -1;
+                }
+            }
+        }
+        ImGui::Spacing();
+
+        if (gm.type == GameModeType::DropNotes &&
+            gm.dimension == DropDimension::ThreeD) {
+            ImGui::Text("Sky Height");
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("World Y of the sky judgment line.\n"
+                                  "Arc height [0..1] maps from ground to this value.");
+            ImGui::SetNextItemWidth(-1);
+            ImGui::SliderFloat("##skyHeight", &gm.skyHeight, -1.f, 3.f, "%.2f");
+            ImGui::Spacing();
+        }
+
+        if (gm.type == GameModeType::Circle) {
+            ImGui::Text("Default Note Width");
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Lane span assigned to newly-placed notes.\n"
+                                  "Apply to All rewrites every note in this difficulty.");
+            float btnW = (ImGui::GetContentRegionAvail().x -
+                          ImGui::GetStyle().ItemSpacing.x * 2) / 3.f;
+            for (int w = 1; w <= 3; ++w) {
+                char lbl[16];
+                snprintf(lbl, sizeof(lbl), "%d lane%s", w, w == 1 ? "" : "s");
+                bool sel = (m_defaultLaneSpan == w);
+                if (sel) {
+                    ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.2f, 0.4f, 0.8f, 1.0f));
+                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.3f, 0.5f, 0.9f, 1.0f));
+                    ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(0.15f, 0.35f, 0.75f, 1.0f));
+                }
+                if (ImGui::Button(lbl, ImVec2(btnW, 24)))
+                    m_defaultLaneSpan = w;
+                if (sel) ImGui::PopStyleColor(3);
+                if (w < 3) ImGui::SameLine();
+            }
+            if (ImGui::Button("Apply to All Notes", ImVec2(-1, 24))) {
+                for (auto& n : notes()) n.laneSpan = m_defaultLaneSpan;
+            }
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Rewrite every note in the current difficulty\n"
+                                  "to use the Default Note Width above.");
+            ImGui::Spacing();
+        }
+    }
+
+    ImGui::Spacing();
+
+    // ── Per-note-type sections ─────────────────────────────────────────────
+    // Pick the ordered list of sections for the current mode. "Flick Note"
+    // lives in Lanota even though the slot table has no Flick visuals —
+    // gameplay exposes Flick there, and the section stays in place so future
+    // material slots can slot in without touching this list.
+    std::vector<const char*> sections;
+    switch (gm.type) {
+        case GameModeType::DropNotes:
+            if (gm.dimension == DropDimension::ThreeD)
+                sections = {"Click Note", "Flick Note", "ArcTap Note", "Arc Note"};
+            else
+                sections = {"Click Note", "Hold Note", "Flick Note"};
+            break;
+        case GameModeType::Circle:
+            sections = {"Click Note", "Hold Note", "Flick Note"};
+            break;
+        case GameModeType::ScanLine:
+            sections = {"Click Note", "Hold Note", "Flick Note", "Slide Note"};
+            break;
+    }
+
+    MaterialModeKey modeKey = currentMaterialModeKey(gm);
+    const auto& slots = getMaterialSlotsForMode(modeKey);
+
+    // Small helper for a drag-drop-enabled path input + Browse + Clear row.
+    // Used for per-note-type texture and SFX assignments below. Accepts any
+    // ASSET_PATH payload so the Assets strip drag works.
+    auto assetRow = [&](const char* fieldId, const wchar_t* filter,
+                        const char* destSubdir, std::string& out) {
+        char buf[256];
+        strncpy(buf, out.c_str(), 255); buf[255] = '\0';
+        const float browseW = 60.f;
+        const float clearW  = 48.f;
+        const float gapW    = ImGui::GetStyle().ItemSpacing.x;
+        ImGui::SetNextItemWidth(-(browseW + clearW + gapW * 2));
+        ImGui::PushID(fieldId);
+        if (ImGui::InputText("##path", buf, 256)) out = buf;
+        // Drag-drop target: Assets strip tiles + OS file drops route here.
+        if (ImGui::BeginDragDropTarget()) {
+            if (const ImGuiPayload* payload =
+                    ImGui::AcceptDragDropPayload("ASSET_PATH")) {
+                out = std::string(static_cast<const char*>(payload->Data),
+                                  payload->DataSize - 1);
+            }
+            ImGui::EndDragDropTarget();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Browse", ImVec2(browseW, 0))) {
+            std::string path = browseFile(filter, destSubdir);
+            if (!path.empty()) out = path;
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Clear", ImVec2(clearW, 0))) out.clear();
+        ImGui::PopID();
+    };
+
+    for (const char* noteType : sections) {
+        if (!ImGui::CollapsingHeader(noteType)) continue;
+
+        ImGui::Indent();
+
+        // Hold gets its corner-style default here — the setting the user
+        // used to access only by clicking an existing hold note.
+        if (std::strcmp(noteType, "Hold Note") == 0) {
+            ImGui::Text("Default Corner Style");
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Transition style used when a hold's drag path\n"
+                                  "crosses lanes. Applies to newly-authored holds.");
+            const char* cornerLabels[] = {"Straight", "90 Angle", "Curve", "Rhomboid"};
+            int cur = (int)m_defaultHoldTransition;
+            ImGui::SetNextItemWidth(-1);
+            if (ImGui::Combo("##holdCorner", &cur, cornerLabels, 4))
+                m_defaultHoldTransition = (EditorHoldTransition)cur;
+
+            if (ImGui::Button("Apply to All Holds", ImVec2(-1, 24))) {
+                for (auto& n : notes()) {
+                    if (n.type != EditorNoteType::Hold) continue;
+                    n.transition = m_defaultHoldTransition;
+                    for (auto& w : n.waypoints) w.style = m_defaultHoldTransition;
+                }
+                m_statusMsg   = "Hold corners rewritten";
+                m_statusTimer = 2.f;
+            }
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Rewrite every Hold's corner style in the\n"
+                                  "current difficulty to the value above.");
+            ImGui::Spacing();
+        }
+
+        // Per-type material slots.
+        bool anySlot = false;
+        for (const auto& slot : slots) {
+            if (!slotIsForSection(slot, noteType)) continue;
+            renderMaterialSlotPicker(engine, modeKey, slot);
+            anySlot = true;
+        }
+        if (!anySlot)
+            ImGui::TextDisabled("(no material slots defined for this type)");
+
+        // Drag-drop: texture + music effect per note type.
+        ImGui::Spacing();
+        auto& na = gm.noteAssets[noteType];
+
+        ImGui::Text("Texture");
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Image dropped here overrides the note's texture.\n"
+                              "Drag from the Assets strip or click Browse.");
+        assetRow("tex", L"Images\0*.png;*.jpg;*.jpeg;*.bmp\0All Files\0*.*\0",
+                 "images", na.texturePath);
+
+        ImGui::Spacing();
+        ImGui::Text("Music Effect");
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Audio clip played when this note is hit.\n"
+                              "Drag from the Assets strip or click Browse.");
+        assetRow("sfx", L"Audio\0*.wav;*.ogg;*.mp3;*.flac\0All Files\0*.*\0",
+                 "audio", na.sfxPath);
+
+        ImGui::Unindent();
+        ImGui::Spacing();
+    }
+
+    // ── Playfield section (moved from Basic tab) ───────────────────────────
+    // Hosts every non-note slot (lane divider, hit zone, ground, scan line,
+    // etc.). Grouped by the slot's group label when present.
+    if (ImGui::CollapsingHeader("Playfield")) {
+        ImGui::Indent();
+
+        std::string currentGroup;
+        bool        inGroup = false;
+        bool        groupOpen = false;
+        auto endGroupIfAny = [&]() {
+            if (inGroup && groupOpen) ImGui::Unindent();
+            inGroup = false;
+            groupOpen = false;
+            currentGroup.clear();
+        };
+
+        bool anyNonNote = false;
+        for (const auto& slot : slots) {
+            if (isNoteSlot(slot)) continue;
+            anyNonNote = true;
+
+            std::string grp = slot.group ? slot.group : "";
+            if (grp != currentGroup) {
+                endGroupIfAny();
+                currentGroup = grp;
+                if (!grp.empty()) {
+                    inGroup = true;
+                    ImGui::Separator();
+                    groupOpen = ImGui::CollapsingHeader(grp.c_str());
+                    if (groupOpen) ImGui::Indent();
+                }
+            }
+            if (inGroup && !groupOpen) continue;
+
+            renderMaterialSlotPicker(engine, modeKey, slot);
+        }
+        endGroupIfAny();
+        if (!anyNonNote)
+            ImGui::TextDisabled("(no playfield slots for this mode)");
+
+        ImGui::Unindent();
+        ImGui::Spacing();
+    }
+}
+
+// ── renderMaterialBuilderPage ────────────────────────────────────────────────
+// Project-wide material-asset CRUD. Delegates to StartScreenEditor's materials
+// panel, which already owns the create/edit/compile flow.
+
+void SongEditor::renderMaterialBuilderPage(Engine* engine) {
+    ImGui::Text("Material");
+    ImGui::Separator();
+    ImGui::Spacing();
+
+    ImGui::TextDisabled("Create and edit project-wide material assets.");
+    ImGui::TextDisabled("Assign them to notes in the Note tab.");
+    ImGui::Spacing();
+
+    if (engine) engine->startScreenEditor().renderMaterials(engine,
+                                                             /*hideSelector*/ true);
+    else        ImGui::TextDisabled("Engine unavailable");
 }
 
 // ── renderGameModeConfig ─────────────────────────────────────────────────────
 
-void SongEditor::renderGameModeConfig(Engine* engine) {
+void SongEditor::renderGameModeConfig(Engine* engine,
+                                      bool structureOnly,
+                                      bool presentationOnly) {
     if (!m_song) return;
+    const bool showStructure    = !presentationOnly;
+    const bool showPresentation = !structureOnly;
     GameModeConfig& gm = m_song->gameMode;
 
+    if (showStructure) {
     ImGui::Text("Game Mode");
     ImGui::Separator();
     ImGui::Spacing();
@@ -1406,9 +2047,9 @@ void SongEditor::renderGameModeConfig(Engine* engine) {
         GameModeType type;
     };
     ModeOption options[] = {
-        {"Basic Drop Notes", "Notes fall toward a hit zone",          GameModeType::DropNotes},
-        {"Circle",           "Ring notes on a rotating disk",          GameModeType::Circle},
-        {"Scan Line",        "Sweep line crosses notes on a 2D field", GameModeType::ScanLine},
+        {"Basic Drop Notes", "Notes fall toward a hit zone.",          GameModeType::DropNotes},
+        {"Circle",           "Ring notes on a rotating disk.",          GameModeType::Circle},
+        {"Scan Line",        "A sweep line crosses notes on a 2D field.", GameModeType::ScanLine},
     };
 
     for (auto& opt : options) {
@@ -1418,23 +2059,17 @@ void SongEditor::renderGameModeConfig(Engine* engine) {
             ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.3f, 0.5f, 0.9f, 1.0f));
             ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(0.15f, 0.35f, 0.75f, 1.0f));
         }
-        if (ImGui::Button(opt.label, ImVec2(-1, 42))) {
+        if (ImGui::Button(opt.label, ImVec2(-1, 28))) {
             if (gm.type != opt.type) {
-                // Persist the current mode's charts before swapping so each
-                // (mode, difficulty) pair stays independent on disk.
                 exportAllCharts();
                 gm.type = opt.type;
                 reloadChartsForCurrentMode();
             }
         }
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("%s", opt.desc);
         if (selected)
             ImGui::PopStyleColor(3);
-
-        ImVec2 btnMin = ImGui::GetItemRectMin();
-        ImGui::SetCursorScreenPos(ImVec2(btnMin.x + 10, btnMin.y + 24));
-        ImGui::TextDisabled("%s", opt.desc);
-        ImGui::SetCursorPosY(ImGui::GetCursorPosY() - ImGui::GetTextLineHeight());
-        ImGui::Spacing();
     }
 
     ImGui::Spacing();
@@ -1442,6 +2077,8 @@ void SongEditor::renderGameModeConfig(Engine* engine) {
     // ── Dimension (only for DropNotes) ───────────────────────────────────────
     if (gm.type == GameModeType::DropNotes) {
         ImGui::Text("Dimension");
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("2D keeps notes on the ground only.\n3D adds a sky layer (arcs, arctaps).");
         ImGui::Spacing();
 
         float w = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x) * 0.5f;
@@ -1479,16 +2116,7 @@ void SongEditor::renderGameModeConfig(Engine* engine) {
         }
         if (is3D) ImGui::PopStyleColor(3);
 
-        // Sky height slider (3D mode only)
-        if (is3D) {
-            ImGui::Spacing();
-            ImGui::Text("Sky Height");
-            ImGui::SetNextItemWidth(-1);
-            ImGui::SliderFloat("##skyHeight", &gm.skyHeight, -1.f, 3.f, "%.2f");
-            if (ImGui::IsItemHovered())
-                ImGui::SetTooltip("World Y of the sky judgment line.\n"
-                                  "Arc height [0..1] maps from ground to this value.");
-        }
+        // Sky height slider moved to the "Note" sidebar tab (renderNotePage).
 
         ImGui::Spacing();
     }
@@ -1497,6 +2125,9 @@ void SongEditor::renderGameModeConfig(Engine* engine) {
     if (gm.type == GameModeType::Circle) {
         ImGui::Spacing();
         ImGui::Text("Disk Layout");
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Geometry of the rotating disk: where notes spawn,\n"
+                              "where they're hit, and the starting scale.");
         ImGui::Separator();
 
         ImGui::SetNextItemWidth(-1);
@@ -1517,65 +2148,10 @@ void SongEditor::renderGameModeConfig(Engine* engine) {
         ImGui::Spacing();
     }
 
-    // ── Track Count ──────────────────────────────────────────────────────────
-    ImGui::Text("Tracks");
-    ImGui::SetNextItemWidth(-1);
-    // Circle mode supports up to 36 lanes; other modes keep the original
-    // 3..12 range they were designed and tested against, so bumping the
-    // Circle cap doesn't accidentally change their playable layouts.
-    int trackMax = (gm.type == GameModeType::Circle) ? 36 : 12;
-    if (gm.trackCount > trackMax) gm.trackCount = trackMax;
-    int prevTrackCount = gm.trackCount;
-    if (ImGui::SliderInt("##tracks", &gm.trackCount, 3, trackMax, "%d tracks")
-        && gm.trackCount != prevTrackCount && gm.trackCount > 0) {
-        m_laneMaskDirty = true;
-        // Re-fit every authored note to the new lane count using modulo, so
-        // notes that fell off the right edge wrap back into the highway.
-        // Affects all difficulties — the editor only stores authored data
-        // here; exported chart files keep whatever was active when written.
-        const int newCount = gm.trackCount;
-        for (auto& [diff, list] : m_diffNotes) {
-            for (auto& en : list) {
-                if (en.track >= newCount || en.track < 0)
-                    en.track = ((en.track % newCount) + newCount) % newCount;
-                if (en.endTrack >= 0 && en.endTrack >= newCount)
-                    en.endTrack = ((en.endTrack % newCount) + newCount) % newCount;
-                // Collapse cross-lane → straight if the wrap landed on the
-                // same lane; otherwise the transition would be a no-op visual.
-                if (en.endTrack == en.track) en.endTrack = -1;
-            }
-        }
-    }
-    ImGui::Spacing();
+    // Track count + Default Note Width moved to the "Note" sidebar tab
+    // (renderNotePage).
 
-    // ── Default Note Width (Circle mode) ─────────────────────────────────────
-    // Selects the laneSpan assigned to newly placed notes. The "Apply to All"
-    // button rewrites every existing note in the current difficulty to this
-    // width in one shot (the "adjust all the notes" box).
     if (gm.type == GameModeType::Circle) {
-        ImGui::Text("Default Note Width");
-        float btnW = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x * 2) / 3.f;
-        for (int w = 1; w <= 3; ++w) {
-            char lbl[16];
-            snprintf(lbl, sizeof(lbl), "%d lane%s", w, w == 1 ? "" : "s");
-            bool sel = (m_defaultLaneSpan == w);
-            if (sel) {
-                ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.2f, 0.4f, 0.8f, 1.0f));
-                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.3f, 0.5f, 0.9f, 1.0f));
-                ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(0.15f, 0.35f, 0.75f, 1.0f));
-            }
-            if (ImGui::Button(lbl, ImVec2(btnW, 24)))
-                m_defaultLaneSpan = w;
-            if (sel) ImGui::PopStyleColor(3);
-            if (w < 3) ImGui::SameLine();
-        }
-        if (ImGui::Button("Apply to All Notes", ImVec2(-1, 24))) {
-            for (auto& n : notes()) n.laneSpan = m_defaultLaneSpan;
-        }
-        if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("Rewrite every note in the current difficulty\n"
-                              "to use the Default Note Width above.");
-        ImGui::Spacing();
 
         // ── Disk Animation (rotate / scale / move keyframes) ────────────
         // Each keyframe has a startTime (when the change begins) and a
@@ -1686,7 +2262,7 @@ void SongEditor::renderGameModeConfig(Engine* engine) {
                         for (int i = 0; i < (int)diskRot().size(); ++i) {
                             const auto& e = diskRot()[i];
                             snprintf(buf, sizeof(buf),
-                                     "#%d  t=%.2fs  dur=%.2fs  %.0f°",
+                                     "#%d  t=%.2fs  dur=%.2fs  %.0f deg",
                                      i, e.startTime, e.duration,
                                      e.targetAngle * 57.2957795f);
                             renderRow(i, buf);
@@ -1696,7 +2272,7 @@ void SongEditor::renderGameModeConfig(Engine* engine) {
                         for (int i = 0; i < (int)diskScale().size(); ++i) {
                             const auto& e = diskScale()[i];
                             snprintf(buf, sizeof(buf),
-                                     "#%d  t=%.2fs  dur=%.2fs  %.2f×",
+                                     "#%d  t=%.2fs  dur=%.2fs  %.2fx",
                                      i, e.startTime, e.duration, e.targetScale);
                             renderRow(i, buf);
                         }
@@ -1713,7 +2289,7 @@ void SongEditor::renderGameModeConfig(Engine* engine) {
                         break;
                 }
                 if (trackCount() == 0)
-                    ImGui::TextDisabled("No keyframes yet — use + Add at Playhead.");
+                    ImGui::TextDisabled("No keyframes yet - use + Add at Playhead.");
                 ImGui::EndChild();
             }
             ImGui::Spacing();
@@ -1766,7 +2342,7 @@ void SongEditor::renderGameModeConfig(Engine* engine) {
                     case DiskKfTrack::Scale: {
                         auto& ev = diskScale()[sel];
                         editCommon(ev.startTime, ev.duration, ev.easing);
-                        if (ImGui::SliderFloat("Target scale", &ev.targetScale, 0.1f, 5.0f, "%.2f×"))
+                        if (ImGui::SliderFloat("Target scale", &ev.targetScale, 0.1f, 5.0f, "%.2fx"))
                             m_laneMaskDirty = true;
                         if (ImGui::Button("Delete##kf", ImVec2(-1, 22))) remove = true;
                         if (remove) {
@@ -1802,10 +2378,12 @@ void SongEditor::renderGameModeConfig(Engine* engine) {
     }
 
     // ── Scan Line Speed (Cytus mode only) ──────────────────────────────────
-    if (gm.type == GameModeType::ScanLine &&
-        ImGui::CollapsingHeader("Scan Line Speed")) {
-        ImGui::Spacing();
-        ImGui::TextWrapped("Speed multiplier keyframes. 1.0x = base BPM speed.");
+    if (gm.type == GameModeType::ScanLine) {
+        bool scanOpen = ImGui::CollapsingHeader("Scan Line Speed");
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Speed-multiplier keyframes for the sweeping line.\n"
+                              "1.0x = base BPM speed.");
+        if (scanOpen) {
         ImGui::Spacing();
 
         auto& ssList = scanSpeed();
@@ -1868,57 +2446,78 @@ void SongEditor::renderGameModeConfig(Engine* engine) {
             }
         }
         ImGui::Spacing();
+        }
     }
+    } // showStructure
 
-    // ── Judgment Windows ─────────────────────────────────────────────────────
-    if (ImGui::CollapsingHeader("Judgment Windows", ImGuiTreeNodeFlags_DefaultOpen)) {
+    if (showPresentation) {
+    // ── Judgment & Scoring (combined) ────────────────────────────────────────
+    bool judgeOpen = ImGui::CollapsingHeader("Judgment & Scoring", ImGuiTreeNodeFlags_DefaultOpen);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Timing tolerance and points per grade.\n"
+                          "Set a Total Score target and Calculate to auto-fill per-grade values.");
+    if (judgeOpen) {
         ImGui::Spacing();
 
-        // Color swatches as legend
-        ImDrawList* dl = ImGui::GetWindowDrawList();
-        float x = ImGui::GetCursorScreenPos().x;
-        float y = ImGui::GetCursorScreenPos().y;
-        float sz = 10.f;
-
-        auto legend = [&](ImU32 col, const char* label) {
-            ImVec2 p = ImGui::GetCursorScreenPos();
-            dl->AddRectFilled(p, ImVec2(p.x + sz, p.y + sz), col, 2.f);
-            ImGui::Dummy(ImVec2(sz, sz));
+        // Timing window + per-grade score on the same row.
+        const float scoreColW = 120.f;
+        const float gap       = ImGui::GetStyle().ItemSpacing.x;
+        auto gradeRow = [&](const char* sliderId, float* ms, float msMin, float msMax,
+                            const char* msFmt, const char* scoreId, int* score) {
+            ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - scoreColW - gap);
+            ImGui::SliderFloat(sliderId, ms, msMin, msMax, msFmt);
             ImGui::SameLine();
-            ImGui::Text("%s", label);
+            ImGui::SetNextItemWidth(scoreColW);
+            ImGui::InputInt(scoreId, score, 50, 500);
         };
 
-        legend(IM_COL32(40, 200, 80, 200),  "Perfect");
-        legend(IM_COL32(200, 180, 40, 200),  "Good");
-        legend(IM_COL32(200, 80, 40, 200),   "Bad");
-        ImGui::TextDisabled("Beyond Bad = Miss");
-        ImGui::Spacing();
+        gradeRow("##perfect", &gm.perfectMs, 10.f, gm.goodMs,    "Perfect: +/- %.0f ms",
+                 "##perfectScore", &gm.perfectScore);
+        gradeRow("##good",    &gm.goodMs,    gm.perfectMs, gm.badMs, "Good: +/- %.0f ms",
+                 "##goodScore",    &gm.goodScore);
+        gradeRow("##bad",     &gm.badMs,     gm.goodMs,    300.f,    "Bad: +/- %.0f ms",
+                 "##badScore",     &gm.badScore);
 
-        ImGui::SetNextItemWidth(-1);
-        ImGui::SliderFloat("##perfect", &gm.perfectMs, 10.f, gm.goodMs, "Perfect: +/- %.0f ms");
-        ImGui::SetNextItemWidth(-1);
-        ImGui::SliderFloat("##good", &gm.goodMs, gm.perfectMs, gm.badMs, "Good: +/- %.0f ms");
-        ImGui::SetNextItemWidth(-1);
-        ImGui::SliderFloat("##bad", &gm.badMs, gm.goodMs, 300.f, "Bad: +/- %.0f ms");
-
-        ImGui::Spacing();
-    }
-
-    // ── Score per Judgment ───────────────────────────────────────────────────
-    if (ImGui::CollapsingHeader("Score", ImGuiTreeNodeFlags_DefaultOpen)) {
-        ImGui::Spacing();
-
-        ImGui::SetNextItemWidth(-1);
-        ImGui::InputInt("Perfect##score", &gm.perfectScore, 50, 500);
-        ImGui::SetNextItemWidth(-1);
-        ImGui::InputInt("Good##score", &gm.goodScore, 50, 500);
-        ImGui::SetNextItemWidth(-1);
-        ImGui::InputInt("Bad##score", &gm.badScore, 50, 500);
-        ImGui::TextDisabled("Miss = 0");
-
-        gm.perfectScore = std::clamp(gm.perfectScore, 0, 100000);
+        gm.perfectScore = std::clamp(gm.perfectScore, 0, 1000000);
         gm.goodScore    = std::clamp(gm.goodScore,    0, gm.perfectScore);
         gm.badScore     = std::clamp(gm.badScore,     0, gm.goodScore);
+
+        ImGui::Spacing();
+        ImGui::TextDisabled("Scoring");
+        ImGui::SetNextItemWidth(-1);
+        ImGui::InputInt("Total Score##total", &gm.totalScore, 10000, 100000);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Max score for an All-Perfect run. Calculate divides it\n"
+                              "across Perfect/Good/Bad using the current note + sample-point count.");
+        gm.totalScore = std::max(1, gm.totalScore);
+
+        // Count scorable events in the current difficulty.
+        auto countEvents = [&]() -> int {
+            int n = 0;
+            for (const auto& en : notes()) {
+                n += 1;
+                if (en.type == EditorNoteType::Hold ||
+                    en.type == EditorNoteType::Slide) {
+                    n += (int)en.samplePoints.size();
+                }
+            }
+            return n;
+        };
+        int events = countEvents();
+        ImGui::TextDisabled("%d scorable events in this difficulty", events);
+
+        if (ImGui::Button("Calculate from Total", ImVec2(-1, 24))) {
+            if (events > 0) {
+                gm.perfectScore = std::max(1, gm.totalScore / events);
+                gm.goodScore    = (int)(gm.perfectScore * 0.6f);
+                gm.badScore     = (int)(gm.perfectScore * 0.2f);
+                m_statusMsg   = "Scores recalculated from Total";
+                m_statusTimer = 2.f;
+            } else {
+                m_statusMsg   = "No notes in this difficulty to score";
+                m_statusTimer = 2.f;
+            }
+        }
 
         ImGui::Spacing();
     }
@@ -1927,42 +2526,40 @@ void SongEditor::renderGameModeConfig(Engine* engine) {
     // — one pair per game, configured once instead of per-chart.
 
     // ── HUD Text: Score & Combo ─────────────────────────────────────────────
-    if (ImGui::CollapsingHeader("HUD — Score & Combo", ImGuiTreeNodeFlags_DefaultOpen)) {
+    bool hudOpen = ImGui::CollapsingHeader("HUD - Score & Combo", ImGuiTreeNodeFlags_DefaultOpen);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Position and styling of the score and combo readouts in-game.");
+    if (hudOpen) {
         ImGui::Spacing();
 
-        // Helper lambda to edit a HudTextConfig
+        // Minimal: Position, Size, Color only.
         auto editHudText = [](const char* label, HudTextConfig& h) {
             ImGui::PushID(label);
             ImGui::Text("%s", label);
             ImGui::Separator();
             ImGui::SliderFloat2("Position", h.pos, 0.f, 1.f, "%.2f");
-            ImGui::SliderFloat("Font Size", &h.fontSize, 10.f, 72.f);
-            ImGui::SliderFloat("Scale", &h.scale, 0.1f, 5.f);
+            ImGui::SliderFloat("Size", &h.fontSize, 10.f, 72.f);
             ImGui::ColorEdit4("Color", h.color);
-            ImGui::Checkbox("Bold", &h.bold);
-            ImGui::Checkbox("Glow", &h.glow);
-            if (h.glow) {
-                ImGui::ColorEdit4("Glow Color", h.glowColor);
-                ImGui::SliderFloat("Glow Radius", &h.glowRadius, 1.f, 24.f);
-            }
             ImGui::PopID();
             ImGui::Spacing();
         };
 
-        editHudText("Score Display", gm.scoreHud);
-        editHudText("Combo Display", gm.comboHud);
+        editHudText("Score", gm.scoreHud);
+        editHudText("Combo", gm.comboHud);
     }
 
 
     // ── Background Image ───────────────────────────────────────────────────
-    if (ImGui::CollapsingHeader("Background", ImGuiTreeNodeFlags_DefaultOpen)) {
-        ImGui::Spacing();
-        ImGui::TextDisabled("Image displayed behind the gameplay scene");
+    bool bgOpen = ImGui::CollapsingHeader("Background", ImGuiTreeNodeFlags_DefaultOpen);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Image displayed behind the gameplay scene.");
+    if (bgOpen) {
         ImGui::Spacing();
 
         char bgBuf[256];
         strncpy(bgBuf, gm.backgroundImage.c_str(), 255); bgBuf[255] = '\0';
-        ImGui::SetNextItemWidth(-70);
+        const float bgBrowseW = 72.f;
+        ImGui::SetNextItemWidth(-(bgBrowseW + ImGui::GetStyle().ItemSpacing.x));
         if (ImGui::InputText("##bgImg", bgBuf, 256))
             gm.backgroundImage = bgBuf;
 
@@ -1975,7 +2572,7 @@ void SongEditor::renderGameModeConfig(Engine* engine) {
         }
 
         ImGui::SameLine();
-        if (ImGui::Button("Browse##bg")) {
+        if (ImGui::Button("Browse##bg", ImVec2(bgBrowseW, 0))) {
             std::string path = browseFile(
                 L"Images\0*.png;*.jpg;*.jpeg;*.bmp\0All Files\0*.*\0", "images");
             if (!path.empty()) gm.backgroundImage = path;
@@ -2000,129 +2597,11 @@ void SongEditor::renderGameModeConfig(Engine* engine) {
     }
 
 
-    // ── Material Builder ───────────────────────────────────────────────────
-    // Project-level material asset CRUD — create / edit / compile custom
-    // materials here. Moved off the Start Screen editor so gameplay authors
-    // don't have to bounce between pages to tune note/track visuals.
-    if (ImGui::CollapsingHeader("Material Builder")) {
-        if (engine) engine->startScreenEditor().renderMaterials(engine);
-        else        ImGui::TextDisabled("Engine unavailable");
-        ImGui::Spacing();
-    }
-
-    // ── Materials ──────────────────────────────────────────────────────────
-    // Per-slot, per-difficulty visual overrides. Defaults come from the mode's
-    // slot table (renderer/MaterialSlots.cpp). Overrides serialize into the
-    // chart JSON's "materials" array.
-    if (ImGui::CollapsingHeader("Materials")) {
-        ImGui::Spacing();
-
-        // Mode→slot-list mapping mirrors Engine::createRenderer so only slots
-        // relevant to the current game mode are shown.
-        MaterialModeKey modeKey = MaterialModeKey::Bandori;
-        switch (gm.type) {
-            case GameModeType::DropNotes:
-                modeKey = (gm.dimension == DropDimension::ThreeD)
-                          ? MaterialModeKey::Arcaea
-                          : MaterialModeKey::Bandori;
-                break;
-            case GameModeType::Circle:   modeKey = MaterialModeKey::Lanota; break;
-            case GameModeType::ScanLine: modeKey = MaterialModeKey::Cytus;  break;
-        }
-        const auto& slots = getMaterialSlotsForMode(modeKey);
-
-        if (slots.empty()) {
-            ImGui::TextDisabled("No materials defined for this game mode yet.");
-            ImGui::Spacing();
-        }
-
-        auto& overrides = m_diffMaterials[(int)m_currentDifficulty];
-
-        // Pull the project's asset library from the engine. Per slot, the
-        // dropdown only lists materials whose (targetMode, targetSlotSlug)
-        // matches this slot — plus any "universal" materials that leave
-        // those fields empty. Editing the actual material values lives in
-        // StartScreenEditor -> Materials tab; SongEditor is purely an
-        // assignment surface now.
-        MaterialAssetLibrary* lib = engine ? &engine->materialLibrary() : nullptr;
-
-        ImGui::TextDisabled("Assign project material assets to slots.");
-        ImGui::TextDisabled("Edit the materials themselves in the Material Builder above.");
-        ImGui::Spacing();
-
-        // Walk slots in declared order. When we enter a run that shares a
-        // group label, wrap that run in a nested collapsing header (closed
-        // by default). Slots with an empty group render flat at top level.
-        std::string currentGroup;
-        bool        inGroup = false;
-        bool        groupOpen = false;
-
-        auto endGroupIfAny = [&]() {
-            if (inGroup && groupOpen) ImGui::Unindent();
-            inGroup = false;
-            groupOpen = false;
-            currentGroup.clear();
-        };
-
-        for (const auto& slot : slots) {
-            std::string grp = slot.group ? slot.group : "";
-            if (grp != currentGroup) {
-                endGroupIfAny();
-                currentGroup = grp;
-                if (!grp.empty()) {
-                    inGroup = true;
-                    ImGui::Separator();
-                    groupOpen = ImGui::CollapsingHeader(grp.c_str());
-                    if (groupOpen) ImGui::Indent();
-                }
-            }
-            if (inGroup && !groupOpen) continue;
-
-            ImGui::PushID((int)slot.id);
-
-            // Load existing assignment (if any).
-            auto it = overrides.find(slot.id);
-            std::string currentAsset = (it != overrides.end()) ? it->second.assetName
-                                                                : std::string{};
-
-            // Slot-filtered asset list: only materials targeting this (mode, slug).
-            std::string slug = materialSlotSlug(slot);
-            std::vector<std::string> compatible =
-                lib ? lib->namesCompatibleWith(modeKey, slug)
-                    : std::vector<std::string>{};
-
-            // Build display list: "(default)" + compatible names.
-            std::vector<const char*> items;
-            items.reserve(compatible.size() + 1);
-            items.push_back("(default)");
-            for (auto& n : compatible) items.push_back(n.c_str());
-
-            int selectedIdx = 0;
-            for (size_t i = 0; i < compatible.size(); ++i)
-                if (compatible[i] == currentAsset) { selectedIdx = (int)(i + 1); break; }
-
-            // Slot name on its own line — full-width combo eats the trailing
-            // label, so we render the name above it instead.
-            ImGui::Text("%s", slot.displayName);
-            ImGui::SetNextItemWidth(-1.f);
-            if (ImGui::Combo("##mat_picker", &selectedIdx,
-                             items.data(), (int)items.size())) {
-                if (selectedIdx == 0) {
-                    overrides.erase(slot.id);
-                } else {
-                    ChartData::MaterialData md;
-                    md.slot      = slot.id;
-                    md.assetName = compatible[selectedIdx - 1];
-                    overrides[slot.id] = md;
-                }
-            }
-
-            ImGui::PopID();
-        }
-        endGroupIfAny();
-
-        ImGui::Spacing();
-    }
+    // Material Builder moved to its own sidebar tab (renderMaterialBuilderPage).
+    // Materials moved wholesale to the Note tab: note-type slots live in
+    // their per-type sections; playfield / UI slots live in the Note tab's
+    // Playfield section.
+    } // showPresentation
 }
 
 // ── loadWaveformIfNeeded ─────────────────────────────────────────────────────
@@ -2729,6 +3208,74 @@ void SongEditor::renderWaveform(ImDrawList* dl, ImVec2 origin, ImVec2 size,
                     IM_COL32(60, 150, 255, 180));
     }
 
+    // Audit problem-range overlay. Whichever audit issue is currently
+    // hovered in any audit list (toolbar popup or right-sidebar panel)
+    // wins; if nothing is hovered this frame, the pinned issue (if any)
+    // paints instead. Drawn underneath the preview-clip overlay so the
+    // brighter blue preview band always reads as on top when both are
+    // visible at the same time.
+    {
+        const AuditHighlight* hl =
+            m_auditHover.active ? &m_auditHover :
+            m_auditPin.active   ? &m_auditPin   : nullptr;
+        if (hl) {
+            float ts = hl->timeStart;
+            float te = hl->timeEnd > hl->timeStart ? hl->timeEnd
+                                                    : hl->timeStart + 0.15f;
+            float pxA = origin.x + (ts - startTime) * m_timelineZoom;
+            float pxB = origin.x + (te - startTime) * m_timelineZoom;
+            float ax = std::max(pxA, origin.x);
+            float bx = std::min(pxB, pMax.x);
+            if (bx > ax) {
+                dl->AddRectFilled(ImVec2(ax, origin.y), ImVec2(bx, pMax.y),
+                                  hl->fillColor);
+                if (pxA >= origin.x && pxA <= pMax.x)
+                    dl->AddLine(ImVec2(pxA, origin.y), ImVec2(pxA, pMax.y),
+                                hl->edgeColor, 2.f);
+                if (pxB >= origin.x && pxB <= pMax.x)
+                    dl->AddLine(ImVec2(pxB, origin.y), ImVec2(pxB, pMax.y),
+                                hl->edgeColor, 2.f);
+            }
+        }
+    }
+
+    // Preview-clip overlay (music-selection preview window). The whole
+    // overlay — translucent blue fill, edge lines, and "Preview Clip" label
+    // — is gated by m_showPreviewLabel. That flag is set/cleared each frame
+    // by the sidebar's "Preview Clip" group (renderProperties): it's true
+    // while the cursor is inside that group, false otherwise. So hovering
+    // (or interacting with) the sidebar section is what reveals the band on
+    // the waveform; the waveform side just paints when told to.
+    if (m_song && m_showPreviewLabel) {
+        float ps = m_song->previewStart;
+        float pd = m_song->previewDuration;
+        if (pd > 0.f) {
+            float pxA = origin.x + (ps - startTime) * m_timelineZoom;
+            float pxB = origin.x + (ps + pd - startTime) * m_timelineZoom;
+            float ax = std::max(pxA, origin.x);
+            float bx = std::min(pxB, pMax.x);
+            if (bx > ax) {
+                // translucent fill
+                dl->AddRectFilled(ImVec2(ax, origin.y), ImVec2(bx, pMax.y),
+                                  IM_COL32(80, 180, 255, 40));
+                // edge lines
+                if (pxA >= origin.x && pxA <= pMax.x)
+                    dl->AddLine(ImVec2(pxA, origin.y), ImVec2(pxA, pMax.y),
+                                IM_COL32(80, 200, 255, 220), 2.f);
+                if (pxB >= origin.x && pxB <= pMax.x)
+                    dl->AddLine(ImVec2(pxB, origin.y), ImVec2(pxB, pMax.y),
+                                IM_COL32(80, 200, 255, 220), 2.f);
+                // label at top-left of visible region
+                const char* plabel = "Preview Clip";
+                ImVec2 lsz = ImGui::CalcTextSize(plabel);
+                float lx = ax + 4.f;
+                if (lx + lsz.x + 4.f > bx) lx = bx - lsz.x - 4.f;
+                dl->AddText(ImVec2(lx, origin.y + 2.f),
+                            IM_COL32(160, 220, 255, 230), plabel);
+            }
+        }
+    }
+
     // Draw user-placed markers (dashed lines, synced with chart timeline)
     for (float mt : markers()) {
         float markerX = origin.x + (mt - startTime) * m_timelineZoom;
@@ -3252,7 +3799,7 @@ void SongEditor::renderSceneView(ImDrawList* dl, ImVec2 origin, ImVec2 size,
             dl->AddRectFilled(origin, pMax, IM_COL32(14, 14, 20, 255));
             dl->AddText(ImVec2(origin.x + 12, origin.y + 12),
                         IM_COL32(200, 200, 200, 200),
-                        "Scan Line Mode — load audio to generate pages.");
+                        "Scan Line Mode - load audio to generate pages.");
         } else {
             if (m_scanCurrentPage < 0) m_scanCurrentPage = 0;
             if (m_scanCurrentPage >= (int)m_scanPageTable.size())
@@ -3720,15 +4267,25 @@ void SongEditor::renderSceneView(ImDrawList* dl, ImVec2 origin, ImVec2 size,
     }
 
     // ── Draw Combo HUD ──────────────────────────────────────────────────────
+    // The 8-direction glow in drawHudText paints 8 offset copies of the
+    // glyph around the original. On the combo number that produces a fuzzy
+    // halo of overlapping "0"s, and on the "COMBO" word below it the offset
+    // copies are wide enough to read as separate stacked words. Strip the
+    // glow + bold for both pieces of the combo HUD so each glyph is drawn
+    // exactly once.
     {
+        HudTextConfig comboNumber = gm.comboHud;
+        comboNumber.glow = false;
+        comboNumber.bold = false;
+
         char comboBuf[32];
         snprintf(comboBuf, sizeof(comboBuf), "%d", simCombo);
-        drawHudText(gm.comboHud, comboBuf);
+        drawHudText(comboNumber, comboBuf);
 
-        // "COMBO" label below the number
-        HudTextConfig comboLabel = gm.comboHud;
-        comboLabel.pos[1] += comboLabel.fontSize * comboLabel.scale / size.y * 1.2f;
-        comboLabel.fontSize *= 0.45f;
+        HudTextConfig comboLabel = comboNumber;
+        float numberFs = gm.comboHud.fontSize * gm.comboHud.scale;
+        comboLabel.pos[1] += numberFs / size.y;  // one full number-height down
+        comboLabel.fontSize *= 0.4f;
         drawHudText(comboLabel, "COMBO");
     }
 
@@ -3745,7 +4302,7 @@ void SongEditor::renderSceneView(ImDrawList* dl, ImVec2 origin, ImVec2 size,
 
     // Show hint if no notes
     if (curNotes.empty()) {
-        const char* hint = "No notes — switch to Editor tab to place notes";
+        const char* hint = "No notes - switch to Editor tab to place notes";
         ImVec2 tsz = ImGui::CalcTextSize(hint);
         dl->AddText(ImVec2(origin.x + (size.x - tsz.x) * 0.5f,
                            pMax.y - tsz.y - 12),
@@ -4749,7 +5306,8 @@ void SongEditor::renderAssets() {
     if (!m_assetsScanned) { ImGui::TextDisabled("(not scanned)"); return; }
 
     bool anyFiles = !m_assets.images.empty() || !m_assets.gifs.empty() ||
-                    !m_assets.videos.empty() || !m_assets.audios.empty();
+                    !m_assets.videos.empty() || !m_assets.audios.empty() ||
+                    !m_assets.materials.empty();
     if (!anyFiles) {
         ImDrawList* dl = ImGui::GetWindowDrawList();
         ImVec2 p  = ImGui::GetCursorScreenPos();
@@ -4765,14 +5323,48 @@ void SongEditor::renderAssets() {
     }
 
     const float thumbSize = 80.f;
+    const float tileSpacing = 6.f;
+    const float colW = thumbSize + tileSpacing;
     std::string toDelete;
+
+    // Grid layout: fixed column stride so labels of varying width can't push
+    // tiles out of alignment between rows.
+    int gridCol = 0;
+    int gridMaxCols = 1;
+    float gridStartY = 0.f;
+    auto gridBegin = [&]() {
+        gridCol = 0;
+        float availW = ImGui::GetContentRegionAvail().x;
+        gridMaxCols = std::max(1, (int)((availW + tileSpacing) / colW));
+        gridStartY = ImGui::GetCursorPosY();
+    };
+    auto gridSlot = [&]() {
+        if (gridCol == 0) {
+            // Start of a row — cursor is at x=0 already.
+        } else if (gridCol % gridMaxCols == 0) {
+            // Wrap to next row at fixed X=0.
+            ImGui::SetCursorPosX(0.f);
+        } else {
+            ImGui::SameLine();
+            ImGui::SetCursorPosX((gridCol % gridMaxCols) * colW);
+        }
+    };
+    auto gridAdvance = [&]() {
+        ++gridCol;
+    };
+    auto gridEnd = [&]() {
+        // Ensure subsequent sections start on a fresh line.
+        if (gridCol > 0) ImGui::NewLine();
+    };
 
     auto drawThumbs = [&](const std::vector<std::string>& files) {
         if (files.empty()) return;
+        gridBegin();
         for (int i = 0; i < (int)files.size(); ++i) {
             const std::string& f = files[i];
             std::string name = fs::path(f).filename().string();
             ImGui::PushID(i);
+            gridSlot();
             ImGui::BeginGroup();
 
             ImVec2 thumbPos = ImGui::GetCursorScreenPos();
@@ -4793,7 +5385,7 @@ void SongEditor::renderAssets() {
             if (ImGui::IsItemHovered()) {
                 dl->AddRect(thumbPos, ImVec2(thumbPos.x + thumbSize, thumbPos.y + thumbSize),
                             IM_COL32(100, 160, 255, 200), 4.f, 0, 2.f);
-                ImGui::SetTooltip("%s", f.c_str());
+                ImGui::SetTooltip("%s", shortenForTooltip(name).c_str());
             }
             if (ImGui::BeginDragDropSource()) {
                 ImGui::SetDragDropPayload("ASSET_PATH", f.c_str(), f.size() + 1);
@@ -4812,21 +5404,25 @@ void SongEditor::renderAssets() {
             ImGui::TextDisabled("%s", lbl.c_str());
 
             ImGui::EndGroup();
-            ImGui::SameLine(0.f, 6.f);
+            gridAdvance();
             ImGui::PopID();
         }
-        ImGui::NewLine();
+        gridEnd();
     };
 
     if (!m_assets.images.empty()) { ImGui::Text("Images:"); drawThumbs(m_assets.images); }
+    if (!m_assets.gifs.empty())   { ImGui::Text("GIFs:");   drawThumbs(m_assets.gifs); }
+    if (!m_assets.videos.empty()) { ImGui::Text("Videos:"); drawThumbs(m_assets.videos); }
 
     // Audio
     if (!m_assets.audios.empty()) {
         ImGui::Text("Audio:");
+        gridBegin();
         for (int i = 0; i < (int)m_assets.audios.size(); ++i) {
             const std::string& f = m_assets.audios[i];
             std::string name = fs::path(f).filename().string();
             ImGui::PushID(1000 + i);
+            gridSlot();
             ImGui::BeginGroup();
             ImVec2 thumbPos = ImGui::GetCursorScreenPos();
             ImGui::InvisibleButton("##a", ImVec2(thumbSize, thumbSize));
@@ -4841,7 +5437,7 @@ void SongEditor::renderAssets() {
             if (ImGui::IsItemHovered()) {
                 dl->AddRect(thumbPos, ImVec2(thumbPos.x + thumbSize, thumbPos.y + thumbSize),
                             IM_COL32(100, 160, 255, 200), 4.f, 0, 2.f);
-                ImGui::SetTooltip("%s", f.c_str());
+                ImGui::SetTooltip("%s", shortenForTooltip(name).c_str());
             }
             if (ImGui::BeginDragDropSource()) {
                 ImGui::SetDragDropPayload("ASSET_PATH", f.c_str(), f.size() + 1);
@@ -4857,10 +5453,110 @@ void SongEditor::renderAssets() {
             ImGui::SetCursorPosX(ImGui::GetCursorPosX() + (thumbSize - lsz.x) * 0.5f);
             ImGui::TextDisabled("%s", lbl.c_str());
             ImGui::EndGroup();
-            ImGui::SameLine(0.f, 6.f);
+            gridAdvance();
             ImGui::PopID();
         }
-        ImGui::NewLine();
+        gridEnd();
+    }
+
+    // Materials — mirrors the tiles shown on Start Screen / Music Selection.
+    // Only materials for the current mode (or universal ones) are shown so
+    // Circle/ScanLine slots don't clutter a 2D-drop chart.
+    std::string wantMode;
+    if (m_song) {
+        switch (m_song->gameMode.type) {
+            case GameModeType::DropNotes:
+                wantMode = (m_song->gameMode.dimension == DropDimension::ThreeD)
+                           ? "arcaea" : "bandori";
+                break;
+            case GameModeType::Circle:   wantMode = "lanota"; break;
+            case GameModeType::ScanLine: wantMode = "cytus";  break;
+        }
+    }
+    auto matFitsMode = [&](const std::string& stem) -> bool {
+        if (!m_engineCached) return true;
+        const MaterialAsset* a = m_engineCached->materialLibrary().get(stem);
+        if (!a) return true;                        // unknown → don't hide
+        if (a->targetMode.empty()) return true;     // universal
+        return a->targetMode == wantMode;
+    };
+
+    if (!m_assets.materials.empty()) {
+        ImGui::Text("Materials:");
+        gridBegin();
+        for (int i = 0; i < (int)m_assets.materials.size(); ++i) {
+            const std::string& f = m_assets.materials[i];
+            std::string stem = fs::path(f).stem().string();
+            if (!matFitsMode(stem)) continue;
+            std::string name = fs::path(f).filename().string();
+            ImGui::PushID(2000 + i);
+            gridSlot();
+            ImGui::BeginGroup();
+            ImVec2 thumbPos = ImGui::GetCursorScreenPos();
+            ImGui::InvisibleButton("##m", ImVec2(thumbSize, thumbSize));
+            ImDrawList* dl = ImGui::GetWindowDrawList();
+
+            const MaterialAsset* matPtr = m_engineCached
+                ? m_engineCached->materialLibrary().get(stem) : nullptr;
+            // Click loads the material into the Material tab's edit form.
+            // Skipped when the tile starts a drag (BeginDragDropSource below
+            // handles that path separately).
+            if (matPtr && m_engineCached &&
+                ImGui::IsItemClicked(ImGuiMouseButton_Left)) {
+                m_engineCached->startScreenEditor().selectMaterialByName(stem);
+            }
+            if (matPtr && m_engineCached) {
+                m_engineCached->startScreenEditor().drawMaterialPreviewAt(
+                    *matPtr, thumbPos, ImVec2(thumbSize, thumbSize));
+            } else {
+                dl->AddRectFilled(thumbPos,
+                                  ImVec2(thumbPos.x + thumbSize, thumbPos.y + thumbSize),
+                                  IM_COL32(50, 30, 70, 255), 4.f);
+                const char* icon = "MAT";
+                ImVec2 mizs = ImGui::CalcTextSize(icon);
+                dl->AddText(ImVec2(thumbPos.x + thumbSize * 0.5f - mizs.x * 0.5f,
+                                   thumbPos.y + thumbSize * 0.5f - mizs.y * 0.5f),
+                            IM_COL32(220, 180, 255, 220), icon);
+            }
+            if (ImGui::IsItemHovered()) {
+                dl->AddRect(thumbPos,
+                            ImVec2(thumbPos.x + thumbSize, thumbPos.y + thumbSize),
+                            IM_COL32(200, 140, 255, 200), 4.f, 0, 2.f);
+                if (matPtr && m_engineCached) {
+                    ImGui::BeginTooltip();
+                    ImGui::TextUnformatted(shortenForTooltip(name).c_str());
+                    if (!matPtr->targetMode.empty() ||
+                        !matPtr->targetSlotSlug.empty()) {
+                        ImGui::TextDisabled("target: %s / %s",
+                            matPtr->targetMode.empty()     ? "(any)" : matPtr->targetMode.c_str(),
+                            matPtr->targetSlotSlug.empty() ? "(any)" : matPtr->targetSlotSlug.c_str());
+                    }
+                    m_engineCached->startScreenEditor().drawMaterialPreviewAt(
+                        *matPtr, ImGui::GetCursorScreenPos(), ImVec2(260.f, 140.f));
+                    ImGui::Dummy(ImVec2(260.f, 140.f));
+                    ImGui::EndTooltip();
+                } else {
+                    ImGui::SetTooltip("%s", shortenForTooltip(name).c_str());
+                }
+            }
+            if (ImGui::BeginDragDropSource()) {
+                ImGui::SetDragDropPayload("ASSET_PATH", f.c_str(), f.size() + 1);
+                ImGui::Text("%s", name.c_str());
+                ImGui::EndDragDropSource();
+            }
+            if (ImGui::BeginPopupContextItem("##mctx")) {
+                if (ImGui::MenuItem("Delete")) toDelete = f;
+                ImGui::EndPopup();
+            }
+            std::string lbl = stem.size() > 11 ? stem.substr(0, 9) + ".." : stem;
+            ImVec2 mlsz = ImGui::CalcTextSize(lbl.c_str());
+            ImGui::SetCursorPosX(ImGui::GetCursorPosX() + (thumbSize - mlsz.x) * 0.5f);
+            ImGui::TextDisabled("%s", lbl.c_str());
+            ImGui::EndGroup();
+            gridAdvance();
+            ImGui::PopID();
+        }
+        gridEnd();
     }
 
     // Handle deletion
@@ -5057,6 +5753,10 @@ ChartData SongEditor::buildChartFromNotes() const {
 }
 
 // ── exportAllCharts ─────────────────────────────────────────────────────────
+
+void SongEditor::flushChartsForAutoSave() {
+    exportAllCharts();
+}
 
 void SongEditor::exportAllCharts() {
     if (!m_song || m_projectPath.empty()) return;
@@ -5458,13 +6158,14 @@ void SongEditor::launchTestProcess() {
 void SongEditor::renderDifficultySelector() {
     struct DiffInfo {
         const char* label;
+        const char* fullName;
         Difficulty  diff;
         ImVec4      color;
     };
     DiffInfo diffs[] = {
-        {"Easy",   Difficulty::Easy,   ImVec4(0.2f, 0.7f, 0.3f, 1.f)},
-        {"Medium", Difficulty::Medium, ImVec4(0.8f, 0.6f, 0.1f, 1.f)},
-        {"Hard",   Difficulty::Hard,   ImVec4(0.8f, 0.2f, 0.2f, 1.f)},
+        {"Easy", "Easy",   Difficulty::Easy,   ImVec4(0.2f, 0.7f, 0.3f, 1.f)},
+        {"Med",  "Medium", Difficulty::Medium, ImVec4(0.8f, 0.6f, 0.1f, 1.f)},
+        {"Hard", "Hard",   Difficulty::Hard,   ImVec4(0.8f, 0.2f, 0.2f, 1.f)},
     };
 
     ImGui::Text("Difficulty:");
@@ -5477,12 +6178,14 @@ void SongEditor::renderDifficultySelector() {
             ImGui::PushStyleColor(ImGuiCol_ButtonHovered,  ImVec4(d.color.x + 0.1f, d.color.y + 0.1f, d.color.z + 0.1f, 1.f));
             ImGui::PushStyleColor(ImGuiCol_ButtonActive,   ImVec4(d.color.x - 0.05f, d.color.y - 0.05f, d.color.z - 0.05f, 1.f));
         }
-        if (ImGui::Button(d.label, ImVec2(70, 24))) {
+        if (ImGui::Button(d.label, ImVec2(52, 24))) {
             m_currentDifficulty = d.diff;
             m_holdDragging  = false;
             m_holdLastTrack = -1;
             m_holdDraft     = EditorNote{};
         }
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("%s", d.fullName);
         if (active) ImGui::PopStyleColor(3);
         ImGui::SameLine();
     }
@@ -5582,17 +6285,19 @@ void SongEditor::renderNoteToolbar() {
 
     if (m_analyzer.isRunning()) {
         ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.3f, 0.3f, 0.3f, 1.f));
-        ImGui::Button("Analyzing...", ImVec2(100, 26));
+        ImGui::Button("Analyzing...", ImVec2(80, 26));
         ImGui::PopStyleColor();
     } else {
         ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.15f, 0.5f, 0.2f, 1.f));
         ImGui::PushStyleColor(ImGuiCol_ButtonHovered,  ImVec4(0.2f, 0.6f, 0.25f, 1.f));
         ImGui::PushStyleColor(ImGuiCol_ButtonActive,   ImVec4(0.1f, 0.4f, 0.15f, 1.f));
-        if (ImGui::Button("Analyze Beats", ImVec2(100, 26))) {
+        if (ImGui::Button("Analyze", ImVec2(80, 26))) {
             if (m_song && !m_song->audioFile.empty()) {
                 std::string fullAudioPath = m_projectPath + "/" + m_song->audioFile;
-                // Ensure absolute path so subprocess can find the file
-                try { fullAudioPath = fs::canonical(fullAudioPath).string(); } catch (...) {}
+                // Ensure absolute path so subprocess can find the file. Uses
+                // a UTF-8-aware canonicalize that round-trips through wstring
+                // so non-ASCII filenames don't get mangled by CP_ACP.
+                fullAudioPath = canonicalUtf8(fullAudioPath);
                 m_analyzer.setCallback([this](AudioAnalysisResult result) {
                     if (result.success) {
                         m_diffMarkers[(int)Difficulty::Easy]   = std::move(result.easyMarkers);
@@ -5619,20 +6324,54 @@ void SongEditor::renderNoteToolbar() {
                 m_analyzer.startAnalysis(fullAudioPath);
             }
         }
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Analyze Beats - detect onsets, tempo, and per-marker features");
         ImGui::PopStyleColor(3);
     }
 
     ImGui::SameLine();
-    if (ImGui::Button("Clear Markers", ImVec2(96, 26))) {
+    if (ImGui::Button("Clr Mrk", ImVec2(72, 26))) {
         markers().clear();
         features().clear();
+        m_thinUndoDifficulty = -1;
+        m_thinUndoMarkers.clear();
+        m_thinUndoFeatures.clear();
     }
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Clear Markers - remove all analyzed markers + features");
+
+    ImGui::SameLine();
+    ImGui::BeginDisabled(markers().empty());
+    if (ImGui::Button("Thin", ImVec2(56, 26)))
+        thinMarkersInDensityHotspots();
+    ImGui::EndDisabled();
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Thin Markers - drop weakest-strength markers in\n"
+                          "Chart-Audit-flagged density hotspots until rate <=\n"
+                          "AI > Thin markers target NPS. One-shot undo via 'Undo'.");
+
+    ImGui::SameLine();
+    bool canUndoThin = (m_thinUndoDifficulty == (int)m_currentDifficulty)
+                    && !m_thinUndoMarkers.empty();
+    ImGui::BeginDisabled(!canUndoThin);
+    if (ImGui::Button("Undo", ImVec2(56, 26))) {
+        markers()  = m_thinUndoMarkers;
+        features() = m_thinUndoFeatures;
+        m_thinUndoDifficulty = -1;
+        m_thinUndoMarkers.clear();
+        m_thinUndoFeatures.clear();
+        m_statusMsg   = "Restored markers from before thinning.";
+        m_statusTimer = 4.f;
+    }
+    ImGui::EndDisabled();
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Undo last Thin Markers (current difficulty only)");
 
     ImGui::SameLine();
     ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.5f, 0.35f, 0.1f, 1.f));
     ImGui::PushStyleColor(ImGuiCol_ButtonHovered,  ImVec4(0.6f, 0.45f, 0.15f, 1.f));
     ImGui::PushStyleColor(ImGuiCol_ButtonActive,   ImVec4(0.4f, 0.25f, 0.08f, 1.f));
-    if (ImGui::Button("Place All", ImVec2(72, 26))) {
+    if (ImGui::Button("Place", ImVec2(60, 26))) {
         // Feature-driven placement. Uses analyzer features (strength / sustain /
         // centroid) when available; falls back to Tap + round-robin lane for
         // manually-added markers with no feature data.
@@ -5692,7 +6431,19 @@ void SongEditor::renderNoteToolbar() {
                     if (up < tc && laneFree(up))        picked = up;
                     else if (dn >= 0 && laneFree(dn))   picked = dn;
                 }
-                if (picked < 0) continue;  // every lane cooling down; drop note
+                if (picked < 0) {
+                    // Every lane is still cooling down - fall back to the
+                    // least-recently-used lane so every marker still gets a
+                    // note. Skip only the prev lane to keep anti-jack honest
+                    // when possible.
+                    int lru = 0;
+                    float lruT = 1e9f;
+                    for (int L = 0; L < tc; ++L) {
+                        if (L == prevLane && tc > 1) continue;
+                        if (laneLastT[L] < lruT) { lruT = laneLastT[L]; lru = L; }
+                    }
+                    picked = lru;
+                }
                 lane = picked;
             }
             note.track = lane;
@@ -5701,17 +6452,83 @@ void SongEditor::renderNoteToolbar() {
             notes().push_back(note);
             prevLane = note.track;
         }
+
+        // ── Auto-refine loop: re-audit locally and nudge lanes until the
+        // jack / crossover counts stop improving (or 3 passes). All per the
+        // current difficulty, since notes()/markers()/features() are scoped
+        // to m_currentDifficulty.
+        float auditDur = m_waveformLoaded ? (float)m_waveform.durationSeconds : 0.f;
+        if (auditDur <= 0.f && !notes().empty()) {
+            float last = 0.f;
+            for (const auto& n : notes()) {
+                float t = (n.endTime > n.time) ? n.endTime : n.time;
+                if (t > last) last = t;
+            }
+            auditDur = last;
+        }
+        int prevScore = 0x7fffffff;
+        for (int pass = 0; pass < 3; ++pass) {
+            AuditMetrics mt = computeAuditMetrics(notes(), auditDur);
+            int curScore = (int)mt.jacks.size() * 2 + (int)mt.crossovers.size();
+            if (curScore == 0 || curScore >= prevScore) break;
+            prevScore = curScore;
+
+            // Fix jacks: shift the offending run's middle note to the farthest
+            // lane from `j.lane` that isn't prev/next in that time window.
+            for (const auto& j : mt.jacks) {
+                int target = (j.lane + tc / 2) % tc;
+                // Find a note at (j.time .. j.time + 0.5s) on lane j.lane and
+                // move it. Pick the middle occurrence if there are multiple.
+                std::vector<int> hits;
+                for (int i = 0; i < (int)notes().size(); ++i) {
+                    auto& n = notes()[i];
+                    if (n.track == j.lane &&
+                        n.time >= j.time - 1e-3f &&
+                        n.time <= j.time + 0.5f)
+                        hits.push_back(i);
+                }
+                if (hits.size() >= 3) {
+                    int midIdx = hits[hits.size() / 2];
+                    notes()[midIdx].track = std::clamp(target, 0, tc - 1);
+                }
+            }
+
+            // Fix crossovers: move the later note closer to the prior lane.
+            for (const auto& c : mt.crossovers) {
+                for (int i = 1; i < (int)notes().size(); ++i) {
+                    auto& n  = notes()[i];
+                    auto& pn = notes()[i - 1];
+                    if (std::fabs(n.time - c.time) < 1e-3f) {
+                        int dL = n.track - pn.track;
+                        if (dL == 0) break;
+                        int step = (dL > 0) ? -1 : 1;
+                        int newLane = std::clamp(n.track + step * (std::abs(dL) - 2),
+                                                 0, tc - 1);
+                        n.track = newLane;
+                        break;
+                    }
+                }
+            }
+        }
+        AuditMetrics finalMt = computeAuditMetrics(notes(), auditDur);
+        char statusBuf[96];
+        snprintf(statusBuf, sizeof(statusBuf),
+                 "Placed %d notes - jacks:%zu xovers:%zu",
+                 (int)notes().size(), finalMt.jacks.size(), finalMt.crossovers.size());
+        m_statusMsg   = statusBuf;
+        m_statusTimer = 4.f;
     }
     if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("Place a Tap note on every marker");
+        ImGui::SetTooltip("Place All - infer a note on every marker,\n"
+                          "then auto-refine against Chart Audit until clean");
     ImGui::PopStyleColor(3);
 
     // ── AI tuning gear ───────────────────────────────────────────────────────
     ImGui::SameLine();
-    if (ImGui::Button("AI...", ImVec2(48, 26)))
+    if (ImGui::Button("AI", ImVec2(36, 26)))
         ImGui::OpenPopup("ai_tuning");
     if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("Tune Place All inference + validation");
+        ImGui::SetTooltip("AI Place-All tuning - percentile, hold threshold, anti-jack, cooldowns");
     if (ImGui::BeginPopup("ai_tuning")) {
         ImGui::TextUnformatted("AI Place-All tuning");
         ImGui::Separator();
@@ -5741,6 +6558,13 @@ void SongEditor::renderNoteToolbar() {
                            &m_autoScanTimeGapMs, 0.f, 300.f, "%.0f ms");
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("Minimum time between any two ScanLine notes");
+        ImGui::SetNextItemWidth(180);
+        ImGui::SliderFloat("Thin markers target NPS##ai",
+                           &m_autoMarkerThinNps, 1.f, 10.f, "%.1f /s");
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Target marker rate inside Chart-Audit density hotspots\n"
+                              "when 'Thin Markers' is clicked. Weakest-strength markers\n"
+                              "are dropped first.");
         ImGui::Separator();
         if (ImGui::Button("Reset defaults##ai")) {
             m_autoFlickPct       = 0.88f;
@@ -5748,7 +6572,12 @@ void SongEditor::renderNoteToolbar() {
             m_autoAntiJack       = true;
             m_autoLaneCooldownMs = 80.f;
             m_autoScanTimeGapMs  = 60.f;
+            m_autoMarkerThinNps  = 4.f;
         }
+        ImGui::Separator();
+        // Style Transfer lives in this popup now - it shares the same "AI"
+        // surface as Place-All so the author picks tuning + style together.
+        renderStylePanel();
         ImGui::EndPopup();
     }
 
@@ -5756,10 +6585,31 @@ void SongEditor::renderNoteToolbar() {
     ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.6f, 0.15f, 0.15f, 1.f));
     ImGui::PushStyleColor(ImGuiCol_ButtonHovered,  ImVec4(0.7f, 0.2f, 0.2f, 1.f));
     ImGui::PushStyleColor(ImGuiCol_ButtonActive,   ImVec4(0.5f, 0.1f, 0.1f, 1.f));
-    if (ImGui::Button("Clear Notes", ImVec2(86, 26))) {
+    if (ImGui::Button("Clr Note", ImVec2(76, 26))) {
         notes().clear();
     }
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Clear Notes - delete every note in this difficulty");
     ImGui::PopStyleColor(3);
+
+    // ── Audit button — now switches the right sidebar to its Audit tab
+    //    instead of opening a floating popup. The metrics + issue list
+    //    live in renderAuditSidebarTab().
+    ImGui::SameLine();
+    ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.35f, 0.35f, 0.6f, 1.f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered,  ImVec4(0.45f, 0.45f, 0.7f, 1.f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive,   ImVec4(0.25f, 0.25f, 0.5f, 1.f));
+    if (ImGui::Button("Audit", ImVec2(60, 26))) {
+        m_rightSidebarTab        = RightSidebarTab::Audit;
+        m_rightSidebarTabPending = true;  // consumed once by the tab bar
+        m_copilotBarOpen         = true;  // ensure the bar is expanded so the tab is visible
+    }
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Open the Audit page in the right sidebar - density / jacks /\n"
+                          "crossovers / dead zones / marker stats for this difficulty");
+    ImGui::PopStyleColor(3);
+
+    // (Old chart-audit popup removed — see renderAuditSidebarTab below.)
 
     // Analysis error popup
     if (m_showAnalysisError) {
@@ -5851,7 +6701,7 @@ void SongEditor::handleNotePlacement(ImVec2 origin, ImVec2 size, float startTime
             m_holdDraft.isSky    = is3DSky;
             m_holdDraft.laneSpan = m_defaultLaneSpan;
             m_holdDraft.waypoints.clear();
-            m_holdDraft.waypoints.push_back({0.f, track, 0.f, EditorHoldTransition::Curve});
+            m_holdDraft.waypoints.push_back({0.f, track, 0.f, m_defaultHoldTransition});
             m_holdLastTrack = track;
         }
         else if (m_holdDragging && ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
@@ -5864,7 +6714,7 @@ void SongEditor::handleNotePlacement(ImVec2 origin, ImVec2 size, float startTime
                 if (tOff <= 0.f) tOff = 0.0001f;
                 // Default each lane-change to an instant snap; the author
                 // can stretch transitionLen later in Note Properties.
-                m_holdDraft.waypoints.push_back({tOff, track, 0.f, EditorHoldTransition::Curve});
+                m_holdDraft.waypoints.push_back({tOff, track, 0.f, m_defaultHoldTransition});
                 m_holdLastTrack = track;
             }
         }
@@ -5883,7 +6733,7 @@ void SongEditor::handleNotePlacement(ImVec2 origin, ImVec2 size, float startTime
                         last.tOffset = dur;
                     } else if (last.tOffset < dur) {
                         m_holdDraft.waypoints.push_back({dur, m_holdLastTrack, 0.f,
-                                                          EditorHoldTransition::Curve});
+                                                          m_defaultHoldTransition});
                     }
                 }
                 // Drop the waypoints vector if it's a degenerate straight hold
@@ -7028,6 +7878,132 @@ int SongEditor::inferLaneFromCentroid(float centroid, int laneCount,
     return lane;
 }
 
+// ── Thin Markers (auto-call Chart Audit on the marker stream) ───────────────
+// Pre: markers() / features() are the current-difficulty stream.
+// Audit is computed with notes intentionally empty so the marker-side density
+// block runs even when the chart already has authored notes (the gating in
+// ChartAudit.cpp suppresses marker hotspots once notes exist).
+//
+// Why iterate: the audit's hotspot reports a *peak window count* (max events
+// in any 4 s window of a sustained run); after dropping markers, surviving
+// ones may still re-cluster into a smaller 4 s window that re-trips the
+// threshold. We re-audit and re-thin (up to 8 passes) until no hotspot
+// remains or we stop making progress. We also aim for ~90% of the target
+// NPS so the audit threshold has margin and doesn't fire on a 1-event jitter.
+//
+// Why snapshot only on first mutation per session: if the user clicks Thin
+// repeatedly without clearing, a naive overwrite would lose the original
+// markers after the first click — making Undo restore the *already thinned*
+// state instead of the analyzer output. We snapshot once and don't touch it
+// until Undo or Clr Mrk explicitly clears it.
+
+void SongEditor::thinMarkersInDensityHotspots() {
+    auto& mk = markers();
+    auto& ft = features();
+    if (mk.empty()) return;
+
+    const float dur    = m_waveformLoaded ? (float)m_waveform.durationSeconds : 0.f;
+    const float target = std::max(0.5f, m_autoMarkerThinNps);
+
+    bool snapshotExists = (m_thinUndoDifficulty == (int)m_currentDifficulty)
+                       && !m_thinUndoMarkers.empty();
+
+    int totalRemoved = 0;
+    int passCount    = 0;
+    int initialHotspots = -1;
+
+    struct Entry { float t; MarkerFeature f; bool hasF; };
+
+    for (int pass = 0; pass < 8; ++pass) {
+        AuditMetrics mt = computeAuditMetrics({}, dur, mk);
+        if (initialHotspots < 0) initialHotspots = (int)mt.markerDensityHotspots.size();
+        if (mt.markerDensityHotspots.empty()) break;
+
+        std::vector<Entry> entries;
+        entries.reserve(mk.size());
+        for (size_t i = 0; i < mk.size(); ++i) {
+            Entry e{mk[i], MarkerFeature{}, false};
+            if (i < ft.size()) { e.f = ft[i]; e.hasF = true; }
+            entries.push_back(e);
+        }
+        std::sort(entries.begin(), entries.end(),
+                  [](const Entry& a, const Entry& b) { return a.t < b.t; });
+
+        std::vector<bool> drop(entries.size(), false);
+        int removedThisPass = 0;
+
+        for (const auto& h : mt.markerDensityHotspots) {
+            std::vector<size_t> inRange;
+            for (size_t i = 0; i < entries.size(); ++i) {
+                if (drop[i]) continue;
+                if (entries[i].t >= h.start && entries[i].t <= h.end)
+                    inRange.push_back(i);
+            }
+            if (inRange.empty()) continue;
+            float width  = std::max(1.f, h.end - h.start);
+            // Aim for 90% of target NPS so the next audit pass has margin —
+            // peak-window-count vs. uniform-rate mismatch otherwise re-trips.
+            int   keep   = (int)std::floor(target * width * 0.9f);
+            int   excess = (int)inRange.size() - keep;
+            if (excess <= 0) continue;
+
+            std::sort(inRange.begin(), inRange.end(),
+                      [&](size_t a, size_t b) {
+                          float sa = entries[a].hasF ? entries[a].f.strength : 0.f;
+                          float sb = entries[b].hasF ? entries[b].f.strength : 0.f;
+                          return sa < sb;
+                      });
+            for (int i = 0; i < excess && i < (int)inRange.size(); ++i) {
+                if (!drop[inRange[i]]) { drop[inRange[i]] = true; ++removedThisPass; }
+            }
+        }
+
+        if (removedThisPass == 0) break;
+
+        // Snapshot on first actual mutation per session.
+        if (!snapshotExists) {
+            m_thinUndoMarkers    = mk;
+            m_thinUndoFeatures   = ft;
+            m_thinUndoDifficulty = (int)m_currentDifficulty;
+            snapshotExists = true;
+        }
+
+        std::vector<float>         newMk;
+        std::vector<MarkerFeature> newFt;
+        newMk.reserve(entries.size() - (size_t)removedThisPass);
+        newFt.reserve(entries.size() - (size_t)removedThisPass);
+        for (size_t i = 0; i < entries.size(); ++i) {
+            if (drop[i]) continue;
+            newMk.push_back(entries[i].t);
+            if (entries[i].hasF) newFt.push_back(entries[i].f);
+        }
+        mk = std::move(newMk);
+        if (!ft.empty()) ft = std::move(newFt);
+
+        totalRemoved += removedThisPass;
+        passCount     = pass + 1;
+    }
+
+    if (totalRemoved == 0) {
+        m_statusMsg   = (initialHotspots == 0)
+            ? "No density hotspots flagged - nothing to thin."
+            : "Hotspots already at target NPS - no markers removed.";
+        m_statusTimer = 4.f;
+        return;
+    }
+
+    AuditMetrics finalMt = computeAuditMetrics({}, dur, mk);
+    char buf[160];
+    std::snprintf(buf, sizeof(buf),
+                  "Thinned %d markers in %d pass(es) (target %.1f /s). "
+                  "Remaining hotspots: %zu.",
+                  totalRemoved, passCount, target,
+                  finalMt.markerDensityHotspots.size());
+    m_statusMsg   = buf;
+    m_statusTimer = 6.f;
+    if (m_engineCached) m_engineCached->markEditorDirty();
+}
+
 // ── Editor Copilot ──────────────────────────────────────────────────────────
 
 struct SongEditor::CopilotState {
@@ -7137,7 +8113,13 @@ static std::string buildCopilotSystemPrompt(const SongInfo* song,
         "  note_count = %zu  (tap=%d, hold=%d, flick=%d, other=%d)\n\n",
         modeName, laneCount, diffName, notes.size(), tap, hold, flick, other);
 
-    static const char* kSchema =
+    // Mode-specific skill doc drives the rest of the prompt. Ships as
+    // engine/assets/copilot_skills/<mode>.md + _common.md; falls back to
+    // the original inline schema when the file cannot be opened.
+    std::string skill = loadCopilotSkill(modeName);
+    if (!skill.empty()) return std::string(ctx) + skill;
+
+    static const char* kFallbackSchema =
         "Respond with JSON ONLY matching this envelope - no prose, no ```fences```:\n"
         "{\n"
         "  \"explanation\": \"one short sentence\",\n"
@@ -7156,7 +8138,7 @@ static std::string buildCopilotSystemPrompt(const SongInfo* song,
         "- Never emit 'slide', 'arc', or 'arctap' - not in this vocabulary.\n"
         "- Respect lane_count: never pick a track >= lane_count.\n";
 
-    return std::string(ctx) + kSchema;
+    return std::string(ctx) + kFallbackSchema;
 }
 
 void SongEditor::renderCopilotPanel() {
@@ -7168,9 +8150,11 @@ void SongEditor::renderCopilotPanel() {
         c.configLoaded = true;
     }
 
-    if (!ImGui::CollapsingHeader("Editor Copilot")) return;
+    const bool hasSong = (m_song != nullptr);
 
-    // ── Settings popup ───────────────────────────────────────────────────
+    // Header row: Settings gear + current model tag. No title text because
+    // this panel is always hosted in a container that labels itself
+    // (sidebar header or floating window title bar).
     if (ImGui::SmallButton("Settings##copilot"))
         ImGui::OpenPopup("copilot_settings");
     ImGui::SameLine();
@@ -7217,77 +8201,33 @@ void SongEditor::renderCopilotPanel() {
         ImGui::EndPopup();
     }
 
-    // ── Prompt box ───────────────────────────────────────────────────────
-    char promptBuf[2048];
-    std::strncpy(promptBuf, c.prompt.c_str(), sizeof(promptBuf) - 1);
-    promptBuf[sizeof(promptBuf) - 1] = 0;
-    ImGui::InputTextMultiline("##copilotPrompt", promptBuf, sizeof(promptBuf),
-                              ImVec2(-1, 80));
-    c.prompt = promptBuf;
+    ImGui::Separator();
 
-    // ── Generate / Undo row ──────────────────────────────────────────────
-    bool disabled = c.inFlight || c.prompt.empty();
-    ImGui::BeginDisabled(disabled);
-    if (ImGui::Button(c.inFlight ? "Generating..." : "Generate")) {
-        c.client.setCallback([this](AIEditorResult res) {
-            CopilotState& cc = *m_copilot;
-            cc.inFlight = false;
-            cc.rawResponse = res.message;
-            cc.proposed.clear();
-            cc.explanation.clear();
-            if (!res.success) {
-                cc.lastError = res.errorMessage;
-                cc.hasResult = true;
-                m_statusMsg = "Copilot: " + res.errorMessage;
-                m_statusTimer = 5.f;
-                return;
-            }
-            auto parsed = parseChartEditOps(res.message);
-            if (!parsed.success) {
-                cc.lastError = parsed.errorMessage;
-            } else {
-                cc.explanation = parsed.explanation;
-                cc.proposed    = std::move(parsed.ops);
-                cc.lastError.clear();
-            }
-            cc.hasResult = true;
-            m_statusMsg = "Copilot: " + std::to_string(cc.proposed.size())
-                        + " op(s) proposed";
-            m_statusTimer = 3.f;
-        });
-
-        std::string sys  = buildCopilotSystemPrompt(m_song, m_currentDifficulty, notes());
-        c.inFlight = true;
-        c.hasResult = false;
-        c.client.startRequest(c.config, sys, c.prompt);
-    }
-    ImGui::EndDisabled();
-
-    ImGui::SameLine();
-    ImGui::BeginDisabled(!c.undo.has_value());
-    if (ImGui::Button("Undo last")) {
-        auto& n = notes();
-        auto& m = markers();
-        auto& f = features();
-        n = c.undo->notes;
-        m = c.undo->markers;
-        f = c.undo->features;
-        c.undo.reset();
-        m_statusMsg = "Copilot: undo applied";
-        m_statusTimer = 3.f;
-    }
-    ImGui::EndDisabled();
-
-    // ── Result preview ───────────────────────────────────────────────────
-    if (c.hasResult) {
-        ImGui::Separator();
+    // ── Conversation area (scrollable, fills remaining height above input) ─
+    const float inputRowH   = 28.f;  // each button row
+    const float promptBoxH  = 80.f;  // input textarea
+    // Reserve space for: textarea + Send row + Undo row + margins.
+    const float bottomBlockH = promptBoxH + inputRowH * 2.f + 16.f;
+    float convH = std::max(60.f, ImGui::GetContentRegionAvail().y - bottomBlockH);
+    ImGui::BeginChild("##copilot_conv", ImVec2(-1, convH), true);
+    if (!hasSong) {
+        ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyle().Colors[ImGuiCol_TextDisabled]);
+        ImGui::TextWrapped("Open a song from Music Selection to chat about its chart.");
+        ImGui::PopStyleColor();
+    } else if (c.inFlight) {
+        ImGui::TextDisabled("(waiting for response...)");
+    } else if (!c.hasResult) {
+        ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyle().Colors[ImGuiCol_TextDisabled]);
+        ImGui::TextWrapped("Ask the Copilot to edit this chart.");
+        ImGui::Spacing();
+        ImGui::TextWrapped("Example: \"delete all flicks between 30 and 45s\"");
+        ImGui::PopStyleColor();
+    } else {
         if (!c.explanation.empty())
             ImGui::TextWrapped("%s", c.explanation.c_str());
         if (!c.lastError.empty()) {
             ImGui::TextColored(ImVec4(1.f, 0.5f, 0.4f, 1.f),
                                "Error: %s", c.lastError.c_str());
-            // Fallback: show a snippet of the raw response so the user can see
-            // what the model actually said when parsing fails.
             if (!c.rawResponse.empty()) {
                 ImGui::TextDisabled("Raw: %.200s%s",
                     c.rawResponse.c_str(),
@@ -7298,16 +8238,24 @@ void SongEditor::renderCopilotPanel() {
             ImGui::BulletText("%s", describeChartEditOp(op).c_str());
         }
         if (!c.proposed.empty()) {
+            ImGui::Spacing();
             if (ImGui::Button("Apply##copilot")) {
                 ChartSnapshot snap;
-                snap.notes    = notes();
-                snap.markers  = markers();
-                snap.features = features();
+                snap.notes     = notes();
+                snap.markers   = markers();
+                snap.features  = features();
+                snap.diskRot   = diskRot();
+                snap.diskMove  = diskMove();
+                snap.diskScale = diskScale();
+                snap.scanSpeed = scanSpeed();
+                snap.scanPages = scanPages();
                 c.undo = std::move(snap);
                 int laneCount = m_song ? m_song->gameMode.trackCount : 7;
                 int totalIns = 0, totalDel = 0, totalMut = 0;
                 for (const auto& op : c.proposed) {
-                    auto st = applyChartEditOp(notes(), laneCount, op);
+                    ChartEditApplyStats st = isExtendedOp(op)
+                        ? applyChartEditOpExtended(*this, laneCount, op)
+                        : applyChartEditOp(notes(), laneCount, op);
                     totalIns += st.inserted;
                     totalDel += st.deleted;
                     totalMut += st.mutated;
@@ -7330,6 +8278,149 @@ void SongEditor::renderCopilotPanel() {
             }
         }
     }
+    ImGui::EndChild();
+
+    // ── Prompt box (docked at bottom) ────────────────────────────────────
+    char promptBuf[2048];
+    std::strncpy(promptBuf, c.prompt.c_str(), sizeof(promptBuf) - 1);
+    promptBuf[sizeof(promptBuf) - 1] = 0;
+    ImGui::InputTextMultiline("##copilotPrompt", promptBuf, sizeof(promptBuf),
+                              ImVec2(-1, promptBoxH));
+    c.prompt = promptBuf;
+
+    // ── Send / Undo row ──────────────────────────────────────────────────
+    bool disabled = c.inFlight || c.prompt.empty() || !hasSong;
+    // Stack Send above Undo: narrow sidebars clip any SameLine pair.
+    ImGui::BeginDisabled(disabled);
+    if (ImGui::Button(c.inFlight ? "Sending..." : "Send",
+                      ImVec2(-1, 0))) {
+        c.client.setCallback([this](AIEditorResult res) {
+            CopilotState& cc = *m_copilot;
+            cc.inFlight = false;
+            cc.rawResponse = res.message;
+            cc.proposed.clear();
+            cc.explanation.clear();
+            if (!res.success) {
+                cc.lastError = res.errorMessage;
+                cc.hasResult = true;
+                m_statusMsg = "Copilot: " + res.errorMessage;
+                m_statusTimer = 5.f;
+                return;
+            }
+            auto parsed = parseChartEditOps(res.message);
+            if (!parsed.success) {
+                cc.lastError = parsed.errorMessage;
+            } else {
+                // Mode-gate: drop ops that aren't valid for the current
+                // chart mode and surface the rejection in lastError so the
+                // user sees why an op didn't make it into the preview.
+                const char* modeName = "dropnotes";
+                if (m_song) {
+                    if (m_song->gameMode.type == GameModeType::Circle)          modeName = "lanota";
+                    else if (m_song->gameMode.type == GameModeType::ScanLine)   modeName = "cytus";
+                    else if (m_song->gameMode.dimension == DropDimension::ThreeD) modeName = "arcaea";
+                    else modeName = "bandori";
+                }
+                std::vector<ChartEditOp> kept;
+                std::string rejectLog;
+                int rejected = 0;
+                for (auto& op : parsed.ops) {
+                    if (isOpAllowedForMode(op, modeName)) {
+                        kept.push_back(std::move(op));
+                    } else {
+                        ++rejected;
+                        if (!rejectLog.empty()) rejectLog += "\n";
+                        rejectLog += "Rejected (mode=" + std::string(modeName)
+                                   + "): " + describeChartEditOp(op);
+                    }
+                }
+                cc.explanation = parsed.explanation;
+                cc.proposed    = std::move(kept);
+                cc.lastError   = rejectLog;
+            }
+            cc.hasResult = true;
+            m_statusMsg = "Copilot: " + std::to_string(cc.proposed.size())
+                        + " op(s) proposed";
+            m_statusTimer = 3.f;
+        });
+
+        std::string sys  = buildCopilotSystemPrompt(m_song, m_currentDifficulty, notes());
+        c.inFlight = true;
+        c.hasResult = false;
+        c.client.startRequest(c.config, sys, c.prompt);
+    }
+    ImGui::EndDisabled();
+
+    ImGui::BeginDisabled(!c.undo.has_value());
+    if (ImGui::Button("Undo", ImVec2(-1, 0))) {
+        notes()     = c.undo->notes;
+        markers()   = c.undo->markers;
+        features()  = c.undo->features;
+        diskRot()   = c.undo->diskRot;
+        diskMove()  = c.undo->diskMove;
+        diskScale() = c.undo->diskScale;
+        scanSpeed() = c.undo->scanSpeed;
+        scanPages() = c.undo->scanPages;
+        c.undo.reset();
+        m_statusMsg = "Copilot: undo applied";
+        m_statusTimer = 3.f;
+    }
+    ImGui::EndDisabled();
+}
+
+// Docked Copilot sidebar pinned to the right edge of the viewport. Fixed
+// position + size, no drag/resize - behaves like an integrated panel rather
+// than a floating window. Rendered on every editor layer except SongEditor
+// (which hosts Copilot inline), ProjectHub, and GamePlay.
+void SongEditor::renderCopilotOverlay(Engine* engine) {
+    // Poll the async HTTP worker regardless of which page is visible so
+    // replies arrive even if the user navigates while waiting.
+    pollCopilot();
+
+    ImGuiViewport* vp = ImGui::GetMainViewport();
+    const float pinW = m_overlayOpen ? m_overlayFullW : m_overlayStripW;
+    const float reserveBot = std::clamp(m_overlayBottomReserve, 0.f, vp->WorkSize.y * 0.9f);
+    const float pinH = std::max(80.f, vp->WorkSize.y - reserveBot);
+
+    ImGui::SetNextWindowPos(ImVec2(vp->WorkPos.x + vp->WorkSize.x - pinW,
+                                   vp->WorkPos.y),
+                            ImGuiCond_Always);
+    ImGui::SetNextWindowSize(ImVec2(pinW, pinH),
+                             ImGuiCond_Always);
+
+    ImGuiWindowFlags flags = ImGuiWindowFlags_NoMove
+                           | ImGuiWindowFlags_NoResize
+                           | ImGuiWindowFlags_NoCollapse
+                           | ImGuiWindowFlags_NoTitleBar
+                           | ImGuiWindowFlags_NoFocusOnAppearing
+                           | ImGuiWindowFlags_NoSavedSettings
+                           | ImGuiWindowFlags_NoBringToFrontOnFocus;
+
+    if (!m_overlayOpen) {
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(2, 4));
+        ImGui::Begin("##copilot_sidebar_strip", nullptr, flags);
+        ImGui::BringWindowToDisplayFront(ImGui::GetCurrentWindow());
+        if (ImGui::Button("<", ImVec2(24, 24))) m_overlayOpen = true;
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Open Copilot");
+        ImGui::End();
+        ImGui::PopStyleVar();
+        return;
+    }
+
+    ImGui::Begin("##copilot_sidebar", nullptr, flags);
+    ImGui::BringWindowToDisplayFront(ImGui::GetCurrentWindow());
+    (void)engine;
+    if (ImGui::Button(">", ImVec2(24, 22))) m_overlayOpen = false;
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Close Copilot");
+    ImGui::SameLine();
+    ImGui::TextUnformatted("Editor Copilot");
+    ImGui::Separator();
+    renderCopilotPanel();
+    ImGui::End();
+}
+
+float SongEditor::copilotOverlayWidth() const {
+    return m_overlayOpen ? m_overlayFullW : m_overlayStripW;
 }
 
 // ── Chart Audit ─────────────────────────────────────────────────────────────
@@ -7360,22 +8451,32 @@ static std::string buildAuditSystemPrompt(const SongInfo* song,
         modeName, laneCount, diffName);
 
     static const char* kSchema =
-        "The user message contains pre-computed metrics from a local scan\n"
-        "(density hotspots, jacks, crossovers, dead zones). Base your review\n"
-        "on those exact timestamps; do not invent new ones.\n\n"
+        "The user message contains pre-computed metrics from a local scan:\n"
+        "  - note-driven (when notes exist): density hotspots, jacks,\n"
+        "    crossovers, dead zones, off-beat notes (alignment)\n"
+        "  - marker-driven (when there are no notes yet): marker density\n"
+        "    hotspots, avg/peak markers per second, marker dead zones\n"
+        "When the chart has 0 notes (only markers), focus your review on the\n"
+        "marker stream: comment on whether the song's musical density is\n"
+        "playable on this difficulty, where the dense/sparse passages are,\n"
+        "and what kind of chart structure the markers would support. Do not\n"
+        "say the chart is empty — say what the analyzer found in the audio.\n"
+        "Base your review on those exact timestamps; do not invent new ones.\n\n"
         "Respond with JSON ONLY matching this envelope - no prose, no fences:\n"
         "{\n"
         "  \"summary\": \"3-4 sentence overview of the chart's overall quality\",\n"
         "  \"issues\": [\n"
         "    {\"severity\":\"high|medium|low\", \"time\":0.0, \"end_time\":0.0,\n"
-        "     \"category\":\"density|jack|crossover|pacing|difficulty|other\",\n"
+        "     \"category\":\"density|jack|crossover|pacing|difficulty|alignment|other\",\n"
         "     \"message\":\"short, actionable, <=120 chars\"}\n"
         "  ]\n"
         "}\n\n"
         "Rules:\n"
         "- High severity = impossible or unfun (extreme density, rapid crossovers).\n"
-        "- Medium = a noticeable weakness (monotonous jacks, pacing slump).\n"
+        "- Medium = a noticeable weakness (monotonous jacks, pacing slump,\n"
+        "  many notes drifting off the beat).\n"
         "- Low = taste/polish.\n"
+        "- alignment = notes that don't sit on any analyzer-detected event.\n"
         "- Clean chart? Leave issues=[] and fill summary only.\n"
         "- Only cite timestamps that appear in the metrics block.\n"
         "- Match difficulty: easy charts should tolerate lower peak_nps than hard.\n";
@@ -7396,11 +8497,18 @@ void SongEditor::renderAuditPanel() {
 
     ImGui::TextDisabled("(%s)", a.config.model.c_str());
 
-    bool disabled = a.inFlight || notes().empty();
+    // Allow auditing as soon as there is *something* to evaluate — either
+    // authored notes or AI markers from a fresh Analyze Beats pass. A
+    // marker-only audit is valid: the LLM gets density/peak/dead-zone stats
+    // from the marker stream and can comment on whether the analyzed song
+    // even leaves room for a chart.
+    bool disabled = a.inFlight || (notes().empty() && markers().empty());
     ImGui::BeginDisabled(disabled);
     if (ImGui::Button(a.inFlight ? "Auditing..." : "Audit chart")) {
         float dur = (float)m_waveform.durationSeconds;
-        AuditMetrics metrics = computeAuditMetrics(notes(), dur);
+        // Pass the AI marker list so the audit can flag coverage gaps and
+        // off-beat notes in addition to note-only metrics.
+        AuditMetrics metrics = computeAuditMetrics(notes(), dur, markers());
         std::string metricsDesc = describeMetricsForPrompt(metrics);
         std::string sys = buildAuditSystemPrompt(m_song, m_currentDifficulty);
         std::string usr = metricsDesc + "\nReview this chart and report issues.";
@@ -7478,15 +8586,207 @@ void SongEditor::renderAuditPanel() {
             std::snprintf(timeLbl, sizeof(timeLbl),
                 "[%.2fs]##a%zu", issue.timeStart, i);
 
-        if (ImGui::SmallButton(timeLbl)) {
+        // Same hover-or-pin highlight pattern as the inline popup. Point
+        // issues (timeEnd == timeStart) get a small visible band.
+        float ts = issue.timeStart;
+        float te = (issue.timeEnd > issue.timeStart + 0.01f)
+                   ? issue.timeEnd : issue.timeStart + 0.15f;
+        const std::string& cat = issue.category.empty() ? std::string("other")
+                                                        : issue.category;
+
+        bool clicked = ImGui::SmallButton(timeLbl);
+        AuditHighlight h;
+        h.active    = true;
+        h.timeStart = ts;
+        h.timeEnd   = te;
+        auditCategoryColor(cat, h.fillColor, h.edgeColor);
+        if (ImGui::IsItemHovered()) m_auditHover = h;
+        if (clicked) {
+            m_auditPin        = h;
             m_sceneTime       = issue.timeStart;
             m_timelineScrollX = std::max(0.f, issue.timeStart - 2.f);
         }
         ImGui::SameLine();
-        ImGui::TextWrapped("%s - %s",
-            issue.category.empty() ? "other" : issue.category.c_str(),
-            issue.message.c_str());
+        ImGui::TextWrapped("%s - %s", cat.c_str(), issue.message.c_str());
+        // Hovering the label text counts as hovering the issue too — makes
+        // the wider text band easier to mouse over than the small button.
+        if (ImGui::IsItemHovered()) m_auditHover = h;
     }
+}
+
+// ── Right-sidebar Audit tab ─────────────────────────────────────────────────
+// Local-metric audit (no LLM): identical content to the old toolbar popup,
+// but rendered inline in the right sidebar so it stays out of the canvas.
+// Each issue button paints a colored band on the waveform via m_auditHover /
+// m_auditPin (see auditCategoryColor for the per-category palette).
+void SongEditor::renderAuditSidebarTab() {
+    float dur = m_waveformLoaded ? (float)m_waveform.durationSeconds : 0.f;
+    if (dur <= 0.f && !notes().empty()) {
+        float last = 0.f;
+        for (const auto& n : notes()) {
+            float t = (n.endTime > n.time) ? n.endTime : n.time;
+            if (t > last) last = t;
+        }
+        dur = last;
+    }
+    AuditMetrics mt = computeAuditMetrics(notes(), dur, markers());
+    const char* diffName =
+        (m_currentDifficulty == Difficulty::Easy)   ? "Easy"   :
+        (m_currentDifficulty == Difficulty::Medium) ? "Medium" : "Hard";
+    ImGui::Text("[%s] Chart Audit", diffName);
+    ImGui::Separator();
+    ImGui::Text("Notes: %d   avg %.2f NPS   peak %.2f NPS",
+                mt.noteCount, mt.avgNps, mt.peakNps);
+    ImGui::Text("Tap %d  Hold %d  Flick %d  Other %d",
+                mt.tapCount, mt.holdCount, mt.flickCount, mt.otherCount);
+    ImGui::Separator();
+    ImGui::Text("Jacks: %zu", mt.jacks.size());
+    ImGui::Text("Crossovers: %zu", mt.crossovers.size());
+    ImGui::Text("Density hotspots: %zu", mt.densityHotspots.size());
+    ImGui::Text("Dead zones: %zu", mt.deadZones.size());
+    if (mt.markerCount > 0) {
+        ImGui::Text("Markers: %d   avg %.2f/s   peak %.2f/s",
+                    mt.markerCount, mt.avgMarkerRate, mt.peakMarkerRate2s);
+        ImGui::Text("Marker hotspots: %zu   marker dead zones: %zu",
+                    mt.markerDensityHotspots.size(),
+                    mt.markerDeadZones.size());
+    }
+    if (!mt.unalignedNotes.empty())
+        ImGui::Text("Off-beat notes: %zu", mt.unalignedNotes.size());
+    ImGui::Separator();
+
+    // Issue list fills the remaining vertical space in the sidebar tab.
+    ImGui::BeginChild("##audit_issues", ImVec2(-1, -1), true);
+    bool noteSideClean = mt.jacks.empty() && mt.crossovers.empty() &&
+                         mt.densityHotspots.empty() && mt.deadZones.empty() &&
+                         mt.unalignedNotes.empty();
+    bool markerSideClean = mt.markerDensityHotspots.empty() &&
+                           mt.markerDeadZones.empty();
+    if (noteSideClean && markerSideClean) {
+        ImGui::TextColored(ImVec4(0.5f, 1.f, 0.5f, 1.f), "Clean - no issues flagged.");
+    } else {
+        auto updateAuditHL = [this](float ts, float te, const std::string& cat) {
+            AuditHighlight h;
+            h.active = true;
+            h.timeStart = ts;
+            h.timeEnd   = te;
+            auditCategoryColor(cat, h.fillColor, h.edgeColor);
+            if (ImGui::IsItemHovered()) m_auditHover = h;
+        };
+        for (auto& j : mt.jacks) {
+            std::string lbl = std::string("Jack @")
+                + std::to_string((int)(j.time*100)/100.0) + "s lane "
+                + std::to_string(j.lane) + " x" + std::to_string(j.repeats)
+                + "##j" + std::to_string((int)(j.time*1000));
+            bool clicked = ImGui::SmallButton(lbl.c_str());
+            float ts = j.time;
+            float te = j.time + 0.5f * j.repeats;
+            updateAuditHL(ts, te, "jack");
+            if (clicked) {
+                AuditHighlight h; h.active=true; h.timeStart=ts; h.timeEnd=te;
+                auditCategoryColor("jack", h.fillColor, h.edgeColor);
+                m_auditPin = h;
+                m_sceneTime = j.time;
+                m_timelineScrollX = std::max(0.f, j.time - 2.f);
+            }
+        }
+        for (auto& c : mt.crossovers) {
+            char buf[64];
+            snprintf(buf, sizeof(buf), "Crossover @%.2fs dLane=%d##c%d",
+                     c.time, c.laneJump, (int)(c.time*1000));
+            bool clicked = ImGui::SmallButton(buf);
+            float ts = c.time - 0.075f;
+            float te = c.time + 0.075f;
+            updateAuditHL(ts, te, "crossover");
+            if (clicked) {
+                AuditHighlight h; h.active=true; h.timeStart=ts; h.timeEnd=te;
+                auditCategoryColor("crossover", h.fillColor, h.edgeColor);
+                m_auditPin = h;
+                m_sceneTime = c.time;
+                m_timelineScrollX = std::max(0.f, c.time - 2.f);
+            }
+        }
+        for (auto& d : mt.densityHotspots) {
+            char buf[80];
+            snprintf(buf, sizeof(buf), "Density %.2f-%.2fs (%d notes)##d%d",
+                     d.start, d.end, d.count, (int)(d.start*1000));
+            bool clicked = ImGui::SmallButton(buf);
+            updateAuditHL(d.start, d.end, "density");
+            if (clicked) {
+                AuditHighlight h; h.active=true; h.timeStart=d.start; h.timeEnd=d.end;
+                auditCategoryColor("density", h.fillColor, h.edgeColor);
+                m_auditPin = h;
+                m_sceneTime = d.start;
+                m_timelineScrollX = std::max(0.f, d.start - 2.f);
+            }
+        }
+        for (auto& z : mt.deadZones) {
+            char buf[80];
+            snprintf(buf, sizeof(buf), "Dead zone %.2f-%.2fs##z%d",
+                     z.start, z.end, (int)(z.start*1000));
+            bool clicked = ImGui::SmallButton(buf);
+            updateAuditHL(z.start, z.end, "dead_zone");
+            if (clicked) {
+                AuditHighlight h; h.active=true; h.timeStart=z.start; h.timeEnd=z.end;
+                auditCategoryColor("dead_zone", h.fillColor, h.edgeColor);
+                m_auditPin = h;
+                m_sceneTime = z.start;
+                m_timelineScrollX = std::max(0.f, z.start - 2.f);
+            }
+        }
+        for (auto& d : mt.markerDensityHotspots) {
+            char buf[96];
+            snprintf(buf, sizeof(buf),
+                     "Marker density %.2f-%.2fs (%d events)##md%d",
+                     d.start, d.end, d.count, (int)(d.start * 1000));
+            bool clicked = ImGui::SmallButton(buf);
+            updateAuditHL(d.start, d.end, "marker_density");
+            if (clicked) {
+                AuditHighlight h; h.active=true; h.timeStart=d.start; h.timeEnd=d.end;
+                auditCategoryColor("marker_density", h.fillColor, h.edgeColor);
+                m_auditPin = h;
+                m_sceneTime = d.start;
+                m_timelineScrollX = std::max(0.f, d.start - 2.f);
+            }
+        }
+        for (auto& z : mt.markerDeadZones) {
+            char buf[96];
+            snprintf(buf, sizeof(buf),
+                     "Marker dead zone %.2f-%.2fs##mz%d",
+                     z.start, z.end, (int)(z.start * 1000));
+            bool clicked = ImGui::SmallButton(buf);
+            updateAuditHL(z.start, z.end, "dead_zone");
+            if (clicked) {
+                AuditHighlight h; h.active=true; h.timeStart=z.start; h.timeEnd=z.end;
+                auditCategoryColor("dead_zone", h.fillColor, h.edgeColor);
+                m_auditPin = h;
+                m_sceneTime = z.start;
+                m_timelineScrollX = std::max(0.f, z.start - 2.f);
+            }
+        }
+        // Unaligned notes — note-quality issue (note placed off any beat).
+        // Stays visible while notes are present, unlike the orphan-marker
+        // runs above which clear once authoring begins.
+        for (auto& u : mt.unalignedNotes) {
+            char buf[96];
+            float ts = u.time - 0.075f;
+            float te = u.time + 0.075f;
+            snprintf(buf, sizeof(buf),
+                     "Off-beat note @%.2fs lane %d (%.0fms off)##un%d",
+                     u.time, u.lane, u.nearestMarkerDt * 1000.f,
+                     (int)(u.time * 1000));
+            bool clicked = ImGui::SmallButton(buf);
+            updateAuditHL(ts, te, "alignment");
+            if (clicked) {
+                AuditHighlight h; h.active=true; h.timeStart=ts; h.timeEnd=te;
+                auditCategoryColor("alignment", h.fillColor, h.edgeColor);
+                m_auditPin = h;
+                m_sceneTime = u.time;
+                m_timelineScrollX = std::max(0.f, u.time - 2.f);
+            }
+        }
+    }
+    ImGui::EndChild();
 }
 
 // ── Style Transfer ──────────────────────────────────────────────────────────

@@ -20,6 +20,19 @@ struct AssetList {
     std::vector<std::string> materials;  // .mat — MaterialAsset JSON files
 };
 
+// Trim an asset name for hover tooltips. Real-world filenames coming from
+// WeChat / browser saves can run hundreds of characters; the tooltip would
+// overflow the screen. Keep the head + extension and drop the middle.
+inline std::string shortenForTooltip(const std::string& s, size_t maxLen = 48) {
+    if (s.size() <= maxLen) return s;
+    fs::path p(s);
+    std::string ext  = p.extension().string();
+    std::string stem = p.stem().string();
+    if (stem.size() + ext.size() <= maxLen) return stem + ext;
+    size_t headLen = (maxLen > ext.size() + 3) ? (maxLen - ext.size() - 3) : 8;
+    return stem.substr(0, headLen) + "..." + ext;
+}
+
 inline int importAssetsToProject(const std::string& projectPath,
                                  const std::vector<std::string>& srcPaths) {
     if (projectPath.empty()) return 0;

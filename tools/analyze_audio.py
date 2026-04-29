@@ -38,8 +38,15 @@ def load_audio_miniaudio(path, target_sr=44100):
         raise FileNotFoundError(f"Audio file not found: {path}")
 
     import miniaudio
-    decoded = miniaudio.decode_file(path, output_format=miniaudio.SampleFormat.FLOAT32,
-                                   nchannels=1, sample_rate=target_sr)
+    # Read the file in Python and pass bytes to miniaudio.decode rather than
+    # using miniaudio.decode_file. miniaudio's C-level fopen on Windows uses
+    # CP_ACP for the path bytes, so non-ASCII filenames (e.g. 中村由利子.mp3)
+    # fail to open even when Python's UTF-8 mode locates them just fine.
+    # Bypassing the C-level open eliminates the encoding mismatch entirely.
+    with open(path, "rb") as fh:
+        data = fh.read()
+    decoded = miniaudio.decode(data, output_format=miniaudio.SampleFormat.FLOAT32,
+                               nchannels=1, sample_rate=target_sr)
     samples = np.frombuffer(decoded.samples, dtype=np.float32).copy()
     return samples, target_sr
 

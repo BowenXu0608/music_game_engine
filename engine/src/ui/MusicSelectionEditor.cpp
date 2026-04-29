@@ -26,6 +26,48 @@
 namespace fs = std::filesystem;
 using json = nlohmann::json;
 
+// Returns a copy of `s` re-encoded as valid UTF-8. ASCII passes through
+// unchanged. On Windows, any byte sequence that is not already valid UTF-8 is
+// re-decoded from CP_ACP (the system code page, e.g. CP936 for zh-CN) and
+// converted to UTF-8 so song names / filenames typed into the editor on a
+// Chinese-locale machine round-trip correctly. If the conversion fails the
+// original bytes are kept (we'd rather hand nlohmann::json a still-invalid
+// string and surface the error than silently corrupt user data).
+static std::string toUtf8(const std::string& s) {
+    auto isValidUtf8 = [](const std::string& str) {
+        size_t i = 0;
+        while (i < str.size()) {
+            unsigned char c = (unsigned char)str[i];
+            int extra;
+            if      (c < 0x80)              extra = 0;
+            else if ((c & 0xE0) == 0xC0)    extra = 1;
+            else if ((c & 0xF0) == 0xE0)    extra = 2;
+            else if ((c & 0xF8) == 0xF0)    extra = 3;
+            else                            return false;
+            if (i + extra >= str.size()) return false;
+            for (int k = 1; k <= extra; ++k) {
+                if ((((unsigned char)str[i + k]) & 0xC0) != 0x80) return false;
+            }
+            i += extra + 1;
+        }
+        return true;
+    };
+    if (s.empty() || isValidUtf8(s)) return s;
+#ifdef _WIN32
+    int wlen = MultiByteToWideChar(CP_ACP, 0, s.data(), (int)s.size(), nullptr, 0);
+    if (wlen <= 0) return s;
+    std::wstring w(wlen, L'\0');
+    MultiByteToWideChar(CP_ACP, 0, s.data(), (int)s.size(), &w[0], wlen);
+    int u8len = WideCharToMultiByte(CP_UTF8, 0, w.data(), wlen, nullptr, 0, nullptr, nullptr);
+    if (u8len <= 0) return s;
+    std::string out(u8len, '\0');
+    WideCharToMultiByte(CP_UTF8, 0, w.data(), wlen, &out[0], u8len, nullptr, nullptr);
+    return out;
+#else
+    return s;
+#endif
+}
+
 // ── Vulkan lifecycle ─────────────────────────────────────────────────────────
 
 void MusicSelectionEditor::initVulkan(VulkanContext& ctx, BufferManager& bufMgr,
@@ -187,6 +229,7 @@ void MusicSelectionEditor::load(const std::string& projectPath) {
                         song.gameMode.perfectScore = gm.value("perfectScore", 1000);
                         song.gameMode.goodScore    = gm.value("goodScore", 600);
                         song.gameMode.badScore     = gm.value("badScore", 200);
+                        song.gameMode.totalScore   = gm.value("totalScore", 1000000);
                         song.gameMode.fcImage      = gm.value("fcImage", "");
                         song.gameMode.apImage      = gm.value("apImage", "");
 
@@ -229,6 +272,17 @@ void MusicSelectionEditor::load(const std::string& projectPath) {
                         song.gameMode.diskBaseRadius   = gm.value("diskBaseRadius",   2.4f);
                         song.gameMode.diskRingSpacing  = gm.value("diskRingSpacing",  0.6f);
                         song.gameMode.diskInitialScale = gm.value("diskInitialScale", 1.0f);
+
+                        // Per-note-type asset overrides (texture + sfx)
+                        if (gm.contains("noteAssets") && gm["noteAssets"].is_object()) {
+                            for (auto it = gm["noteAssets"].begin();
+                                 it != gm["noteAssets"].end(); ++it) {
+                                GameModeConfig::NoteTypeAssets na;
+                                na.texturePath = it.value().value("texturePath", "");
+                                na.sfxPath     = it.value().value("sfxPath", "");
+                                song.gameMode.noteAssets[it.key()] = na;
+                            }
+                        }
                     }
                     set.songs.push_back(std::move(song));
                 }
@@ -252,18 +306,18 @@ void MusicSelectionEditor::save() {
     json setsArr = json::array();
     for (auto& set : m_sets) {
         json sj;
-        sj["name"]       = set.name;
-        sj["coverImage"] = set.coverImage;
+        sj["name"]       = toUtf8(set.name);
+        sj["coverImage"] = toUtf8(set.coverImage);
         json songsArr = json::array();
         for (auto& song : set.songs) {
             json songJ;
-            songJ["name"]        = song.name;
-            songJ["artist"]      = song.artist;
-            songJ["coverImage"]  = song.coverImage;
-            songJ["audioFile"]   = song.audioFile;
-            songJ["chartEasy"]   = song.chartEasy;
-            songJ["chartMedium"] = song.chartMedium;
-            songJ["chartHard"]   = song.chartHard;
+            songJ["name"]        = toUtf8(song.name);
+            songJ["artist"]      = toUtf8(song.artist);
+            songJ["coverImage"]  = toUtf8(song.coverImage);
+            songJ["audioFile"]   = toUtf8(song.audioFile);
+            songJ["chartEasy"]   = toUtf8(song.chartEasy);
+            songJ["chartMedium"] = toUtf8(song.chartMedium);
+            songJ["chartHard"]   = toUtf8(song.chartHard);
             songJ["score"]       = song.score;
             songJ["achievement"] = song.achievement;
             songJ["scoreEasy"]         = song.scoreEasy;
@@ -291,8 +345,9 @@ void MusicSelectionEditor::save() {
             gmJ["perfectScore"] = song.gameMode.perfectScore;
             gmJ["goodScore"]    = song.gameMode.goodScore;
             gmJ["badScore"]     = song.gameMode.badScore;
-            gmJ["fcImage"]      = song.gameMode.fcImage;
-            gmJ["apImage"]      = song.gameMode.apImage;
+            gmJ["totalScore"]   = song.gameMode.totalScore;
+            gmJ["fcImage"]      = toUtf8(song.gameMode.fcImage);
+            gmJ["apImage"]      = toUtf8(song.gameMode.apImage);
 
             // HUD text configs
             auto saveHud = [](json& parent, const char* key, const HudTextConfig& h) {
@@ -316,7 +371,7 @@ void MusicSelectionEditor::save() {
             gmJ["cameraFov"]    = song.gameMode.cameraFov;
 
             // Background
-            gmJ["backgroundImage"] = song.gameMode.backgroundImage;
+            gmJ["backgroundImage"] = toUtf8(song.gameMode.backgroundImage);
 
             // 3D sky height
             gmJ["skyHeight"] = song.gameMode.skyHeight;
@@ -327,6 +382,18 @@ void MusicSelectionEditor::save() {
             gmJ["diskRingSpacing"]  = song.gameMode.diskRingSpacing;
             gmJ["diskInitialScale"] = song.gameMode.diskInitialScale;
 
+            // Per-note-type asset overrides (texture + sfx)
+            if (!song.gameMode.noteAssets.empty()) {
+                json naJ = json::object();
+                for (const auto& kv : song.gameMode.noteAssets) {
+                    json entry;
+                    entry["texturePath"] = toUtf8(kv.second.texturePath);
+                    entry["sfxPath"]     = toUtf8(kv.second.sfxPath);
+                    naJ[toUtf8(kv.first)] = entry;
+                }
+                gmJ["noteAssets"] = naJ;
+            }
+
             songJ["gameMode"] = gmJ;
             songsArr.push_back(songJ);
         }
@@ -334,12 +401,21 @@ void MusicSelectionEditor::save() {
         setsArr.push_back(sj);
     }
     j["sets"]       = setsArr;
-    j["background"] = m_pageBackground;
-    j["fcImage"]    = m_fcImage;
-    j["apImage"]    = m_apImage;
+    j["background"] = toUtf8(m_pageBackground);
+    j["fcImage"]    = toUtf8(m_fcImage);
+    j["apImage"]    = toUtf8(m_apImage);
 
     std::ofstream out(m_projectPath + "/music_selection.json");
-    if (out.is_open()) out << j.dump(2);
+    if (!out.is_open()) return;
+    // Strings have already been transcoded to UTF-8 above via toUtf8(); if
+    // dump() somehow still encounters an invalid byte we want it to throw
+    // (caught below) rather than silently write U+FFFD into the user's data.
+    try {
+        out << j.dump(2);
+    } catch (const std::exception& e) {
+        std::cerr << "[MusicSelectionEditor::save] dump failed: "
+                  << e.what() << " — file not written\n";
+    }
 }
 
 // ── Audio preview ────────────────────────────────────────────────────────────
@@ -522,10 +598,14 @@ void MusicSelectionEditor::render(Engine* engine) {
         return;
     }
 
-    ImGui::SetNextWindowPos(ImVec2(0, 0));
-    ImGui::SetNextWindowSize(ImGui::GetIO().DisplaySize);
+    {
+        ImVec2 ds = ImGui::GetIO().DisplaySize;
+        ImGui::SetNextWindowPos(ImVec2(0, 0));
+        ImGui::SetNextWindowSize(ImVec2(ds.x, ds.y));
+    }
     ImGui::Begin("Music Selection", nullptr,
-                 ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoResize);
+                 ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse |
+                 ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoBringToFrontOnFocus);
 
     // Scan assets once per project
     if (!m_assetsScanned && !m_projectPath.empty()) {
@@ -536,11 +616,29 @@ void MusicSelectionEditor::render(Engine* engine) {
     ImVec2 contentSize = ImGui::GetContentRegionAvail();
     const float splitterThick = 4.f;
     const float navH = 36.f;
-    float totalH   = contentSize.y - navH - 8.f;
-    float topH     = totalH * m_vSplit - splitterThick * 0.5f;
-    float assetsH  = totalH * (1.f - m_vSplit) - splitterThick * 0.5f;
-    float previewW = contentSize.x * m_hSplit - splitterThick * 0.5f;
-    float hierW    = contentSize.x * (1.f - m_hSplit) - splitterThick * 0.5f;
+    // Copilot sidebar occupies only the top body column so Assets strip
+    // below can span the full width (mirrors SongEditor layout).
+    const float copilotW = engine ? engine->songEditor().copilotOverlayWidth() : 0.f;
+    const float bodyW    = std::max(200.f, contentSize.x - copilotW);
+    // Pinned bottom Assets strip - same pattern as SongEditor.
+    const float assetsHeaderH = ImGui::GetFrameHeightWithSpacing();
+    float assetsH = m_assetsBarOpen
+        ? std::clamp(m_assetsBarH, 80.f, contentSize.y * 0.5f)
+        : assetsHeaderH;
+    float totalH   = std::max(100.f, contentSize.y - navH - 8.f - assetsH - 4.f);
+    float topH     = totalH;
+    float previewW = bodyW * m_hSplit - splitterThick * 0.5f;
+    float hierW    = bodyW * (1.f - m_hSplit) - splitterThick * 0.5f;
+
+    // Tell the overlay how many pixels to leave free at the bottom so the
+    // Copilot sidebar stops above the Assets strip + nav bar. Computed from
+    // stable inputs (no GetCursorScreenPos dependency) so the value is
+    // identical regardless of which earlier layout work has run, and so the
+    // overlay does not snap to a different height when transitioning to or
+    // from this page.
+    if (engine) {
+        engine->songEditor().setOverlayBottomReserve(navH + 8.f + assetsH + 4.f);
+    }
 
     // ── Top row: Preview | vsplitter | Hierarchy ─────────────────────────────
     ImGui::BeginChild("MSPreview", ImVec2(previewW, topH), true);
@@ -552,7 +650,7 @@ void MusicSelectionEditor::render(Engine* engine) {
     // Vertical splitter
     ImGui::InvisibleButton("ms_vsplit", ImVec2(splitterThick, topH));
     if (ImGui::IsItemActive()) {
-        m_hSplit += ImGui::GetIO().MouseDelta.x / contentSize.x;
+        m_hSplit += ImGui::GetIO().MouseDelta.x / std::max(1.f, bodyW);
         m_hSplit = std::clamp(m_hSplit, 0.4f, 0.85f);
     }
     if (ImGui::IsItemHovered() || ImGui::IsItemActive())
@@ -564,18 +662,15 @@ void MusicSelectionEditor::render(Engine* engine) {
     renderHierarchy(hierW, topH);
     ImGui::EndChild();
 
-    // Horizontal splitter
-    ImGui::InvisibleButton("ms_hsplit", ImVec2(contentSize.x, splitterThick));
-    if (ImGui::IsItemActive()) {
-        m_vSplit += ImGui::GetIO().MouseDelta.y / totalH;
-        m_vSplit = std::clamp(m_vSplit, 0.3f, 0.9f);
-    }
-    if (ImGui::IsItemHovered() || ImGui::IsItemActive())
-        ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeNS);
-
-    // ── Bottom: Assets panel ─────────────────────────────────────────────────
+    // ── Bottom: pinned Assets strip (always docked, collapsible) ────────────
     ImGui::BeginChild("MSAssets", ImVec2(contentSize.x, assetsH), true);
-    renderAssets();
+    {
+        ImGui::SetNextItemOpen(m_assetsBarOpen, ImGuiCond_Always);
+        bool open = ImGui::CollapsingHeader("Assets##msbottom");
+        m_assetsBarOpen = open;
+        if (open)
+            renderAssets();
+    }
     ImGui::EndChild();
 
     // ── Nav bar ──────────────────────────────────────────────────────────────
@@ -1741,10 +1836,6 @@ void MusicSelectionEditor::renderHierarchy(float width, float height) {
             }
 
             ImGui::Spacing();
-            ImGui::TextDisabled("Score and FC/AP badges are filled in by the");
-            ImGui::TextDisabled("judgement system after the player clears a chart.");
-            ImGui::Spacing();
-            ImGui::TextDisabled("Double-click song to edit charts, audio, score...");
             if (ImGui::Button("Edit Song Details >>")) {
                 if (m_engine) {
                     m_engine->songEditor().setSong(&song, m_projectPath);
@@ -1930,7 +2021,8 @@ void MusicSelectionEditor::renderAssets() {
     if (!m_assetsScanned) { ImGui::TextDisabled("(not scanned)"); return; }
 
     bool anyFiles = !m_assets.images.empty() || !m_assets.gifs.empty() ||
-                    !m_assets.videos.empty() || !m_assets.audios.empty();
+                    !m_assets.videos.empty() || !m_assets.audios.empty() ||
+                    !m_assets.materials.empty();
     if (!anyFiles) {
         ImDrawList* dl = ImGui::GetWindowDrawList();
         ImVec2 p  = ImGui::GetCursorScreenPos();
@@ -1985,7 +2077,7 @@ void MusicSelectionEditor::renderAssets() {
             if (ImGui::IsItemHovered()) {
                 dl->AddRect(thumbPos, ImVec2(thumbPos.x + thumbSize, thumbPos.y + thumbSize),
                             IM_COL32(100, 160, 255, 200), 4.f, 0, 2.f);
-                ImGui::SetTooltip("%s", f.c_str());
+                ImGui::SetTooltip("%s", shortenForTooltip(name).c_str());
             }
             if (ImGui::BeginDragDropSource()) {
                 ImGui::SetDragDropPayload("ASSET_PATH", f.c_str(), f.size() + 1);
@@ -2013,6 +2105,7 @@ void MusicSelectionEditor::renderAssets() {
 
     if (!m_assets.images.empty()) { ImGui::Text("Images:"); drawThumbs(m_assets.images); }
     if (!m_assets.gifs.empty())   { ImGui::Text("GIFs:");   drawThumbs(m_assets.gifs); }
+    if (!m_assets.videos.empty()) { ImGui::Text("Videos:"); drawThumbs(m_assets.videos); }
 
     // Audio files — styled placeholder
     if (!m_assets.audios.empty()) {
@@ -2035,7 +2128,7 @@ void MusicSelectionEditor::renderAssets() {
             if (ImGui::IsItemHovered()) {
                 dl->AddRect(thumbPos, ImVec2(thumbPos.x + thumbSize, thumbPos.y + thumbSize),
                             IM_COL32(100, 160, 255, 200), 4.f, 0, 2.f);
-                ImGui::SetTooltip("%s", f.c_str());
+                ImGui::SetTooltip("%s", shortenForTooltip(name).c_str());
             }
             if (ImGui::BeginDragDropSource()) {
                 ImGui::SetDragDropPayload("ASSET_PATH", f.c_str(), f.size() + 1);
@@ -2093,7 +2186,7 @@ void MusicSelectionEditor::renderAssets() {
                             IM_COL32(200, 140, 255, 200), 4.f, 0, 2.f);
                 if (matPtr && m_engine) {
                     ImGui::BeginTooltip();
-                    ImGui::TextUnformatted(f.c_str());
+                    ImGui::TextUnformatted(shortenForTooltip(name).c_str());
                     if (!matPtr->targetMode.empty() ||
                         !matPtr->targetSlotSlug.empty()) {
                         ImGui::TextDisabled("target: %s / %s",
@@ -2105,7 +2198,7 @@ void MusicSelectionEditor::renderAssets() {
                     ImGui::Dummy(ImVec2(260.f, 140.f));
                     ImGui::EndTooltip();
                 } else {
-                    ImGui::SetTooltip("%s", f.c_str());
+                    ImGui::SetTooltip("%s", shortenForTooltip(name).c_str());
                 }
             }
             if (ImGui::BeginDragDropSource()) {

@@ -5,6 +5,12 @@
 
 void SettingsEditor::render(Engine* engine) {
     ImVec2 displaySz = ImGui::GetIO().DisplaySize;
+    if (engine) {
+        displaySz.x = std::max(200.f, displaySz.x - engine->songEditor().copilotOverlayWidth());
+        // Settings page is a single-column form with no bottom Assets strip;
+        // let the overlay fill the full viewport height here.
+        engine->songEditor().setOverlayBottomReserve(0.f);
+    }
 
     // Bind the settings page to the live engine PlayerSettings so changes
     // propagate to the audio engine / renderer immediately.

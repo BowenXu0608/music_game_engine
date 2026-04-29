@@ -682,7 +682,7 @@ void AndroidEngine::exitGameplay() {
 void AndroidEngine::loadPlayerSettingsFile() {
     m_settingsPath = AndroidFileIO::internalPath() + "player_settings.json";
     if (!loadPlayerSettings(m_settingsPath, m_playerSettings)) {
-        LOGI("No player_settings.json yet — using defaults");
+        LOGI("No player_settings.json yet - using defaults");
     } else {
         LOGI("Loaded player settings from %s", m_settingsPath.c_str());
     }

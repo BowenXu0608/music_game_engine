@@ -99,15 +99,31 @@ AudioAnalysisResult AudioAnalyzer::runSubprocess(const std::string& audioPath) {
     AudioAnalysisResult result;
 
 #ifdef _WIN32
-    // Determine command line
-    std::string cmd;
+    // Helper: UTF-8 narrow → UTF-16 wide. The audio path may contain non-ASCII
+    // characters (e.g. CP936 Chinese filenames stored as UTF-8 in our JSON);
+    // CreateProcessA would re-interpret those bytes as the system ANSI code
+    // page on launch and the child process would receive a garbled path that
+    // does not match any file on disk — which surfaces as Python's
+    // "failed to decode file (-7)" because libsndfile/soundfile cannot find
+    // (or open) a file at the corrupted path.
+    auto toWide = [](const std::string& s) -> std::wstring {
+        if (s.empty()) return L"";
+        int wlen = MultiByteToWideChar(CP_UTF8, 0, s.data(), (int)s.size(), nullptr, 0);
+        if (wlen <= 0) return L"";
+        std::wstring w(wlen, L'\0');
+        MultiByteToWideChar(CP_UTF8, 0, s.data(), (int)s.size(), &w[0], wlen);
+        return w;
+    };
+
+    // Determine command line (built as wide chars end-to-end).
+    std::wstring cmdW;
     std::string exeTool = findAnalyzerExecutable();
     if (!exeTool.empty()) {
-        cmd = "\"" + exeTool + "\" \"" + audioPath + "\"";
+        cmdW = L"\"" + toWide(exeTool) + L"\" \"" + toWide(audioPath) + L"\"";
     } else {
         std::string script = findAnalyzerScript();
         if (!script.empty()) {
-            cmd = "python \"" + script + "\" \"" + audioPath + "\"";
+            cmdW = L"python \"" + toWide(script) + L"\" \"" + toWide(audioPath) + L"\"";
         } else {
             result.errorMessage = "Madmom analyzer not found.\n"
                 "Place madmom_analyzer.exe in tools/ or ensure "
@@ -116,7 +132,7 @@ AudioAnalysisResult AudioAnalyzer::runSubprocess(const std::string& audioPath) {
         }
     }
 
-    std::cout << "[AudioAnalyzer] Running: " << cmd << "\n";
+    std::cout << "[AudioAnalyzer] Running analyzer subprocess (wide cmdline)\n";
 
     // Create pipe for stdout capture
     SECURITY_ATTRIBUTES sa{};
@@ -131,8 +147,9 @@ AudioAnalysisResult AudioAnalyzer::runSubprocess(const std::string& audioPath) {
     // Ensure the read end is not inherited
     SetHandleInformation(hReadPipe, HANDLE_FLAG_INHERIT, 0);
 
-    // Launch process
-    STARTUPINFOA si{};
+    // Launch process via the wide-char API so the audio path round-trips
+    // unchanged to the child.
+    STARTUPINFOW si{};
     si.cb = sizeof(si);
     si.hStdOutput = hWritePipe;
     si.hStdError  = hWritePipe;
@@ -140,14 +157,35 @@ AudioAnalysisResult AudioAnalyzer::runSubprocess(const std::string& audioPath) {
 
     PROCESS_INFORMATION pi{};
 
-    std::vector<char> cmdBuf(cmd.begin(), cmd.end());
-    cmdBuf.push_back('\0');
+    std::vector<wchar_t> cmdBuf(cmdW.begin(), cmdW.end());
+    cmdBuf.push_back(L'\0');
 
-    if (!CreateProcessA(nullptr, cmdBuf.data(), nullptr, nullptr, TRUE,
-                        CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi)) {
+    // Force the child to use UTF-8 for its own stdio so the JSON we read back
+    // through the pipe is unambiguous (avoids the analyzer printing CP936
+    // bytes for any non-ASCII fields).
+    std::wstring envBlockW;
+    {
+        wchar_t* parentEnv = GetEnvironmentStringsW();
+        if (parentEnv) {
+            const wchar_t* p = parentEnv;
+            while (*p) { size_t n = wcslen(p); envBlockW.append(p, n + 1); p += n + 1; }
+            FreeEnvironmentStringsW(parentEnv);
+        }
+        const wchar_t* extras[] = { L"PYTHONIOENCODING=utf-8", L"PYTHONUTF8=1" };
+        for (auto* e : extras) {
+            envBlockW.append(e, wcslen(e) + 1);
+        }
+        envBlockW.push_back(L'\0');
+    }
+
+    if (!CreateProcessW(nullptr, cmdBuf.data(), nullptr, nullptr, TRUE,
+                        CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT,
+                        (LPVOID)envBlockW.data(), nullptr, &si, &pi)) {
+        DWORD err = GetLastError();
         CloseHandle(hReadPipe);
         CloseHandle(hWritePipe);
-        result.errorMessage = "Failed to launch analyzer process";
+        result.errorMessage = "Failed to launch analyzer process (GetLastError="
+                            + std::to_string(err) + ")";
         return result;
     }
 

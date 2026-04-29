@@ -141,6 +141,8 @@ private:
     // ── Panel split ──────────────────────────────────────────────────────────
     float m_hSplit = 0.70f;   // Preview / Hierarchy horizontal split
     float m_vSplit = 0.75f;   // Top (preview+hierarchy) / Bottom (assets) vertical split
+    bool  m_assetsBarOpen = true;  // Bottom Assets strip expanded?
+    float m_assetsBarH   = 200.f;  // Expanded height
 
     // ── Add-new dialogs ──────────────────────────────────────────────────────
     bool m_showAddSetDialog  = false;
