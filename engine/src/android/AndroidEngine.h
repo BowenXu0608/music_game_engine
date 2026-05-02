@@ -22,10 +22,13 @@
 #include "game/modes/ArcaeaRenderer.h"
 #include "game/modes/LanotaRenderer.h"
 
+#include "renderer/vulkan/TextureManager.h"
+#include <imgui.h>
 #include <android_native_app_glue.h>
 #include <memory>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 struct ANativeWindow;
 
@@ -79,9 +82,33 @@ private:
 
     // Game state
     GameScreen     m_screen = GameScreen::StartScreen;
-    // Start screen content (parsed from start_screen.json)
+
+    // ── Start screen content (parsed from start_screen.json) ────────────────
     std::string    m_startTitleText;
     std::string    m_startTapText;
+    std::string    m_startBgPath;
+    std::string    m_startLogoImagePath;
+    bool           m_startLogoIsImage = false;
+    ImVec2         m_startTitlePos    = {0.5f, 0.30f};   // normalized
+    ImVec2         m_startTapPos      = {0.5f, 0.80f};
+    float          m_startTitleFontPx = 72.0f;
+    float          m_startTapFontPx   = 24.0f;
+    ImVec4         m_startTitleColor  = {1.0f, 0.9f, 0.25f, 1.0f};
+
+    // ── Music selection content ─────────────────────────────────────────────
+    std::string    m_musicBgPath;
+    std::string    m_fcImagePath;
+    std::string    m_apImagePath;
+
+    // ── ImGui texture cache (asset path → ImGui descriptor) ─────────────────
+    // The Texture structs are kept alive for cleanup on shutdown.
+    std::unordered_map<std::string, ImTextureID> m_imguiTextures;
+    std::vector<Texture> m_loadedTextures;
+
+    // Helpers
+    ImTextureID loadAssetTexture(const std::string& assetPath);
+    void        releaseTextures();
+    void        applyTheme();
     GameClock      m_clock;
     AudioEngine    m_audio;
     InputManager   m_input;
@@ -107,6 +134,8 @@ private:
         std::string artist;
         std::string audioFile;
         std::string chartPath;
+        std::string coverImage;
+        std::string achievement;          // "FC", "AP", or empty
         GameModeConfig gameMode;
         int score = 0;
     };

@@ -33,6 +33,11 @@ set(SHARED_RENDERER_SOURCES
     ${ENGINE_SRC}/renderer/MeshRenderer.cpp
     ${ENGINE_SRC}/renderer/ParticleSystem.cpp
     ${ENGINE_SRC}/renderer/PostProcess.cpp
+    ${ENGINE_SRC}/renderer/ShaderCompiler.cpp
+    ${ENGINE_SRC}/renderer/Material.cpp
+    ${ENGINE_SRC}/renderer/MaterialAsset.cpp
+    ${ENGINE_SRC}/renderer/MaterialAssetLibrary.cpp
+    ${ENGINE_SRC}/renderer/MaterialSlots.cpp
 )
 
 set(SHARED_VULKAN_SOURCES

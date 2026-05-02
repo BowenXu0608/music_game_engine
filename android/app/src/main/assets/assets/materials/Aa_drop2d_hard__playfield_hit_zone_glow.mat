@@ -1,0 +1,8 @@
+{
+  "name": "Aa_drop2d_hard__playfield_hit_zone_glow",
+  "kind": "unlit",
+  "tint": [0.0955221, 0.0312426, 0.338462, 0.3],
+  "params": [0, 0, 0, 0],
+  "targetMode": "bandori",
+  "targetSlot": "playfield_hit_zone_glow"
+}

@@ -1,0 +1,8 @@
+{
+  "name": "Aa_drop2d_hard__playfield_lane_divider",
+  "kind": "unlit",
+  "tint": [0.941538, 0.0492497, 0.0492497, 0.2],
+  "params": [0, 0, 0, 0],
+  "targetMode": "bandori",
+  "targetSlot": "playfield_lane_divider"
+}

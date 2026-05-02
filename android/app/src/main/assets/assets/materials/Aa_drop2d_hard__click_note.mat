@@ -1,0 +1,8 @@
+{
+  "name": "Aa_drop2d_hard__click_note",
+  "kind": "unlit",
+  "tint": [0.0784189, 0.772308, 0.612179, 1],
+  "params": [3.137, 2.509, 3.1, 0],
+  "targetMode": "bandori",
+  "targetSlot": "click_note"
+}

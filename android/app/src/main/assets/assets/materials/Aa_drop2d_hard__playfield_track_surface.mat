@@ -1,0 +1,8 @@
+{
+  "name": "Aa_drop2d_hard__playfield_track_surface",
+  "kind": "unlit",
+  "tint": [0.0545042, 0.230065, 0.932308, 0.8],
+  "params": [0, 0, 0, 0],
+  "targetMode": "bandori",
+  "targetSlot": "playfield_track_surface"
+}

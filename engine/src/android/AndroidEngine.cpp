@@ -9,7 +9,10 @@
 #include <imgui.h>
 #include <algorithm>
 #include <chrono>
+#include <cfloat>
+#include <cmath>
 #include <cstdlib>
+#include <cstdio>
 #include <stdexcept>
 
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO,  "MusicGame", __VA_ARGS__)
@@ -79,6 +82,8 @@ void AndroidEngine::onWindowInit(ANativeWindow* window) {
     // Extract shaders to internal storage (Pipeline reads .spv via std::ifstream)
     const char* shaderFiles[] = {
         "quad.vert.spv", "quad.frag.spv",
+        "quad_unlit.frag.spv", "quad_glow.frag.spv",
+        "quad_scroll.frag.spv", "quad_pulse.frag.spv", "quad_gradient.frag.spv",
         "line.vert.spv", "line.frag.spv",
         "mesh.vert.spv",
         "mesh_unlit.frag.spv", "mesh_glow.frag.spv",
@@ -103,6 +108,7 @@ void AndroidEngine::onWindowInit(ANativeWindow* window) {
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
     ImGui::StyleColorsDark();
+    applyTheme();
 
     // ImGui Vulkan init
     ImGui_ImplVulkan_InitInfo initInfo{};
@@ -118,12 +124,12 @@ void AndroidEngine::onWindowInit(ANativeWindow* window) {
     initInfo.RenderPass     = m_renderer.swapchainRenderPass();
 
     VkDescriptorPoolSize poolSizes[] = {
-        {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 32}
+        {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 128}
     };
     VkDescriptorPoolCreateInfo poolCI{};
     poolCI.sType         = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
     poolCI.flags         = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
-    poolCI.maxSets       = 32;
+    poolCI.maxSets       = 128;
     poolCI.poolSizeCount = 1;
     poolCI.pPoolSizes    = poolSizes;
 
@@ -156,6 +162,7 @@ void AndroidEngine::onWindowResize() {
 void AndroidEngine::onWindowTerm() {
     if (!m_vulkanReady) return;
     vkDeviceWaitIdle(m_renderer.context().device());
+    releaseTextures();
     ImGui_ImplVulkan_Shutdown();
     ImGui::DestroyContext();
     m_renderer.shutdown();
@@ -177,22 +184,34 @@ void AndroidEngine::onTouchEvent(AInputEvent* event) {
         m_input.injectTouch(id, phase, {x, y}, timestamp);
     };
 
+    // Mirror the primary pointer into ImGui as a single mouse, so widgets
+    // like InvisibleButton on the start screen / music selection page see it.
+    ImGuiIO& io = ImGui::GetIO();
+    float px = AMotionEvent_getX(event, pointerIndex);
+    float py = AMotionEvent_getY(event, pointerIndex);
+
     switch (maskedAction) {
         case AMOTION_EVENT_ACTION_DOWN:
         case AMOTION_EVENT_ACTION_POINTER_DOWN:
             inject(pointerIndex, TouchPhase::Began);
+            io.AddMousePosEvent(px, py);
+            io.AddMouseButtonEvent(0, true);
             break;
         case AMOTION_EVENT_ACTION_UP:
         case AMOTION_EVENT_ACTION_POINTER_UP:
             inject(pointerIndex, TouchPhase::Ended);
+            io.AddMousePosEvent(px, py);
+            io.AddMouseButtonEvent(0, false);
             break;
         case AMOTION_EVENT_ACTION_MOVE:
             for (size_t i = 0; i < AMotionEvent_getPointerCount(event); ++i)
                 inject(i, TouchPhase::Moved);
+            io.AddMousePosEvent(px, py);
             break;
         case AMOTION_EVENT_ACTION_CANCEL:
             for (size_t i = 0; i < AMotionEvent_getPointerCount(event); ++i)
                 inject(i, TouchPhase::Cancelled);
+            io.AddMouseButtonEvent(0, false);
             break;
     }
 }
@@ -410,86 +429,212 @@ void AndroidEngine::renderResultsHUD() {
     ImGui::End();
 }
 
+// Aspect-fill the source rect onto dest; returns the [uv0, uv1] crop region.
+static void aspectFillUV(float srcW, float srcH, float dstW, float dstH,
+                         ImVec2& uv0, ImVec2& uv1) {
+    if (srcW <= 0.f || srcH <= 0.f || dstW <= 0.f || dstH <= 0.f) {
+        uv0 = ImVec2(0, 0); uv1 = ImVec2(1, 1); return;
+    }
+    float srcAR = srcW / srcH;
+    float dstAR = dstW / dstH;
+    if (srcAR > dstAR) {
+        // Crop horizontally
+        float keep = dstAR / srcAR;
+        float pad  = (1.f - keep) * 0.5f;
+        uv0 = ImVec2(pad, 0.f); uv1 = ImVec2(1.f - pad, 1.f);
+    } else {
+        // Crop vertically
+        float keep = srcAR / dstAR;
+        float pad  = (1.f - keep) * 0.5f;
+        uv0 = ImVec2(0.f, pad); uv1 = ImVec2(1.f, 1.f - pad);
+    }
+}
+
 void AndroidEngine::renderStartScreen() {
     ImVec2 displaySz = ImGui::GetIO().DisplaySize;
+    ImDrawList* bg = ImGui::GetBackgroundDrawList();
 
-    // Full-screen invisible window covering the whole surface; tap anywhere
-    // (or click the centred PLAY button) advances to MusicSelection.
+    // ── Background image (aspect-filled to fully cover the screen) ──────────
+    ImTextureID bgTex = loadAssetTexture(m_startBgPath);
+    if (bgTex) {
+        ImVec2 uv0, uv1;
+        // Approximate: assume the source is at least roughly 16:9; the texture
+        // manager doesn't expose width/height through ImTextureID, but the cover
+        // pass is forgiving for portrait/landscape mismatches.
+        aspectFillUV(16.f, 9.f, displaySz.x, displaySz.y, uv0, uv1);
+        bg->AddImage(bgTex, ImVec2(0, 0), displaySz, uv0, uv1);
+        // Slight darken so text reads cleanly.
+        bg->AddRectFilled(ImVec2(0, 0), displaySz, IM_COL32(8, 10, 14, 90));
+    } else {
+        // No bg → solid dark.
+        bg->AddRectFilled(ImVec2(0, 0), displaySz, IM_COL32(14, 18, 24, 255));
+    }
+
+    // ── Title ───────────────────────────────────────────────────────────────
+    const char* title = m_startTitleText.empty() ? "Music Game" : m_startTitleText.c_str();
+    // ImGui's default font is 13 px; fontScale = pixelSize / 13.
+    float titleScale = m_startTitleFontPx / 13.f;
+    ImFont* font = ImGui::GetFont();
+    float titlePx  = font->FontSize * titleScale;
+    ImVec2 titleSz = font->CalcTextSizeA(titlePx, FLT_MAX, 0.0f, title);
+    ImVec2 titlePos(displaySz.x * m_startTitlePos.x - titleSz.x * 0.5f,
+                    displaySz.y * m_startTitlePos.y - titleSz.y * 0.5f);
+    ImU32 titleCol = ImGui::ColorConvertFloat4ToU32(m_startTitleColor);
+    bg->AddText(font, titlePx, titlePos, titleCol, title);
+
+    // ── Tap prompt ──────────────────────────────────────────────────────────
+    const char* tap = m_startTapText.empty() ? "Tap to Start" : m_startTapText.c_str();
+    float tapScale = m_startTapFontPx / 13.f;
+    float tapPx    = font->FontSize * tapScale;
+    ImVec2 tapSz   = font->CalcTextSizeA(tapPx, FLT_MAX, 0.0f, tap);
+    // Pulse the tap prompt
+    float pulse = 0.6f + 0.4f * (0.5f + 0.5f * std::sin((float)ImGui::GetTime() * 2.5f));
+    ImVec2 tapPos(displaySz.x * m_startTapPos.x - tapSz.x * 0.5f,
+                  displaySz.y * m_startTapPos.y - tapSz.y * 0.5f);
+    ImU32 tapCol = IM_COL32(255, 255, 255, (int)(255 * pulse));
+    bg->AddText(font, tapPx, tapPos, tapCol, tap);
+
+    // ── Full-window tap capture ─────────────────────────────────────────────
     ImGui::SetNextWindowPos(ImVec2(0, 0));
     ImGui::SetNextWindowSize(displaySz);
     ImGui::Begin("##startscreen", nullptr,
         ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
+        ImGuiWindowFlags_NoBackground |
         ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoNavFocus);
-
-    // Title centered around 30% from the top (matches start_screen.json position)
-    const char* title = m_startTitleText.empty()
-        ? "Music Game"
-        : m_startTitleText.c_str();
-    ImGui::SetWindowFontScale(3.5f);
-    ImVec2 titleSz = ImGui::CalcTextSize(title);
-    ImGui::SetCursorPos(ImVec2((displaySz.x - titleSz.x) * 0.5f,
-                               displaySz.y * 0.30f - titleSz.y * 0.5f));
-    ImGui::TextColored(ImVec4(1.0f, 0.9f, 0.25f, 1.0f), "%s", title);
-
-    // "Tap to Start" prompt at 80% from the top
-    const char* tap = m_startTapText.empty()
-        ? "Tap to Start"
-        : m_startTapText.c_str();
-    ImGui::SetWindowFontScale(2.0f);
-    ImVec2 tapSz = ImGui::CalcTextSize(tap);
-    ImGui::SetCursorPos(ImVec2((displaySz.x - tapSz.x) * 0.5f,
-                               displaySz.y * 0.80f - tapSz.y * 0.5f));
-    ImGui::TextColored(ImVec4(1.0f, 1.0f, 1.0f, 0.9f), "%s", tap);
-
-    // Full-window invisible button captures the tap
-    ImGui::SetCursorPos(ImVec2(0, 0));
     if (ImGui::InvisibleButton("##startTap", displaySz)) {
         m_screen = GameScreen::MusicSelection;
         LOGI("StartScreen tapped -> MusicSelection");
     }
-    ImGui::SetWindowFontScale(1.0f);
     ImGui::End();
 }
 
 void AndroidEngine::renderMusicSelection() {
     ImVec2 displaySz = ImGui::GetIO().DisplaySize;
+    ImDrawList* bg = ImGui::GetBackgroundDrawList();
 
-    ImGui::SetNextWindowPos(ImVec2(0, 0));
-    ImGui::SetNextWindowSize(displaySz);
-    ImGui::Begin("Music Selection", nullptr,
-        ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
-        ImGuiWindowFlags_NoCollapse);
+    // ── Background image + frosted overlay ──────────────────────────────────
+    ImTextureID bgTex = loadAssetTexture(m_musicBgPath);
+    if (bgTex) {
+        ImVec2 uv0, uv1;
+        aspectFillUV(16.f, 9.f, displaySz.x, displaySz.y, uv0, uv1);
+        bg->AddImage(bgTex, ImVec2(0, 0), displaySz, uv0, uv1);
+        bg->AddRectFilled(ImVec2(0, 0), displaySz, IM_COL32(6, 8, 12, 170));
+    } else {
+        bg->AddRectFilled(ImVec2(0, 0), displaySz, IM_COL32(14, 18, 24, 255));
+    }
 
-    ImGui::SetWindowFontScale(1.5f);
-    ImGui::Text("Select a Song");
-    ImGui::SetWindowFontScale(1.0f);
-    ImGui::Separator();
-    ImGui::Spacing();
+    // ── Header bar ──────────────────────────────────────────────────────────
+    float headerH = displaySz.y * 0.10f;
+    bg->AddRectFilled(ImVec2(0, 0), ImVec2(displaySz.x, headerH),
+                      IM_COL32(0, 0, 0, 130));
+    ImFont* font = ImGui::GetFont();
+    float titlePx = font->FontSize * 2.4f;
+    bg->AddText(font, titlePx, ImVec2(displaySz.x * 0.04f, headerH * 0.30f),
+                IM_COL32(255, 255, 255, 240), "Select a Song");
 
-    for (int i = 0; i < (int)m_songs.size(); ++i) {
-        bool selected = (i == m_selectedSong);
-        char label[128];
-        snprintf(label, sizeof(label), "%s - %s  (Best: %d)",
-                 m_songs[i].name.c_str(), m_songs[i].artist.c_str(), m_songs[i].score);
-        if (ImGui::Selectable(label, selected, 0, ImVec2(0, 40))) {
-            m_selectedSong = i;
+    // ── Song cards (rectangle grid; one row, scrolls horizontally if needed) ─
+    ImTextureID fcTex = loadAssetTexture(m_fcImagePath);
+    ImTextureID apTex = loadAssetTexture(m_apImagePath);
+
+    float cardsAreaY = headerH + 24.f;
+    float cardsAreaH = displaySz.y * 0.55f;
+    int   nSongs     = (int)m_songs.size();
+    if (nSongs > 0) {
+        // Card sizing — fit up to 4 across, with 16-px gaps and 24-px side margins
+        int  cols = std::min(nSongs, 4);
+        float gap  = 16.f;
+        float side = 24.f;
+        float cardW = (displaySz.x - 2 * side - (cols - 1) * gap) / cols;
+        float cardH = cardsAreaH * 0.85f;
+        float startX = side;
+        float startY = cardsAreaY + (cardsAreaH - cardH) * 0.5f;
+
+        for (int i = 0; i < nSongs; ++i) {
+            int col = i % cols;
+            int row = i / cols;
+            float x = startX + col * (cardW + gap);
+            float y = startY + row * (cardH + gap);
+            ImVec2 p0(x, y), p1(x + cardW, y + cardH);
+            bool selected = (i == m_selectedSong);
+
+            // Cover image
+            ImTextureID coverTex = loadAssetTexture(m_songs[i].coverImage);
+            if (coverTex) {
+                ImVec2 uv0, uv1;
+                aspectFillUV(1.f, 1.f, cardW, cardH, uv0, uv1);
+                bg->AddImage(coverTex, p0, p1, uv0, uv1);
+            } else {
+                bg->AddRectFilled(p0, p1, IM_COL32(20, 24, 30, 230));
+            }
+            // Card border + selected ring
+            bg->AddRect(p0, p1,
+                        selected ? IM_COL32(80, 220, 240, 255) : IM_COL32(70, 90, 110, 180),
+                        8.f, 0, selected ? 4.f : 1.5f);
+
+            // Bottom gradient strip for the title to sit on
+            float stripH = cardH * 0.30f;
+            bg->AddRectFilledMultiColor(
+                ImVec2(p0.x, p1.y - stripH), p1,
+                IM_COL32(0, 0, 0, 0), IM_COL32(0, 0, 0, 0),
+                IM_COL32(0, 0, 0, 220), IM_COL32(0, 0, 0, 220));
+
+            // Title + artist
+            float namePx = font->FontSize * 1.4f;
+            float artPx  = font->FontSize * 1.0f;
+            bg->AddText(font, namePx,
+                        ImVec2(p0.x + 12, p1.y - stripH + 12),
+                        IM_COL32(255, 255, 255, 245),
+                        m_songs[i].name.c_str());
+            bg->AddText(font, artPx,
+                        ImVec2(p0.x + 12, p1.y - stripH + 12 + namePx + 4),
+                        IM_COL32(220, 220, 230, 200),
+                        m_songs[i].artist.c_str());
+
+            // Best score (top-right)
+            char scoreBuf[32];
+            snprintf(scoreBuf, sizeof(scoreBuf), "%d", m_songs[i].score);
+            ImVec2 ssz = font->CalcTextSizeA(font->FontSize * 1.0f, FLT_MAX, 0.f, scoreBuf);
+            bg->AddText(font, font->FontSize * 1.0f,
+                        ImVec2(p1.x - ssz.x - 10, p0.y + 8),
+                        IM_COL32(255, 230, 100, 235), scoreBuf);
+
+            // Achievement badge (top-left)
+            ImTextureID badge = (m_songs[i].achievement == "AP") ? apTex
+                              : (m_songs[i].achievement == "FC") ? fcTex
+                              : (ImTextureID)0;
+            if (badge) {
+                float bsz = std::min(48.f, cardW * 0.20f);
+                bg->AddImage(badge,
+                             ImVec2(p0.x + 8, p0.y + 8),
+                             ImVec2(p0.x + 8 + bsz, p0.y + 8 + bsz));
+            }
+
+            // Tap to select
+            ImGui::SetCursorScreenPos(p0);
+            char id[16]; snprintf(id, sizeof(id), "##song%d", i);
+            if (ImGui::InvisibleButton(id, ImVec2(cardW, cardH))) {
+                m_selectedSong = i;
+            }
         }
     }
 
-    ImGui::Spacing();
-    ImGui::Separator();
-    ImGui::Spacing();
+    // ── Footer buttons ──────────────────────────────────────────────────────
+    float btnH    = 64.f;
+    float btnPad  = 24.f;
+    float btnRowY = displaySz.y - btnH - btnPad;
+    float btnGap  = 16.f;
+    float btnW    = (displaySz.x - 2 * btnPad - btnGap) * 0.5f;
 
-    if (ImGui::Button("SETTINGS", ImVec2(-1, 44))) {
+    ImGui::SetCursorScreenPos(ImVec2(btnPad, btnRowY));
+    if (ImGui::Button("SETTINGS", ImVec2(btnW, btnH))) {
         m_screen = GameScreen::Settings;
     }
-    ImGui::Spacing();
-
-    if (!m_songs.empty() && ImGui::Button("PLAY", ImVec2(-1, 60))) {
-        startGameplay(m_selectedSong);
+    ImGui::SetCursorScreenPos(ImVec2(btnPad + btnW + btnGap, btnRowY));
+    if (!m_songs.empty()) {
+        if (ImGui::Button("PLAY", ImVec2(btnW, btnH))) {
+            startGameplay(m_selectedSong);
+        }
     }
-
-    ImGui::End();
 }
 
 void AndroidEngine::renderSettings() {
@@ -532,20 +677,70 @@ static int jsonInt(const std::string& json, const std::string& key, size_t searc
     return static_cast<int>(jsonDouble(json, key, searchFrom));
 }
 
+// Find a "key": [a, b, c, ...] number array starting at searchFrom and fill `out`.
+static void jsonNumArray(const std::string& json, const std::string& key,
+                         float* out, int n, size_t searchFrom = 0) {
+    std::string needle = "\"" + key + "\"";
+    size_t pos = json.find(needle, searchFrom);
+    if (pos == std::string::npos) return;
+    pos = json.find('[', pos);
+    if (pos == std::string::npos) return;
+    const char* p = json.c_str() + pos + 1;
+    char* endp = nullptr;
+    for (int i = 0; i < n; ++i) {
+        out[i] = std::strtof(p, &endp);
+        if (endp == p) break;
+        p = endp;
+        while (*p == ',' || *p == ' ' || *p == '\n' || *p == '\t') ++p;
+    }
+}
+
 void AndroidEngine::loadStartScreen() {
     std::string json = AndroidFileIO::readString("start_screen.json");
     if (json.empty()) {
         LOGI("No start_screen.json found in assets");
         return;
     }
-    // Pull the title text out of the "logo" object's "text" field
+
+    // Background
+    size_t bgPos = json.find("\"background\"");
+    if (bgPos != std::string::npos) {
+        m_startBgPath = jsonString(json, "file", bgPos);
+    }
+
+    // Logo block
     size_t logoPos = json.find("\"logo\"");
     if (logoPos != std::string::npos) {
-        m_startTitleText = jsonString(json, "text", logoPos);
+        std::string logoType = jsonString(json, "type", logoPos);
+        m_startLogoIsImage   = (logoType == "image");
+        m_startTitleText     = jsonString(json, "text", logoPos);
+        m_startLogoImagePath = jsonString(json, "imageFile", logoPos);
+
+        size_t posPos = json.find("\"position\"", logoPos);
+        if (posPos != std::string::npos) {
+            m_startTitlePos.x = static_cast<float>(jsonDouble(json, "x", posPos));
+            m_startTitlePos.y = static_cast<float>(jsonDouble(json, "y", posPos));
+        }
+        m_startTitleFontPx = static_cast<float>(jsonDouble(json, "fontSize", logoPos));
+        if (m_startTitleFontPx <= 0.f) m_startTitleFontPx = 72.f;
+
+        float c[4] = {1, 0.9f, 0.25f, 1.f};
+        jsonNumArray(json, "color", c, 4, logoPos);
+        m_startTitleColor = ImVec4(c[0], c[1], c[2], c[3]);
     }
+
+    // Tap prompt
     m_startTapText = jsonString(json, "tapText");
-    LOGI("StartScreen loaded: title='%s' tap='%s'",
-         m_startTitleText.c_str(), m_startTapText.c_str());
+    size_t tapPos = json.find("\"tapTextPosition\"");
+    if (tapPos != std::string::npos) {
+        m_startTapPos.x = static_cast<float>(jsonDouble(json, "x", tapPos));
+        m_startTapPos.y = static_cast<float>(jsonDouble(json, "y", tapPos));
+    }
+    m_startTapFontPx = static_cast<float>(jsonDouble(json, "tapTextSize"));
+    if (m_startTapFontPx <= 0.f) m_startTapFontPx = 24.f;
+
+    LOGI("StartScreen loaded: title='%s' bg='%s'",
+         m_startTitleText.c_str(), m_startBgPath.c_str());
 }
 
 void AndroidEngine::loadProject() {
@@ -554,6 +749,11 @@ void AndroidEngine::loadProject() {
         LOGI("No music_selection.json found in assets");
         return;
     }
+
+    // Top-level page background and badge images.
+    m_musicBgPath  = jsonString(json, "background");
+    m_fcImagePath  = jsonString(json, "fcImage");
+    m_apImagePath  = jsonString(json, "apImage");
 
     // Walk through each song object in the JSON
     // Find each "songs" array, then parse individual song objects
@@ -576,15 +776,25 @@ void AndroidEngine::loadProject() {
         std::string songJson = json.substr(objStart, objEnd - objStart);
 
         SongEntry entry;
-        entry.name      = jsonString(songJson, "name");
-        entry.artist    = jsonString(songJson, "artist");
-        entry.audioFile = jsonString(songJson, "audioFile");
-        entry.chartPath = jsonString(songJson, "chartHard");
+        entry.name       = jsonString(songJson, "name");
+        entry.artist     = jsonString(songJson, "artist");
+        entry.audioFile  = jsonString(songJson, "audioFile");
+        entry.chartPath  = jsonString(songJson, "chartHard");
         if (entry.chartPath.empty())
             entry.chartPath = jsonString(songJson, "chartMedium");
         if (entry.chartPath.empty())
             entry.chartPath = jsonString(songJson, "chartEasy");
-        entry.score     = jsonInt(songJson, "score");
+        entry.score      = jsonInt(songJson, "score");
+        entry.coverImage = jsonString(songJson, "coverImage");
+        // Pick the strongest achievement across difficulties (AP > FC > "")
+        std::string a = jsonString(songJson, "achievementHard");
+        if (a != "AP") {
+            std::string m = jsonString(songJson, "achievementMedium");
+            if (m == "AP" || (a.empty() && !m.empty())) a = m;
+            std::string e = jsonString(songJson, "achievementEasy");
+            if (e == "AP" || (a.empty() && !e.empty())) a = e;
+        }
+        entry.achievement = a;
 
         // Parse gameMode
         size_t gmPos = songJson.find("\"gameMode\"");
@@ -633,6 +843,83 @@ void AndroidEngine::loadProject() {
         pos = objEnd;
     }
     LOGI("Project loaded with %d songs", (int)m_songs.size());
+}
+
+// Lazy load: extract asset → upload to Vulkan → wrap as ImGui descriptor.
+// Returns nullptr on failure. The descriptor handle is valid until shutdown.
+ImTextureID AndroidEngine::loadAssetTexture(const std::string& assetPath) {
+    if (assetPath.empty() || !m_vulkanReady) return (ImTextureID)0;
+    auto it = m_imguiTextures.find(assetPath);
+    if (it != m_imguiTextures.end()) return it->second;
+
+    std::string fsPath = AndroidFileIO::extractToInternal(assetPath);
+    if (fsPath.empty()) {
+        LOGE("Texture asset missing: %s", assetPath.c_str());
+        m_imguiTextures[assetPath] = (ImTextureID)0;
+        return (ImTextureID)0;
+    }
+
+    Texture tex;
+    try {
+        tex = m_renderer.textures().loadFromFile(m_renderer.context(),
+                                                 m_renderer.buffers(),
+                                                 fsPath);
+    } catch (const std::exception& e) {
+        LOGE("loadFromFile failed for %s: %s", assetPath.c_str(), e.what());
+        m_imguiTextures[assetPath] = (ImTextureID)0;
+        return (ImTextureID)0;
+    }
+
+    VkDescriptorSet desc = ImGui_ImplVulkan_AddTexture(
+        tex.sampler, tex.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    ImTextureID id = reinterpret_cast<ImTextureID>(desc);
+    m_imguiTextures[assetPath] = id;
+    m_loadedTextures.push_back(tex);
+    LOGI("Texture loaded: %s (%dx%d)", assetPath.c_str(), tex.width, tex.height);
+    return id;
+}
+
+void AndroidEngine::releaseTextures() {
+    if (!m_vulkanReady) return;
+    for (auto& tex : m_loadedTextures) {
+        m_renderer.textures().destroyTexture(m_renderer.context(), tex);
+    }
+    m_loadedTextures.clear();
+    m_imguiTextures.clear();
+}
+
+// Dark theme close to the desktop editor: near-black panels, cyan primary,
+// rounded buttons.
+void AndroidEngine::applyTheme() {
+    ImGuiStyle& s = ImGui::GetStyle();
+    s.WindowRounding   = 8.0f;
+    s.FrameRounding    = 6.0f;
+    s.GrabRounding     = 6.0f;
+    s.PopupRounding    = 6.0f;
+    s.ScrollbarRounding= 6.0f;
+    s.WindowPadding    = ImVec2(16, 16);
+    s.FramePadding     = ImVec2(12, 8);
+    s.ItemSpacing      = ImVec2(10, 10);
+
+    ImVec4* c = s.Colors;
+    c[ImGuiCol_WindowBg]        = ImVec4(0.04f, 0.05f, 0.07f, 0.92f);
+    c[ImGuiCol_ChildBg]         = ImVec4(0.06f, 0.07f, 0.09f, 0.85f);
+    c[ImGuiCol_PopupBg]         = ImVec4(0.06f, 0.07f, 0.09f, 0.96f);
+    c[ImGuiCol_FrameBg]         = ImVec4(0.10f, 0.12f, 0.15f, 0.85f);
+    c[ImGuiCol_FrameBgHovered]  = ImVec4(0.16f, 0.20f, 0.26f, 0.95f);
+    c[ImGuiCol_FrameBgActive]   = ImVec4(0.20f, 0.55f, 0.65f, 0.90f);
+    c[ImGuiCol_TitleBg]         = ImVec4(0.05f, 0.06f, 0.08f, 1.00f);
+    c[ImGuiCol_TitleBgActive]   = ImVec4(0.08f, 0.10f, 0.13f, 1.00f);
+    c[ImGuiCol_Button]          = ImVec4(0.13f, 0.16f, 0.20f, 0.92f);
+    c[ImGuiCol_ButtonHovered]   = ImVec4(0.18f, 0.50f, 0.62f, 0.95f);
+    c[ImGuiCol_ButtonActive]    = ImVec4(0.85f, 0.20f, 0.55f, 0.95f);
+    c[ImGuiCol_Header]          = ImVec4(0.18f, 0.40f, 0.50f, 0.50f);
+    c[ImGuiCol_HeaderHovered]   = ImVec4(0.20f, 0.55f, 0.65f, 0.85f);
+    c[ImGuiCol_HeaderActive]    = ImVec4(0.85f, 0.20f, 0.55f, 0.85f);
+    c[ImGuiCol_Border]          = ImVec4(0.20f, 0.55f, 0.65f, 0.30f);
+    c[ImGuiCol_Text]            = ImVec4(0.92f, 0.94f, 0.96f, 1.00f);
+    c[ImGuiCol_TextDisabled]    = ImVec4(0.55f, 0.58f, 0.62f, 1.00f);
+    c[ImGuiCol_Separator]       = ImVec4(0.20f, 0.55f, 0.65f, 0.40f);
 }
 
 void AndroidEngine::startGameplay(int songIndex) {

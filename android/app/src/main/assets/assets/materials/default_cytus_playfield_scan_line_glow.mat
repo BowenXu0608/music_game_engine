@@ -1,0 +1,8 @@
+{
+  "name": "default_cytus_playfield_scan_line_glow",
+  "kind": "unlit",
+  "tint": [1, 1, 1, 0.07],
+  "params": [0, 0, 0, 0],
+  "targetMode": "cytus",
+  "targetSlot": "playfield_scan_line_glow"
+}

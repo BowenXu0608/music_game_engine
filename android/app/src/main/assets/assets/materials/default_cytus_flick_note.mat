@@ -1,0 +1,8 @@
+{
+  "name": "default_cytus_flick_note",
+  "kind": "unlit",
+  "tint": [1, 0.75, 0.35, 1],
+  "params": [0, 0, 0, 0],
+  "targetMode": "cytus",
+  "targetSlot": "flick_note"
+}

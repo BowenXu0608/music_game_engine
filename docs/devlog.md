@@ -1570,3 +1570,95 @@ Asset tiles in the bottom Assets strip used to hover-tooltip the full relative p
 - `engine/src/ui/MusicSelectionEditor.cpp` — 3 tooltip sites (image, audio, material — both rich and fallback branches).
 - `engine/src/ui/StartScreenEditor.cpp` — 3 tooltip sites (same coverage).
 - `engine/src/ui/SongEditor.cpp` — 3 tooltip sites (same coverage).
+
+---
+
+## 2026-05-02 — Android APK Round 6: pipeline drift fixes + first-pass visual port (incomplete)
+
+Three weeks of desktop work (Material Phase 1–4, Custom shaders, Editor layout overhaul) had silently rotted the Android pipeline. Today's session unblocked the APK build, then started porting the desktop test-game UI to Android. Work is incomplete — Path A migration is the open task for next session.
+
+### Context
+
+Branched off `ui-test` (which carries WIP `StyleTokens.*`/`Widgets.*` extraction) back to `main` at user request. Committed the WIP as `a62e9e0` on `ui-test` first so nothing was lost. Then on `main`: discovered the build cache still referenced the ui-test source files; reconfigured CMake; desktop launches cleanly.
+
+### Round 6a — Native link errors
+
+`gradlew :app:buildCMakeDebug` failed with two undefined symbols. After adding the obvious two Material/Shader files, four more symbol errors surfaced. Root cause: Material Phase 1–4 added five `.cpp` files to `engine/src/renderer/` (`ShaderCompiler.cpp`, `Material.cpp`, `MaterialAsset.cpp`, `MaterialAssetLibrary.cpp`, `MaterialSlots.cpp`), all picked up by the desktop's top-level glob, but invisible to `engine/src/android/CMakeLists.txt` which lists sources explicitly.
+
+Fix: appended all five to `SHARED_RENDERER_SOURCES`. Verified `:app:buildCMakeDebug` and `:app:assembleDebug` both pass.
+
+**Latent risk:** `compileFragmentToSpv` shells out to `glslc.exe` via `_popen`. NDK doesn't ship `glslc`. Reachable from `QuadBatch::getOrBuildCustomPipeline` / `MeshRenderer::getOrBuildCustomPipeline` only if a chart selects `MaterialKind::Custom`. Until shader generation moves to runtime SPIR-V (e.g. `spirv-cross` linked in-process), Android-shipped material assets must stay on the precompiled kinds (Unlit/Glow/Scroll/Pulse/Gradient).
+
+### Round 6b — Runtime crash, missing shader
+
+After 6a linked, `adb logcat` showed:
+```
+Renderer init failed: Cannot open shader: /data/.../files/shaders/quad_unlit.frag.spv
+```
+Per-kind quad fragment shaders (`quad_unlit/glow/scroll/pulse/gradient.frag.spv`) ship in the APK (the build script copies all of `build/shaders/`), but `AndroidEngine::onWindowInit`'s `shaderFiles[]` array (the explicit whitelist that drives `AndroidFileIO::extractToInternal`) had only the matching `mesh_*` versions, not the `quad_*` ones. Pipeline reads via `std::ifstream` from internal storage, not the asset folder, so missing extracts mean missing files.
+
+Fix: added the five `quad_*` filenames to `shaderFiles[]` (`AndroidEngine.cpp:80`).
+
+**Lesson:** the Android extraction whitelist, the desktop CMake glob, and `tools/build_apk.bat`'s shader-copy step are three separate gates. Every new shader needs at least the first two updated. Future cleanup: replace the whitelist with a pre-build emitter that walks `build/shaders/`.
+
+### Round 6c — "Tap to Start" dead
+
+After 6b the start screen rendered but tapping did nothing. `AndroidEngine::onTouchEvent` only injected events into `m_input` (the engine's gesture system); ImGui's `InvisibleButton` hit-test reads `io.MousePos` / `io.MouseDown[0]` which were pinned at zero/false forever.
+
+Fix: in `onTouchEvent`, mirror the primary pointer into ImGui via the modern queued-event API — `io.AddMousePosEvent(px,py)` + `io.AddMouseButtonEvent(0,true|false)` on DOWN/UP/MOVE/CANCEL. Single-pointer mirror is sufficient because the editor UI is mouse-driven; the engine's multi-touch path is unchanged for gameplay.
+
+Thread-safety check: `ALooper_pollOnce` and `source->process` (which dispatches `app->onInputEvent`) run on the same thread as the render loop in `native_app_glue`, so the input-event queue isn't raced.
+
+### Round 6d — First-pass visual port
+
+User feedback after 6c: "what test game like, what real game like!" — the Android UI was a stub (text-only title, ImGui Selectable list of songs), nothing like the desktop test-game. Built foundation + a partial visual port:
+
+**Texture pipeline on Android:**
+- New `loadAssetTexture(assetPath)` helper: lazy `extractToInternal` → `TextureManager::loadFromFile(ctx, bufMgr, fsPath)` → `ImGui_ImplVulkan_AddTexture(sampler, view, layout)` → `ImTextureID`. Cached by asset path; `Texture` structs retained in `m_loadedTextures` for cleanup. Returns null + logs error on missing/decode failure.
+- Descriptor pool bumped 32 → 128 (background + 2 badges + N song covers).
+- `releaseTextures()` called from `onWindowTerm` before `ImGui_ImplVulkan_Shutdown`.
+
+**Theme (`applyTheme`):** Near-black panels, cyan primary, magenta active, 8 px window rounding, 6 px frame/button rounding. Matches the desktop editor pass from 2026-04-23.
+
+**Start screen — full visual rewrite:**
+- Background image read from `start_screen.json::background.file`, drawn aspect-fill via `GetBackgroundDrawList()->AddImage()` with a 90-alpha darken.
+- Title rendered through `ImFont::CalcTextSizeA()` at the JSON-driven `fontSize × position{x,y} (normalized) × color`.
+- Tap prompt at JSON-driven `tapTextPosition × tapTextSize`, with sin-driven alpha pulse.
+- Full-window `InvisibleButton` (now wired via 6c) advances to MusicSelection.
+- New parser fields in `loadStartScreen`: `background.file`, `logo.position{x,y}`, `logo.fontSize`, `logo.color[4]`, `logo.imageFile`, `logo.type`, `tapTextPosition{x,y}`, `tapTextSize`. Helper `jsonNumArray` added for RGBA color.
+
+**Music selection — partial visual rewrite:**
+- Top-level `background`, `fcImage`, `apImage` paths now parsed in `loadProject`.
+- Per song: `coverImage` + strongest-difficulty `achievement` reduced to a single `achievement` field on `SongEntry`.
+- Header bar with "Select a Song".
+- Song cards as a 4-across rectangle grid (NOT the desktop's rhombus carousel — see open issue below). Each card: aspect-fill cover image, gradient strip at bottom for name/artist, top-right yellow score, top-left FC/AP badge if earned, cyan ring on selected, tap-to-select via `InvisibleButton`.
+- SETTINGS / PLAY in a footer row.
+
+### What's still drifted from the desktop test-game
+
+- **Music selection layout is wrong shape.** Desktop has a 3-pane perspective layout (set wheel left, song wheel right with rhombus skewed cards + painter-sorted z-order, big cover photo center, difficulty buttons under the cover, large PLAY at the bottom of the center column). Android currently shows a flat 4-across grid.
+- **Set hierarchy collapsed.** `m_songs` is a flat list; the desktop uses `m_sets[].songs[]` with separate set + song wheels.
+- **No 30s audio preview** on song dwell.
+- **Logo glow / bold / image-logo** parsed but not rendered (text-only logo path).
+- **No transition fades** between StartScreen → MusicSelection.
+
+### Open task: Path A migration
+
+User direction: rather than replicating editor render code in `AndroidEngine.cpp` (which drifts every editor change), **share the source files**. Add `StartScreenEditor.cpp` + `MusicSelectionEditor.cpp` to the Android CMake target so `renderGamePreview()` runs identically on both platforms. Detail in `docs/sys8_android.md` Round 6 + memory `project_android_visual_parity.md`.
+
+Resume point: start with the `AndroidEngineAdapter` shim. The texture cache + theme + JSON parse helpers from 6d stay in place — they're the back-end the shared editor renderer will call into.
+
+### Files touched
+
+- `engine/src/android/CMakeLists.txt` — +5 sources in `SHARED_RENDERER_SOURCES` (Material/Shader subsystem)
+- `engine/src/android/AndroidEngine.h` — +ImVec2/ImVec4 start-screen state, +music-selection asset paths, +`m_imguiTextures` cache, +`m_loadedTextures` ownership, +`loadAssetTexture/releaseTextures/applyTheme` declarations, `SongEntry` gains `coverImage`/`achievement`
+- `engine/src/android/AndroidEngine.cpp` — +`<cfloat>/<cmath>/<cstdio>` includes, ImGui touch-event mirror in `onTouchEvent`, +`jsonNumArray`, full rewrite of `loadStartScreen`/`loadProject`/`renderStartScreen`/`renderMusicSelection`, +`loadAssetTexture/releaseTextures/applyTheme/aspectFillUV` helpers, descriptor pool 32→128, theme + texture-cleanup hooks
+- `docs/sys8_android.md` — Round 6 entry + Path A backlog
+- `docs/devlog.md` — this entry
+
+### Lessons
+
+1. **Three-week dormancy = three pipelines stale.** Material work landed on desktop in mid-April. The Android target wasn't exercised until today, so three drift-points landed at once — link errors → runtime missing shader → missing input wiring. Worth scheduling a recurring "Build APK" smoke test after every desktop subsystem change, not after every release.
+2. **Explicit whitelist > glob, but only if you remember to update it.** The Android CMake's explicit source list is *deliberate* (per the project's "Android build is completely isolated" rule), but it has no automatic check that catches new desktop files. Possible future fix: a CI step that does the link from CMake's perspective.
+3. **`ImGui_ImplVulkan_AddTexture` is the bridge.** Three lines wraps a `Texture { view, sampler }` into an `ImTextureID` that draw lists / `ImGui::Image` accept. The whole "show real textures on Android" feature was unblocked by this one call.
+4. **Drift is the real cost over months.** This is *why* Path A (share the editor source) is the right answer over Path B (replicate). Today's regressions were three drifts that all happened during a non-Android sprint. Path A converts those into a single shared dependency.

@@ -1,0 +1,8 @@
+{
+  "name": "default_bandori_hold_note_sample_marker",
+  "kind": "unlit",
+  "tint": [1, 0.95, 0.3, 0.95],
+  "params": [0, 0, 0, 0],
+  "targetMode": "bandori",
+  "targetSlot": "hold_note_sample_marker"
+}
