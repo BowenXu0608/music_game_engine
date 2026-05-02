@@ -1,0 +1,8 @@
+{
+  "name": "default_bandori_playfield_lane_divider",
+  "kind": "unlit",
+  "tint": [1, 1, 1, 0.2],
+  "params": [0, 0, 0, 0],
+  "targetMode": "bandori",
+  "targetSlot": "playfield_lane_divider"
+}

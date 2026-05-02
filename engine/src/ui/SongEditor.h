@@ -472,6 +472,10 @@ private:
     void renderArcNotes(ImDrawList* dl, ImVec2 origin, ImVec2 size, float startTime,
                         int trackCount, float trackH, float regionTop);
     void renderArcHeightEditor(ImDrawList* dl, ImVec2 origin, ImVec2 size);
+    // Disk-FX keyframe strip — Circle mode chrome above the scene preview
+    // (per MIGRATION §3.4). Visualizes rot/scale/move keyframe times along
+    // the song duration; double-click jumps to a keyframe edit popup.
+    void renderDiskFxStrip();
     void fixupArcTapParents(int deletedIdx);
     // Evaluate arc position at normalized time t [0..1]. Supports multi-waypoint.
     static glm::vec2 evalArcEditor(const EditorNote& arc, float t);

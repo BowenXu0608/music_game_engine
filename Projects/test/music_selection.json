@@ -14,9 +14,9 @@
           "achievementMedium": "",
           "artist": "me",
           "audioFile": "assets/audio/M800001Ms8Wg3B9QbY.mp3",
-          "chartEasy": "assets/charts/Aa_drop2d_easy.json",
-          "chartHard": "assets/charts/Aa_drop2d_hard.json",
-          "chartMedium": "assets/charts/Aa_drop2d_medium.json",
+          "chartEasy": "",
+          "chartHard": "assets/charts/Aa_drop3d_hard.json",
+          "chartMedium": "",
           "coverImage": "assets/textures/_cgi-bin_mmwebwx-bin_webwxgetmsgimg__&MsgID=4086582760748233937&skey=@crypt_fe033b05_37901c151e3a0950a9b03cdfef2f6453&mmweb_appid=wx_webfilehelper.jpg",
           "gameMode": {
             "apImage": "",
@@ -58,7 +58,7 @@
               ],
               "scale": 1.0
             },
-            "dimension": "2D",
+            "dimension": "3D",
             "diskBaseRadius": 2.4000000953674316,
             "diskInitialScale": 0.7400000095367432,
             "diskInnerRadius": 0.8999999761581421,

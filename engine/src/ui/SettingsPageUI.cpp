@@ -1,4 +1,6 @@
 #include "SettingsPageUI.h"
+#include "StyleTokens.h"
+#include "Widgets.h"
 
 #include "engine/AudioEngine.h"
 
@@ -36,17 +38,19 @@ static const char* kLanguageChoices[] = {
 
 void drawHeader(const char* title, float width) {
     ImGui::SetWindowFontScale(1.6f);
-    ImGui::TextColored(ImVec4(1.f, 0.9f, 0.25f, 1.f), "%s", title);
+    ImGui::TextColored(ui::tokens::TextHi, "%s", title);
     ImGui::SetWindowFontScale(1.0f);
     ImGui::SameLine(width - 100.f);
 }
 
-void sectionHeader(const char* label) {
+void sectionHeader(const char* label, const ImVec4& accent = ui::tokens::Cyan) {
     ImGui::Spacing();
-    ImGui::SetWindowFontScale(1.2f);
-    ImGui::TextColored(ImVec4(0.6f, 0.85f, 1.f, 1.f), "%s", label);
+    ImGui::SetWindowFontScale(1.05f);
+    ImGui::TextColored(accent, "%s", label);
     ImGui::SetWindowFontScale(1.0f);
+    ImGui::PushStyleColor(ImGuiCol_Separator, ui::tokens::Divider);
     ImGui::Separator();
+    ImGui::PopStyleColor();
     ImGui::Spacing();
 }
 
@@ -144,7 +148,8 @@ void SettingsPageUI::render(ImVec2          origin,
     ImGui::SetNextWindowPos(origin);
     ImGui::SetNextWindowSize(size);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
-    ImGui::PushStyleColor(ImGuiCol_WindowBg, IM_COL32(14, 16, 24, 255));
+    ImGui::PushStyleColor(ImGuiCol_WindowBg,
+        ui::tokens::WithAlpha(ui::tokens::BgVoid, 0.92f));
     ImGui::Begin("##settings_page_scrim", nullptr,
         ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
         ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoTitleBar |
@@ -160,25 +165,51 @@ void SettingsPageUI::render(ImVec2          origin,
     const float cardY = (size.y - cardH) * 0.5f;
 
     ImGui::SetCursorPos(ImVec2(cardX, cardY));
-    ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 10.f);
+    ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 12.f);
+    ImGui::PushStyleVar(ImGuiStyleVar_ChildBorderSize, 1.f);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(22, 18));
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(10, 8));
-    ImGui::PushStyleColor(ImGuiCol_ChildBg, IM_COL32(32, 34, 46, 255));
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, ui::tokens::BgPanel);
+    ImGui::PushStyleColor(ImGuiCol_Border,  ui::tokens::BorderHi);
     ImGui::BeginChild("##settings_card", ImVec2(cardW, cardH), true,
         ImGuiWindowFlags_NoScrollbar);
 
-    // Header row: title on left, Back button on right.
+    // Header row: title on left, Cancel / Apply on right (MIGRATION §3.5).
     ImGui::SetWindowFontScale(1.5f);
-    ImGui::TextColored(ImVec4(1.f, 0.9f, 0.25f, 1.f), "Settings");
+    ImGui::TextColored(ui::tokens::TextHi, "Settings");
     ImGui::SetWindowFontScale(1.0f);
     ImGui::SameLine();
-    const float backW = 84.f;
-    ImGui::SetCursorPosX(ImGui::GetContentRegionAvail().x + ImGui::GetCursorPosX() - backW);
+    const float btnW   = 80.f;
+    const float btnGap = 6.f;
+    const float pairW  = btnW * 2.f + btnGap;
+    ImGui::SetCursorPosX(ImGui::GetContentRegionAvail().x + ImGui::GetCursorPosX() - pairW);
+
+    using namespace ui::tokens;
+    // Cancel — ghost button, no save, just back.
+    ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0, 0, 0, 0));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, BgPanel2);
+    ImGui::PushStyleColor(ImGuiCol_Text,          TextMid);
+    ImGui::PushStyleColor(ImGuiCol_Border,        BorderHi);
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1.f);
+    if (ImGui::Button("Cancel", ImVec2(btnW, 30))) {
+        if (host.onBack) host.onBack();
+    }
+    ImGui::PopStyleVar();
+    ImGui::PopStyleColor(4);
+
+    ImGui::SameLine(0.f, btnGap);
+
+    // Apply — primary cyan glow, save then back.
     if (readOnly) ImGui::BeginDisabled();
-    if (ImGui::Button("Back", ImVec2(backW, 30))) {
+    ImGui::PushStyleColor(ImGuiCol_Button,        WithAlpha(Cyan, 0.85f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, Cyan);
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive,  Cyan);
+    ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(0, 0.05f, 0.08f, 1));
+    if (ImGui::Button("Apply", ImVec2(btnW, 30))) {
         if (host.onSave) host.onSave();
         if (host.onBack) host.onBack();
     }
+    ImGui::PopStyleColor(4);
     if (readOnly) ImGui::EndDisabled();
 
     ImGui::Separator();
@@ -192,10 +223,12 @@ void SettingsPageUI::render(ImVec2          origin,
     ImGui::PushItemWidth(ImGui::GetContentRegionAvail().x * 0.55f);
 
     // ── Audio ────────────────────────────────────────────────────────────────
-    sectionHeader("Audio");
+    sectionHeader("AUDIO", ui::tokens::Cyan);
 
-    ImGui::SliderFloat("Music Volume",     &s.musicVolume,    0.f, 1.f, "%.2f");
-    ImGui::SliderFloat("Hit-Sound Volume", &s.hitSoundVolume, 0.f, 1.f, "%.2f");
+    ui::Slider("Music volume",     &s.musicVolume,    0.f, 1.f, "", ui::tokens::Cyan);
+    ImGui::Spacing();
+    ui::Slider("Hit-sound volume", &s.hitSoundVolume, 0.f, 1.f, "", ui::tokens::Cyan);
+    ImGui::Spacing();
     ImGui::Checkbox("Hit-Sound Enabled", &s.hitSoundEnabled);
 
     if (!readOnly && host.audio) {
@@ -205,23 +238,24 @@ void SettingsPageUI::render(ImVec2          origin,
     }
 
     ImGui::Spacing();
-    ImGui::SliderFloat("Audio Offset (ms)", &s.audioOffsetMs, -200.f, 200.f, "%.0f ms");
+    ui::Slider("Audio offset", &s.audioOffsetMs, -200.f, 200.f, " ms", ui::tokens::Magenta);
 
     ImGui::Spacing();
     drawCalibrationPanel(s, host.audio, readOnly);
 
     // ── Gameplay ─────────────────────────────────────────────────────────────
-    sectionHeader("Gameplay");
-    ImGui::SliderFloat("Note Speed", &s.noteSpeed, 1.f, 10.f, "%.1f");
+    sectionHeader("GAMEPLAY", ui::tokens::Magenta);
+    ui::Slider("Note speed", &s.noteSpeed, 1.f, 10.f, "", ui::tokens::Magenta);
     ImGui::TextDisabled("5 = default  |  Scan Line mode ignores this");
 
     // ── Visual ───────────────────────────────────────────────────────────────
-    sectionHeader("Visual");
-    ImGui::SliderFloat("Background Dim", &s.backgroundDim, 0.f, 1.f, "%.2f");
+    sectionHeader("VISUAL", ui::tokens::Lime);
+    ui::Slider("Background dim", &s.backgroundDim, 0.f, 1.f, "", ui::tokens::Lime);
+    ImGui::Spacing();
     ImGui::Checkbox("Show FPS Counter", &s.fpsCounter);
 
     // ── Misc ─────────────────────────────────────────────────────────────────
-    sectionHeader("Misc");
+    sectionHeader("MISC", ui::tokens::Amber);
     int langIdx = 0;
     for (int i = 0; i < (int)(sizeof(kLanguageChoices)/sizeof(kLanguageChoices[0])); ++i) {
         if (s.language == kLanguageChoices[i]) { langIdx = i; break; }
@@ -238,8 +272,8 @@ void SettingsPageUI::render(ImVec2          origin,
     if (readOnly) ImGui::EndDisabled();
 
     ImGui::EndChild();   // close settings_card
-    ImGui::PopStyleColor();
-    ImGui::PopStyleVar(3);
+    ImGui::PopStyleColor(2);
+    ImGui::PopStyleVar(4);
 
     ImGui::End();        // close scrim window
     ImGui::PopStyleColor();

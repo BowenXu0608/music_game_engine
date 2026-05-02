@@ -1,4 +1,6 @@
 #include "SongEditor.h"
+#include "StyleTokens.h"
+#include "Widgets.h"
 #include "engine/Engine.h"
 #include "game/chart/ChartLoader.h"
 #include "renderer/vulkan/VulkanContext.h"
@@ -647,8 +649,11 @@ void SongEditor::render(Engine* engine) {
 
     ImGui::SetNextWindowPos(ImVec2(0, 0));
     ImGui::SetNextWindowSize(ImGui::GetIO().DisplaySize);
-    ImGui::Begin("Song Editor", nullptr,
-                 ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoResize);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
+    ImGui::Begin("##song_editor", nullptr,
+                 ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse |
+                 ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoTitleBar);
+    ImGui::PopStyleVar();
 
     if (!m_song) {
         ImGui::Text("No song selected.");
@@ -670,6 +675,80 @@ void SongEditor::render(Engine* engine) {
     pollAudit();
     // Poll style-transfer HTTP worker
     pollStyle();
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // TOP TOOLBAR (MIGRATION §3.4) — shared with other editor pages via
+    // ui::TopBar. Crumbs include the song-difficulty pill and game-mode pill.
+    // ══════════════════════════════════════════════════════════════════════════
+    {
+        using namespace ui::tokens;
+        std::string proj = m_projectPath;
+        auto slash = proj.find_last_of("/\\");
+        if (slash != std::string::npos) proj = proj.substr(slash + 1);
+        if (proj.empty()) proj = "Song Editor";
+
+        ui::TopBar({proj.c_str(), m_song->name.c_str()}, [&]{
+            using namespace ui::tokens;
+
+            // Difficulty + mode pills.
+            const char* diffLabel = "Hard";
+            ImVec4 diffColor = Magenta;
+            switch (m_currentDifficulty) {
+                case Difficulty::Easy:   diffLabel = "Easy";   diffColor = Lime;    break;
+                case Difficulty::Medium: diffLabel = "Medium"; diffColor = Cyan;    break;
+                case Difficulty::Hard:   diffLabel = "Hard";   diffColor = Magenta; break;
+            }
+            ui::Pill(diffLabel, diffColor, /*solid*/ true);
+            ImGui::SameLine(0.f, 6.f);
+
+            const char* modeLabel = "Drop 2D";
+            ImVec4 modeColor = Cyan;
+            switch (m_song->gameMode.type) {
+                case GameModeType::DropNotes:
+                    if (m_song->gameMode.dimension == DropDimension::ThreeD) {
+                        modeLabel = "Drop 3D"; modeColor = Magenta;
+                    } else {
+                        modeLabel = "Drop 2D"; modeColor = Cyan;
+                    }
+                    break;
+                case GameModeType::Circle:   modeLabel = "Circle";    modeColor = Lime;  break;
+                case GameModeType::ScanLine: modeLabel = "Scan Line"; modeColor = Amber; break;
+            }
+            ui::Pill(modeLabel, modeColor, /*solid*/ false);
+
+            ImGui::SameLine(0.f, 16.f);
+            if (ui::TopTestGame()) {
+                // Re-use the validated launch path used by the bottom-bar
+                // Test Game button — exports the chart, saves selection, and
+                // either spawns the test process or shows the error popup.
+                if (m_song && engine) {
+                    bool anyNotes = false;
+                    for (int d = 0; d < 3; d++) {
+                        if (!m_diffNotes[d].empty()) { anyNotes = true; break; }
+                    }
+                    if (!anyNotes) {
+                        m_testErrorMsg =
+                            "Cannot start test game!\n\n"
+                            "At least one difficulty must have notes.\n"
+                            "Place some notes in the timeline first.";
+                        m_showTestError = true;
+                    } else if (notes().empty()) {
+                        const char* diffNames[] = {"Easy", "Medium", "Hard"};
+                        m_testErrorMsg = std::string(
+                            "No notes in the current difficulty (")
+                            + diffNames[(int)m_currentDifficulty] + ").\n\n"
+                            "Select a difficulty that has notes,\n"
+                            "or add notes to this difficulty first.";
+                        m_showTestError = true;
+                    } else {
+                        exportAllCharts();
+                        engine->musicSelectionEditor().save();
+                        launchTestProcess();
+                    }
+                }
+            }
+        });
+    }
 
     ImVec2 contentSize = ImGui::GetContentRegionAvail();
     const float splitterThick = 5.f;
@@ -703,13 +782,8 @@ void SongEditor::render(Engine* engine) {
     // ══════════════════════════════════════════════════════════════════════════
     ImGui::BeginChild("SESidebar", ImVec2(m_sidebarW, bodyH), true);
     {
-        // "Editing:" header stays at the very top so the user always sees
-        // which song is being edited.
-        ImGui::Text("Editing: %s", m_song->name.c_str());
-        if (!m_song->artist.empty())
-            ImGui::TextDisabled("by %s", m_song->artist.c_str());
-        ImGui::Separator();
-        ImGui::Spacing();
+        // (Top toolbar above already shows project crumbs / song name /
+        // difficulty + mode pills, per MIGRATION §3.4.)
 
         // Tabbed pages. "Basic" is the broad mode/audio/HUD/material surface;
         // "Note" holds per-note-type authoring knobs (material, hold corner
@@ -760,12 +834,37 @@ void SongEditor::render(Engine* engine) {
         const bool scanLineMode = (m_song->gameMode.type == GameModeType::ScanLine);
         const bool is3DMode = (m_song->gameMode.type == GameModeType::DropNotes
                                && m_song->gameMode.dimension == DropDimension::ThreeD);
+        const bool circleMode  = (m_song->gameMode.type == GameModeType::Circle);
         const float arcHeightH = is3DMode ? m_heightCurveH : 0.f;
-        float editableH = std::max(80.f, bodyH - waveformH - splitterThick - arcHeightH);
+        // MIGRATION §3.4 center-order strips: Circle + ScanLine each get a
+        // dedicated chrome strip ABOVE the scene preview.
+        const float diskFxH    = circleMode  ? 38.f : 0.f;
+        const float scanPageH  = scanLineMode ? 44.f : 0.f;
+        const float topStripsH = diskFxH + scanPageH;
+        float editableH = std::max(80.f,
+            bodyH - waveformH - splitterThick - arcHeightH - topStripsH);
         float sceneH    = scanLineMode ? editableH
                                        : std::max(40.f, editableH * m_sceneSplit);
         float timelineH = scanLineMode ? 0.f
                                        : std::max(40.f, editableH - sceneH);
+
+        // ── Disk-FX strip (Circle only) — ABOVE scene per MIGRATION §3.4 ─────
+        if (circleMode && diskFxH > 0.f) {
+            ImGui::BeginChild("SEDiskFxStrip", ImVec2(0, diskFxH), true,
+                              ImGuiWindowFlags_NoScrollbar);
+            renderDiskFxStrip();
+            ImGui::EndChild();
+        }
+
+        // ── Scan Pages strip (ScanLine only) — ABOVE scene per MIGRATION §3.4
+        if (scanLineMode && scanPageH > 0.f) {
+            ImGui::BeginChild("SEScanPagesStrip", ImVec2(0, scanPageH), true,
+                              ImGuiWindowFlags_NoScrollbar);
+            ImVec2 stripOrigin = ImGui::GetCursorScreenPos();
+            float  stripWidth  = ImGui::GetContentRegionAvail().x;
+            renderScanPageNav(stripOrigin, stripWidth, engine);
+            ImGui::EndChild();
+        }
 
         // ── Scene Preview ───────────────────────────────────────────────────
         ImGui::BeginChild("SEScene", ImVec2(0, sceneH), true,
@@ -777,13 +876,14 @@ void SongEditor::render(Engine* engine) {
 
             // Scan-line mode: scene-embedded tool toolbar.
             if (scanLineMode) {
+                using namespace ui::tokens;
                 ImGui::SameLine(0.f, 20.f);
                 auto toolBtn = [&](const char* label, NoteTool t) {
                     bool on = (m_noteTool == t);
                     if (on) {
-                        ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.25f, 0.55f, 0.35f, 1.f));
-                        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.3f,  0.65f, 0.4f,  1.f));
-                        ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(0.18f, 0.45f, 0.28f, 1.f));
+                        ImGui::PushStyleColor(ImGuiCol_Button,        WithAlpha(Lime, 0.45f));
+                        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, WithAlpha(Lime, 0.65f));
+                        ImGui::PushStyleColor(ImGuiCol_ButtonActive,  WithAlpha(Lime, 0.85f));
                     }
                     if (ImGui::Button(label, ImVec2(54, 0))) {
                         m_noteTool = on ? NoteTool::None : t;
@@ -802,9 +902,9 @@ void SongEditor::render(Engine* engine) {
                 {
                     bool on = (m_noteTool == NoteTool::None);
                     if (on) {
-                        ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.55f, 0.45f, 0.25f, 1.f));
-                        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.65f, 0.55f, 0.30f, 1.f));
-                        ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(0.45f, 0.35f, 0.20f, 1.f));
+                        ImGui::PushStyleColor(ImGuiCol_Button,        WithAlpha(Amber, 0.45f));
+                        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, WithAlpha(Amber, 0.65f));
+                        ImGui::PushStyleColor(ImGuiCol_ButtonActive,  WithAlpha(Amber, 0.85f));
                     }
                     if (ImGui::Button("Select", ImVec2(58, 0))) {
                         m_noteTool = NoteTool::None;
@@ -818,13 +918,13 @@ void SongEditor::render(Engine* engine) {
                 // Beat-analysis block (mirrors renderNoteToolbar's version).
                 ImGui::SameLine(0.f, 20.f);
                 if (m_analyzer.isRunning()) {
-                    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.3f, 0.3f, 0.3f, 1.f));
+                    ImGui::PushStyleColor(ImGuiCol_Button, BgPanel3);
                     ImGui::Button("Analyzing...", ImVec2(100, 0));
                     ImGui::PopStyleColor();
                 } else {
-                    ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.15f, 0.5f, 0.2f, 1.f));
-                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.2f,  0.6f, 0.25f, 1.f));
-                    ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(0.1f,  0.4f, 0.15f, 1.f));
+                    ImGui::PushStyleColor(ImGuiCol_Button,        WithAlpha(Lime, 0.30f));
+                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, WithAlpha(Lime, 0.55f));
+                    ImGui::PushStyleColor(ImGuiCol_ButtonActive,  WithAlpha(Lime, 0.80f));
                     if (ImGui::Button("Analyze Beats", ImVec2(110, 0))) {
                         if (m_song && !m_song->audioFile.empty()) {
                             std::string fullAudioPath = m_projectPath + "/" + m_song->audioFile;
@@ -1479,7 +1579,7 @@ void SongEditor::render(Engine* engine) {
 
 void SongEditor::renderProperties() {
     // ── Audio File ───────────────────────────────────────────────────────────
-    bool audioOpen = ImGui::CollapsingHeader("Audio", ImGuiTreeNodeFlags_DefaultOpen);
+    bool audioOpen = ui::SectionHeader("Audio");
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("Music track, sync offset, and music-selection preview clip.");
     if (audioOpen) {
@@ -1614,7 +1714,7 @@ void SongEditor::renderProperties() {
 
     // ── BPM Map (from analysis) ─────────────────────────────────────────────
     if (m_dominantBpm > 0.f) {
-        bool bpmOpen = ImGui::CollapsingHeader("BPM Map", ImGuiTreeNodeFlags_DefaultOpen);
+        bool bpmOpen = ui::SectionHeader("BPM Map");
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("Dominant tempo and any detected tempo sections.");
         if (bpmOpen) {
@@ -1766,7 +1866,7 @@ void SongEditor::renderNotePage(Engine* engine) {
     ImGui::Spacing();
 
     // ── Lane layout (applies to every note type) ───────────────────────────
-    bool laneOpen = ImGui::CollapsingHeader("Lane Layout", ImGuiTreeNodeFlags_DefaultOpen);
+    bool laneOpen = ui::SectionHeader("Lane Layout");
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("Lane count, sky height, and default width shared across note types.");
     if (laneOpen) {
@@ -1894,7 +1994,7 @@ void SongEditor::renderNotePage(Engine* engine) {
     };
 
     for (const char* noteType : sections) {
-        if (!ImGui::CollapsingHeader(noteType)) continue;
+        if (!ui::SectionHeader(noteType)) continue;
 
         ImGui::Indent();
 
@@ -1962,7 +2062,7 @@ void SongEditor::renderNotePage(Engine* engine) {
     // ── Playfield section (moved from Basic tab) ───────────────────────────
     // Hosts every non-note slot (lane divider, hit zone, ground, scan line,
     // etc.). Grouped by the slot's group label when present.
-    if (ImGui::CollapsingHeader("Playfield")) {
+    if (ui::SectionHeader("Playfield")) {
         ImGui::Indent();
 
         std::string currentGroup;
@@ -1987,7 +2087,7 @@ void SongEditor::renderNotePage(Engine* engine) {
                 if (!grp.empty()) {
                     inGroup = true;
                     ImGui::Separator();
-                    groupOpen = ImGui::CollapsingHeader(grp.c_str());
+                    groupOpen = ui::SectionHeader(grp.c_str());
                     if (groupOpen) ImGui::Indent();
                 }
             }
@@ -2033,93 +2133,36 @@ void SongEditor::renderGameModeConfig(Engine* engine,
     GameModeConfig& gm = m_song->gameMode;
 
     if (showStructure) {
-    ImGui::Text("Game Mode");
-    ImGui::Separator();
+    if (ui::SectionHeader("Game Mode")) {
     ImGui::Spacing();
 
-    // ── Mode Type Selection ──────────────────────────────────────────────────
-    ImGui::Text("Style");
-    ImGui::Spacing();
-
-    struct ModeOption {
-        const char* label;
-        const char* desc;
-        GameModeType type;
-    };
-    ModeOption options[] = {
-        {"Basic Drop Notes", "Notes fall toward a hit zone.",          GameModeType::DropNotes},
-        {"Circle",           "Ring notes on a rotating disk.",          GameModeType::Circle},
-        {"Scan Line",        "A sweep line crosses notes on a 2D field.", GameModeType::ScanLine},
-    };
-
-    for (auto& opt : options) {
-        bool selected = (gm.type == opt.type);
-        if (selected) {
-            ImGui::PushStyleColor(ImGuiCol_Button,       ImVec4(0.2f, 0.4f, 0.8f, 1.0f));
-            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.3f, 0.5f, 0.9f, 1.0f));
-            ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(0.15f, 0.35f, 0.75f, 1.0f));
-        }
-        if (ImGui::Button(opt.label, ImVec2(-1, 28))) {
-            if (gm.type != opt.type) {
-                exportAllCharts();
-                gm.type = opt.type;
-                reloadChartsForCurrentMode();
+    // ── 4-way mode SegBar (MIGRATION §3.4 — only here, not in top bar) ──────
+    int modeIdx = (gm.type == GameModeType::DropNotes)
+                  ? ((gm.dimension == DropDimension::ThreeD) ? 1 : 0)
+                  : (gm.type == GameModeType::Circle)   ? 2
+                  : (gm.type == GameModeType::ScanLine) ? 3 : 0;
+    int prevIdx = modeIdx;
+    if (ui::SegBar("##modeseg",
+                   {"Drop 2D", "Drop 3D", "Circle", "Scan Line"}, &modeIdx)) {
+        if (modeIdx != prevIdx) {
+            exportAllCharts();
+            switch (modeIdx) {
+                case 0: gm.type = GameModeType::DropNotes;
+                        gm.dimension = DropDimension::TwoD;   break;
+                case 1: gm.type = GameModeType::DropNotes;
+                        gm.dimension = DropDimension::ThreeD; break;
+                case 2: gm.type = GameModeType::Circle;       break;
+                case 3: gm.type = GameModeType::ScanLine;     break;
             }
+            reloadChartsForCurrentMode();
         }
-        if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("%s", opt.desc);
-        if (selected)
-            ImGui::PopStyleColor(3);
     }
 
     ImGui::Spacing();
+    } // SectionHeader("Game Mode")
 
-    // ── Dimension (only for DropNotes) ───────────────────────────────────────
-    if (gm.type == GameModeType::DropNotes) {
-        ImGui::Text("Dimension");
-        if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("2D keeps notes on the ground only.\n3D adds a sky layer (arcs, arctaps).");
-        ImGui::Spacing();
-
-        float w = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x) * 0.5f;
-
-        bool is2D = (gm.dimension == DropDimension::TwoD);
-        bool is3D = (gm.dimension == DropDimension::ThreeD);
-
-        if (is2D) {
-            ImGui::PushStyleColor(ImGuiCol_Button,       ImVec4(0.2f, 0.4f, 0.8f, 1.0f));
-            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.3f, 0.5f, 0.9f, 1.0f));
-            ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(0.15f, 0.35f, 0.75f, 1.0f));
-        }
-        if (ImGui::Button("2D - Ground Only", ImVec2(w, 36))) {
-            if (gm.dimension != DropDimension::TwoD) {
-                exportAllCharts();
-                gm.dimension = DropDimension::TwoD;
-                reloadChartsForCurrentMode();
-            }
-        }
-        if (is2D) ImGui::PopStyleColor(3);
-
-        ImGui::SameLine();
-
-        if (is3D) {
-            ImGui::PushStyleColor(ImGuiCol_Button,       ImVec4(0.2f, 0.4f, 0.8f, 1.0f));
-            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.3f, 0.5f, 0.9f, 1.0f));
-            ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(0.15f, 0.35f, 0.75f, 1.0f));
-        }
-        if (ImGui::Button("3D - Ground + Sky", ImVec2(w, 36))) {
-            if (gm.dimension != DropDimension::ThreeD) {
-                exportAllCharts();
-                gm.dimension = DropDimension::ThreeD;
-                reloadChartsForCurrentMode();
-            }
-        }
-        if (is3D) ImGui::PopStyleColor(3);
-
-        // Sky height slider moved to the "Note" sidebar tab (renderNotePage).
-
-        ImGui::Spacing();
-    }
+    // (Dimension picker dropped — the 4-way SegBar above covers Drop 2D /
+    // Drop 3D directly.)
 
     // ── Circle Mode Disk Defaults ────────────────────────────────────────────
     if (gm.type == GameModeType::Circle) {
@@ -2158,7 +2201,7 @@ void SongEditor::renderGameModeConfig(Engine* engine,
         // duration (how long the transform takes to reach its target).
         // Start time is captured from the playhead; duration is either
         // typed in the panel or dragged on the Disk FX timeline lane.
-        if (ImGui::CollapsingHeader("Disk Animation", ImGuiTreeNodeFlags_DefaultOpen)) {
+        if (ui::SectionHeader("Disk Animation")) {
             ImGui::Spacing();
 
             // Track tabs.
@@ -2379,7 +2422,7 @@ void SongEditor::renderGameModeConfig(Engine* engine,
 
     // ── Scan Line Speed (Cytus mode only) ──────────────────────────────────
     if (gm.type == GameModeType::ScanLine) {
-        bool scanOpen = ImGui::CollapsingHeader("Scan Line Speed");
+        bool scanOpen = ui::SectionHeader("Scan Line Speed");
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("Speed-multiplier keyframes for the sweeping line.\n"
                               "1.0x = base BPM speed.");
@@ -2452,7 +2495,7 @@ void SongEditor::renderGameModeConfig(Engine* engine,
 
     if (showPresentation) {
     // ── Judgment & Scoring (combined) ────────────────────────────────────────
-    bool judgeOpen = ImGui::CollapsingHeader("Judgment & Scoring", ImGuiTreeNodeFlags_DefaultOpen);
+    bool judgeOpen = ui::SectionHeader("Judgment & Scoring");
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("Timing tolerance and points per grade.\n"
                           "Set a Total Score target and Calculate to auto-fill per-grade values.");
@@ -2526,7 +2569,7 @@ void SongEditor::renderGameModeConfig(Engine* engine,
     // — one pair per game, configured once instead of per-chart.
 
     // ── HUD Text: Score & Combo ─────────────────────────────────────────────
-    bool hudOpen = ImGui::CollapsingHeader("HUD - Score & Combo", ImGuiTreeNodeFlags_DefaultOpen);
+    bool hudOpen = ui::SectionHeader("HUD - Score & Combo");
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("Position and styling of the score and combo readouts in-game.");
     if (hudOpen) {
@@ -2550,7 +2593,7 @@ void SongEditor::renderGameModeConfig(Engine* engine,
 
 
     // ── Background Image ───────────────────────────────────────────────────
-    bool bgOpen = ImGui::CollapsingHeader("Background", ImGuiTreeNodeFlags_DefaultOpen);
+    bool bgOpen = ui::SectionHeader("Background");
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("Image displayed behind the gameplay scene.");
     if (bgOpen) {
@@ -3823,7 +3866,9 @@ void SongEditor::renderSceneView(ImDrawList* dl, ImVec2 origin, ImVec2 size,
             }
 
             const ScanPageInfo& page = m_scanPageTable[m_scanCurrentPage];
-            const float headerH  = 36.f;
+            // Header strip moved to SEScanPagesStrip (above the scene). Scene
+            // now uses the full available rect for the page body.
+            const float headerH  = 0.f;
             const ImVec2 bodyOrigin(origin.x, origin.y + headerH);
             const ImVec2 bodySize(size.x, std::max(10.f, size.y - headerH));
             const ImVec2 bodyMax(bodyOrigin.x + bodySize.x,
@@ -3832,8 +3877,9 @@ void SongEditor::renderSceneView(ImDrawList* dl, ImVec2 origin, ImVec2 size,
             // Body background
             dl->AddRectFilled(bodyOrigin, bodyMax, IM_COL32(12, 12, 18, 255));
 
-            // Navigation header (Prev/Next, label, speed input, Place All).
-            renderScanPageNav(origin, size.x, engine);
+            // Page navigation now lives in the SEScanPagesStrip child window
+            // ABOVE this scene (per MIGRATION §3.4). renderScanPageNav is
+            // called from there; this scene renders the page body only.
 
             // Normalized→local converters for the body rect.
             auto scanToLocal = [&](float nx, float ny) -> ImVec2 {
@@ -6203,18 +6249,15 @@ void SongEditor::renderNoteToolbar() {
 
     ImGui::Spacing();
 
-    // Pointer tool (no note placement, marker mode)
-    auto toolBtn = [&](const char* label, NoteTool tool, ImVec4 color) {
-        bool active = (m_noteTool == tool);
-        if (active) {
-            ImGui::PushStyleColor(ImGuiCol_Button,        color);
-            ImGui::PushStyleColor(ImGuiCol_ButtonHovered,  ImVec4(color.x + 0.1f, color.y + 0.1f, color.z + 0.1f, 1.f));
-            ImGui::PushStyleColor(ImGuiCol_ButtonActive,   ImVec4(color.x - 0.05f, color.y - 0.05f, color.z - 0.05f, 1.f));
-        }
-        if (ImGui::Button(label, ImVec2(80, 26))) {
-            if (m_noteTool == tool)
-                m_noteTool = NoteTool::None; // toggle off
-            else {
+    // Each chip toggles its NoteTool. Reset transient drag/placement state on
+    // every selection change so we never carry a half-recorded Hold gesture
+    // into a different tool.
+    auto chipBtn = [&](const char* label, int keyHint, NoteTool tool, const ImVec4& accent) {
+        const bool active = (m_noteTool == tool);
+        if (ui::LabeledChip(label, keyHint, accent, active)) {
+            if (m_noteTool == tool) {
+                m_noteTool = NoteTool::None;
+            } else {
                 m_noteTool = tool;
                 m_holdDragging  = false;
                 m_holdLastTrack = -1;
@@ -6223,20 +6266,20 @@ void SongEditor::renderNoteToolbar() {
                 m_arcDraft      = EditorNote{};
             }
         }
-        if (active) ImGui::PopStyleColor(3);
         ImGui::SameLine();
     };
 
-    toolBtn("Marker", NoteTool::None, ImVec4(0.5f, 0.4f, 0.2f, 1.f));
-    toolBtn("Click",  NoteTool::Tap, ImVec4(0.2f, 0.5f, 0.8f, 1.f));
-    toolBtn("Hold",   NoteTool::Hold, ImVec4(0.2f, 0.7f, 0.3f, 1.f));
+    using namespace ui::tokens;
+    chipBtn("Marker", 0, NoteTool::None,  Amber);
+    chipBtn("Click",  1, NoteTool::Tap,   Cyan);
+    chipBtn("Hold",   2, NoteTool::Hold,  Lime);
 
     // Flick: 2D drop (Bandori), 3D drop (Arcaea), and Circle (Lanota) all
     // support Flick in their renderers.
     const bool twoDDrop = (gm.type == GameModeType::DropNotes
                            && gm.dimension != DropDimension::ThreeD);
     if (twoDDrop || is3D || gm.type == GameModeType::Circle) {
-        toolBtn("Flick", NoteTool::Flick, ImVec4(0.8f, 0.3f, 0.3f, 1.f));
+        chipBtn("Flick", 3, NoteTool::Flick, Magenta);
     }
 
     // Slide is ScanLine-only. The ScanLine toolbar path (see scanLineMode
@@ -6244,20 +6287,19 @@ void SongEditor::renderNoteToolbar() {
 
     // Arc tools: only in 3D DropNotes mode
     if (is3D) {
-        toolBtn("Arc",    NoteTool::Arc,    ImVec4(0.3f, 0.7f, 0.9f, 1.f));
+        chipBtn("Arc",    4, NoteTool::Arc,    Violet);
         // Arc color picker (inline, no style push/pop)
         if (m_noteTool == NoteTool::Arc) {
             ImGui::SameLine();
             const char* colorLabel = (m_arcDraftColor == 0) ? "[Cyan]" : "[Pink]";
-            ImGui::TextColored(
-                m_arcDraftColor == 0 ? ImVec4(0.3f, 0.8f, 1.f, 1.f) : ImVec4(1.f, 0.4f, 0.7f, 1.f),
+            ImGui::TextColored(m_arcDraftColor == 0 ? Cyan : Magenta,
                 "%s", colorLabel);
             ImGui::SameLine();
             if (ImGui::SmallButton("C##cyan")) m_arcDraftColor = 0;
             ImGui::SameLine();
             if (ImGui::SmallButton("P##pink")) m_arcDraftColor = 1;
         }
-        toolBtn("ArcTap", NoteTool::ArcTap, ImVec4(0.8f, 0.5f, 0.2f, 1.f));
+        chipBtn("ArcTap", 5, NoteTool::ArcTap, Cyan);
     }
 
     // Show drag-recording indicator
@@ -6284,13 +6326,13 @@ void SongEditor::renderNoteToolbar() {
     ImGui::SameLine(0.f, 20.f);  // gap before analysis buttons
 
     if (m_analyzer.isRunning()) {
-        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.3f, 0.3f, 0.3f, 1.f));
+        ImGui::PushStyleColor(ImGuiCol_Button, ui::tokens::BgPanel3);
         ImGui::Button("Analyzing...", ImVec2(80, 26));
         ImGui::PopStyleColor();
     } else {
-        ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.15f, 0.5f, 0.2f, 1.f));
-        ImGui::PushStyleColor(ImGuiCol_ButtonHovered,  ImVec4(0.2f, 0.6f, 0.25f, 1.f));
-        ImGui::PushStyleColor(ImGuiCol_ButtonActive,   ImVec4(0.1f, 0.4f, 0.15f, 1.f));
+        ImGui::PushStyleColor(ImGuiCol_Button,        ui::tokens::WithAlpha(ui::tokens::Lime, 0.30f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ui::tokens::WithAlpha(ui::tokens::Lime, 0.55f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ui::tokens::WithAlpha(ui::tokens::Lime, 0.80f));
         if (ImGui::Button("Analyze", ImVec2(80, 26))) {
             if (m_song && !m_song->audioFile.empty()) {
                 std::string fullAudioPath = m_projectPath + "/" + m_song->audioFile;
@@ -6368,9 +6410,9 @@ void SongEditor::renderNoteToolbar() {
         ImGui::SetTooltip("Undo last Thin Markers (current difficulty only)");
 
     ImGui::SameLine();
-    ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.5f, 0.35f, 0.1f, 1.f));
-    ImGui::PushStyleColor(ImGuiCol_ButtonHovered,  ImVec4(0.6f, 0.45f, 0.15f, 1.f));
-    ImGui::PushStyleColor(ImGuiCol_ButtonActive,   ImVec4(0.4f, 0.25f, 0.08f, 1.f));
+    ImGui::PushStyleColor(ImGuiCol_Button,        ui::tokens::WithAlpha(ui::tokens::Amber, 0.45f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ui::tokens::WithAlpha(ui::tokens::Amber, 0.65f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ui::tokens::WithAlpha(ui::tokens::Amber, 0.85f));
     if (ImGui::Button("Place", ImVec2(60, 26))) {
         // Feature-driven placement. Uses analyzer features (strength / sustain /
         // centroid) when available; falls back to Tap + round-robin lane for
@@ -6582,23 +6624,36 @@ void SongEditor::renderNoteToolbar() {
     }
 
     ImGui::SameLine();
-    ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.6f, 0.15f, 0.15f, 1.f));
-    ImGui::PushStyleColor(ImGuiCol_ButtonHovered,  ImVec4(0.7f, 0.2f, 0.2f, 1.f));
-    ImGui::PushStyleColor(ImGuiCol_ButtonActive,   ImVec4(0.5f, 0.1f, 0.1f, 1.f));
+    ImGui::PushStyleColor(ImGuiCol_Button,        ui::tokens::WithAlpha(ui::tokens::Red, 0.18f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ui::tokens::WithAlpha(ui::tokens::Red, 0.32f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ui::tokens::WithAlpha(ui::tokens::Red, 0.50f));
+    ImGui::PushStyleColor(ImGuiCol_Text,          ui::tokens::Red);
+    ImGui::PushStyleColor(ImGuiCol_Border,        ui::tokens::WithAlpha(ui::tokens::Red, 0.55f));
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1.f);
     if (ImGui::Button("Clr Note", ImVec2(76, 26))) {
         notes().clear();
     }
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("Clear Notes - delete every note in this difficulty");
-    ImGui::PopStyleColor(3);
+    ImGui::PopStyleVar();
+    ImGui::PopStyleColor(5);
 
-    // ── Audit button — now switches the right sidebar to its Audit tab
-    //    instead of opening a floating popup. The metrics + issue list
-    //    live in renderAuditSidebarTab().
-    ImGui::SameLine();
-    ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.35f, 0.35f, 0.6f, 1.f));
-    ImGui::PushStyleColor(ImGuiCol_ButtonHovered,  ImVec4(0.45f, 0.45f, 0.7f, 1.f));
-    ImGui::PushStyleColor(ImGuiCol_ButtonActive,   ImVec4(0.25f, 0.25f, 0.5f, 1.f));
+    // ── Audit button — right-aligned per MIGRATION §3.4. Switches the
+    //    right sidebar to its Audit tab instead of opening a floating popup.
+    //    The metrics + issue list live in renderAuditSidebarTab().
+    {
+        const float remaining = ImGui::GetContentRegionAvail().x;
+        if (remaining > 70.f)
+            ImGui::SameLine(0.f, remaining - 60.f);
+        else
+            ImGui::SameLine();
+    }
+    ImGui::PushStyleColor(ImGuiCol_Button,        ui::tokens::WithAlpha(ui::tokens::Violet, 0.20f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ui::tokens::WithAlpha(ui::tokens::Violet, 0.36f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ui::tokens::WithAlpha(ui::tokens::Violet, 0.52f));
+    ImGui::PushStyleColor(ImGuiCol_Text,          ui::tokens::Violet);
+    ImGui::PushStyleColor(ImGuiCol_Border,        ui::tokens::WithAlpha(ui::tokens::Violet, 0.55f));
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1.f);
     if (ImGui::Button("Audit", ImVec2(60, 26))) {
         m_rightSidebarTab        = RightSidebarTab::Audit;
         m_rightSidebarTabPending = true;  // consumed once by the tab bar
@@ -6607,7 +6662,8 @@ void SongEditor::renderNoteToolbar() {
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("Open the Audit page in the right sidebar - density / jacks /\n"
                           "crossovers / dead zones / marker stats for this difficulty");
-    ImGui::PopStyleColor(3);
+    ImGui::PopStyleVar();
+    ImGui::PopStyleColor(5);
 
     // (Old chart-audit popup removed — see renderAuditSidebarTab below.)
 
@@ -7081,6 +7137,73 @@ void SongEditor::handleArcTapPlacement(ImVec2 origin, ImVec2 size, float startTi
 }
 
 // ── renderArcHeightEditor ───────────────────────────────────────────────────
+
+// ── renderDiskFxStrip ────────────────────────────────────────────────────────
+// Circle-mode chrome strip placed ABOVE the scene preview (per MIGRATION
+// §3.4). Shows keyframe diamonds for rotation / scale / move events along the
+// song timeline. Click a diamond to seek to it; clicking the strip shows a
+// hint to use the Basic sidebar's Disk Animation header for full editing.
+void SongEditor::renderDiskFxStrip() {
+    if (!m_song) return;
+    using namespace ui::tokens;
+
+    const float dur = m_waveformLoaded ? (float)m_waveform.durationSeconds : 0.f;
+    const auto& rots   = diskRot();
+    const auto& moves  = diskMove();
+    const auto& scales = diskScale();
+
+    ImGui::TextDisabled("DISK FX");
+    ImGui::SameLine();
+
+    // Track strip — full content width, 18 px tall.
+    const float labelW = 60.f;
+    const float trackH = 18.f;
+    ImVec2 cursor = ImGui::GetCursorScreenPos();
+    cursor.x += labelW;
+    const float trackW = std::max(40.f, ImGui::GetContentRegionAvail().x - labelW);
+    ImVec2 trackMin = cursor;
+    ImVec2 trackMax(trackMin.x + trackW, trackMin.y + trackH);
+
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    dl->AddRectFilled(trackMin, trackMax, ToU32(BgPanel2), 3.f);
+    dl->AddRect(trackMin, trackMax, ToU32(Border), 3.f);
+
+    auto plot = [&](float t, ImU32 c) {
+        if (dur <= 0.f) return;
+        float x = trackMin.x + std::clamp(t / dur, 0.f, 1.f) * trackW;
+        float cy = (trackMin.y + trackMax.y) * 0.5f;
+        float r = 5.f;
+        dl->AddQuadFilled(
+            ImVec2(x,     cy - r),
+            ImVec2(x + r, cy),
+            ImVec2(x,     cy + r),
+            ImVec2(x - r, cy),
+            c);
+    };
+    for (const auto& e : rots)   plot((float)e.startTime, ToU32(Lime));
+    for (const auto& e : scales) plot((float)e.startTime, ToU32(Cyan));
+    for (const auto& e : moves)  plot((float)e.startTime, ToU32(Magenta));
+
+    // Playhead.
+    if (dur > 0.f) {
+        float px = trackMin.x + std::clamp(m_sceneTime / dur, 0.f, 1.f) * trackW;
+        dl->AddLine(ImVec2(px, trackMin.y), ImVec2(px, trackMax.y),
+                    ToU32(WithAlpha(TextHi, 0.9f)), 1.5f);
+    }
+
+    // Hover tooltip with counts; click anywhere on track jumps the playhead.
+    ImGui::SetCursorScreenPos(trackMin);
+    ImGui::InvisibleButton("##diskfx_track", ImVec2(trackW, trackH));
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Disk FX  rot:%d  scale:%d  move:%d\n"
+                          "(Edit keyframes in Basic > Disk Animation.)",
+                          (int)rots.size(), (int)scales.size(), (int)moves.size());
+        if (ImGui::IsMouseClicked(ImGuiMouseButton_Left) && dur > 0.f) {
+            float nx = (ImGui::GetIO().MousePos.x - trackMin.x) / trackW;
+            m_sceneTime = std::clamp(nx, 0.f, 1.f) * dur;
+        }
+    }
+}
 
 void SongEditor::renderArcHeightEditor(ImDrawList* dl, ImVec2 origin, ImVec2 size) {
     if (!m_song) return;
@@ -8493,7 +8616,7 @@ void SongEditor::renderAuditPanel() {
         a.configLoaded = true;
     }
 
-    if (!ImGui::CollapsingHeader("Chart Audit")) return;
+    if (!ui::SectionHeader("Chart Audit")) return;
 
     ImGui::TextDisabled("(%s)", a.config.model.c_str());
 
@@ -8828,7 +8951,7 @@ void SongEditor::renderStylePanel() {
         s.configLoaded = true;
     }
 
-    if (!ImGui::CollapsingHeader("Style Transfer")) return;
+    if (!ui::SectionHeader("Style Transfer")) return;
 
     ImGui::TextDisabled("(%s)", s.config.model.c_str());
 

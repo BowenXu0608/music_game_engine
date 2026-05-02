@@ -1,0 +1,8 @@
+{
+  "name": "default_bandori_flick_note",
+  "kind": "unlit",
+  "tint": [1, 0.3, 0.3, 1],
+  "params": [0, 0, 0, 0],
+  "targetMode": "bandori",
+  "targetSlot": "flick_note"
+}

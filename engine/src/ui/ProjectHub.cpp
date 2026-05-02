@@ -1,4 +1,6 @@
 #include "ProjectHub.h"
+#include "StyleTokens.h"
+#include "Widgets.h"
 #include "engine/Engine.h"
 #include <imgui.h>
 #include <algorithm>
@@ -214,6 +216,40 @@ void ProjectHub::scanProjects() {
             info.defaultChart = j.value("defaultChart", "");
             info.shaderPath   = j["paths"].value("shaders", "../../build/shaders");
             formatMtime(latestMtime(entry.path()), info.lastModified, info.lastModifiedRaw);
+
+            // Read first song's gameMode for the row pill + filter.
+            // Tolerates missing/malformed files — the field defaults to Drop2D.
+            try {
+                auto msPath = entry.path() / "music_selection.json";
+                if (fs::exists(msPath)) {
+                    std::ifstream msf(msPath);
+                    auto ms = nlohmann::json::parse(msf, nullptr, false);
+                    int songs = 0;
+                    if (ms.contains("sets") && ms["sets"].is_array()) {
+                        for (const auto& s : ms["sets"]) {
+                            if (s.contains("songs") && s["songs"].is_array())
+                                songs += (int)s["songs"].size();
+                        }
+                        // Pull the first song's gameMode if present.
+                        for (const auto& s : ms["sets"]) {
+                            if (!s.contains("songs") || !s["songs"].is_array()) continue;
+                            if (s["songs"].empty()) continue;
+                            const auto& song0 = s["songs"][0];
+                            if (!song0.contains("gameMode")) break;
+                            const auto& gm = song0["gameMode"];
+                            std::string typeStr  = gm.value("type", "DropNotes");
+                            std::string dimStr   = gm.value("dimension", "2D");
+                            if      (typeStr == "Circle")    info.gameMode = GameModeType::Circle;
+                            else if (typeStr == "ScanLine")  info.gameMode = GameModeType::ScanLine;
+                            else                              info.gameMode = GameModeType::DropNotes;
+                            info.gameDim = (dimStr == "3D") ? DropDimension::ThreeD : DropDimension::TwoD;
+                            break;
+                        }
+                    }
+                    info.songCount = songs;
+                }
+            } catch (...) {}
+
             m_projects.push_back(std::move(info));
         } catch (...) {}
     }
@@ -381,58 +417,98 @@ void ProjectHub::render(Engine* engine) {
                  ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse |
                  ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize);
 
-    ImGui::SetCursorPosY(50);
-    ImGui::Text("Music Game Engine - Project Hub");
-    ImGui::TextDisabled("Click a project to select. Double-click to open.");
-    ImGui::Separator();
-    ImGui::Spacing();
-
-    // ── Action bar: search • Create • Add File • (Open/Build APK when selected)
-    ImGui::SetNextItemWidth(260);
-    ImGui::InputTextWithHint("##search", "Search projects...",
-                             m_searchBuf, sizeof(m_searchBuf));
-    ImGui::SameLine();
-    if (ImGui::Button("+ Create Game", ImVec2(150, 28)))
-        m_showCreateDialog = true;
-    ImGui::SameLine();
-    if (ImGui::Button("+ Add File", ImVec2(120, 28))) {
-        m_showAddFileDialog = true;
-        m_addFileError.clear();
-    }
-
-    const bool hasSelection =
-        m_selectedIdx >= 0 && m_selectedIdx < (int)m_projects.size();
-
-    if (hasSelection) {
-        const ProjectInfo& sel = m_projects[m_selectedIdx];
-        ImGui::SameLine();
-        ImGui::Dummy(ImVec2(16, 0));
-        ImGui::SameLine();
-
-        if (ImGui::Button(("Open: " + sel.name).c_str(), ImVec2(0, 28))) {
-            m_selectedProject = sel;
-            m_projectSelected = true;
-            if (engine) {
-                engine->openProject(sel.path);
-                engine->startScreenEditor().load(sel.path);
-                engine->switchLayer(EditorLayer::StartScreen);
-            }
-            if (m_launchCallback) m_launchCallback(sel);
+    // Top bar matching MIGRATION mock — gradient logo + crumbs + Settings
+    // gear (placeholder). Replaces the inline "Music Game Engine - Project
+    // Hub" line that the rest of this function below used to print.
+    ui::TopBar({"Project Hub"}, [&]{
+        if (ui::TopNavForward("Settings")) {
+            if (engine) engine->switchLayer(EditorLayer::Settings);
         }
+    });
 
+    // ── Header row (MIGRATION §3.1): big title + subtitle, right-aligned
+    // search + Add file outline + Create primary-glow ─────────────────────
+    using namespace ui::tokens;
+    {
+        const float headerH = 44.f;
+        ImVec2 origin = ImGui::GetCursorScreenPos();
+        const float fullW = ImGui::GetContentRegionAvail().x;
+
+        // Title (large) + subtitle (small mono).
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        const float titleSize = ImGui::GetFontSize() * 1.6f;
+        dl->AddText(nullptr, titleSize, origin,
+                    ToU32(TextHi), "Projects");
+
+        // Last-opened sentinel: pick the first (most recent) entry post-scan.
+        std::string subtitle = std::to_string(m_projects.size()) + " projects";
+        if (!m_projects.empty())
+            subtitle += " | last opened " + m_projects.front().name;
+        ui::PushMono();
+        dl->AddText({origin.x, origin.y + titleSize + 4.f},
+                    ToU32(TextLow), subtitle.c_str());
+        ui::PopMono();
+
+        // Right-aligned: search box + Add file + Create game.
+        ImGui::SetCursorScreenPos({origin.x + fullW - 480.f, origin.y + 6.f});
+        ImGui::SetNextItemWidth(220);
+        ImGui::InputTextWithHint("##search", "Search projects...",
+                                 m_searchBuf, sizeof(m_searchBuf));
         ImGui::SameLine();
-        bool disableApk = m_apkRunning;
-        if (disableApk) ImGui::BeginDisabled();
-        ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.95f, 0.30f, 0.75f, 0.90f));
-        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.00f, 0.45f, 0.85f, 1.00f));
-        if (ImGui::Button(("Build APK: " + sel.name).c_str(), ImVec2(0, 28)))
-            startApkBuild(sel);
-        ImGui::PopStyleColor(2);
-        if (disableApk) ImGui::EndDisabled();
+        ImGui::PushStyleColor(ImGuiCol_Button,        BgPanel2);
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, BgPanel3);
+        ImGui::PushStyleColor(ImGuiCol_Border,        BorderHi);
+        ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1.f);
+        if (ImGui::Button("Add file", ImVec2(96, 28))) {
+            m_showAddFileDialog = true;
+            m_addFileError.clear();
+        }
+        ImGui::PopStyleVar();
+        ImGui::PopStyleColor(3);
+        ImGui::SameLine();
+        ImGui::PushStyleColor(ImGuiCol_Button,        WithAlpha(Cyan, 0.85f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, Cyan);
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive,  Cyan);
+        ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(0, 0, 0, 1));
+        if (ImGui::Button("+ Create game", ImVec2(140, 28)))
+            m_showCreateDialog = true;
+        ImGui::PopStyleColor(4);
+
+        ImGui::SetCursorScreenPos({origin.x, origin.y + headerH + 14.f});
     }
 
-    ImGui::Spacing();
-    ImGui::Separator();
+    // ── Filter pills row: All / 2D / 3D / Scan Line / Circle ────────────
+    {
+        struct FilterDef { const char* label; ImVec4 color; int idx; };
+        const FilterDef filters[] = {
+            {"All",       Cyan,    -1},
+            {"Drop 2D",   Cyan,     0},
+            {"Drop 3D",   Magenta,  1},
+            {"Scan Line", Amber,    2},
+            {"Circle",    Lime,     3},
+        };
+        for (const auto& f : filters) {
+            const bool active = (m_modeFilter == f.idx);
+            const ImVec4 bg     = active ? f.color : WithAlpha(f.color, 0.14f);
+            const ImVec4 fg     = active ? ImVec4{0,0,0,1} : f.color;
+            const ImVec4 border = active ? f.color : WithAlpha(f.color, 0.40f);
+            ImGui::PushStyleColor(ImGuiCol_Button,        bg);
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, bg);
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive,  bg);
+            ImGui::PushStyleColor(ImGuiCol_Text,          fg);
+            ImGui::PushStyleColor(ImGuiCol_Border,        border);
+            ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1.f);
+            ImGui::PushStyleVar(ImGuiStyleVar_FramePadding,    {10.f, 3.f});
+            ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding,   999.f);
+            if (ImGui::Button(f.label))
+                m_modeFilter = f.idx;
+            ImGui::PopStyleVar(3);
+            ImGui::PopStyleColor(5);
+            ImGui::SameLine();
+        }
+        ImGui::NewLine();
+    }
+
     ImGui::Spacing();
 
     if (m_projects.empty()) {
@@ -440,87 +516,206 @@ void ProjectHub::render(Engine* engine) {
         ImGui::End();
         renderCreateDialog(engine);
         renderAddFileDialog();
-        renderApkDialog();
         return;
     }
 
-    // Case-insensitive substring match against project name.
-    std::string query = m_searchBuf;
-    std::transform(query.begin(), query.end(), query.begin(),
-                   [](unsigned char c) { return (char)std::tolower(c); });
+    // ── Two-column layout: project list (fills) | detail panel (280 px) ────
+    // Per MIGRATION §3.1. Selection in the list fills the detail panel, where
+    // metadata + Open + inline APK build live.
+    const float detailW = 300.f;
+    const float listW   = std::max(200.f,
+        ImGui::GetContentRegionAvail().x - detailW
+        - ImGui::GetStyle().ItemSpacing.x);
+    const float colsH   = std::max(160.f, ImGui::GetContentRegionAvail().y);
 
-    int visibleCount = 0;
-    for (size_t i = 0; i < m_projects.size(); ++i) {
-        const auto& proj = m_projects[i];
-        if (!query.empty()) {
-            std::string lower = proj.name;
-            std::transform(lower.begin(), lower.end(), lower.begin(),
-                           [](unsigned char c) { return (char)std::tolower(c); });
-            if (lower.find(query) == std::string::npos) continue;
-        }
-        ++visibleCount;
+    ImGui::BeginChild("##hub_list", ImVec2(listW, colsH), true,
+                      ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_HorizontalScrollbar);
+    {
+        // Case-insensitive substring match against project name.
+        std::string query = m_searchBuf;
+        std::transform(query.begin(), query.end(), query.begin(),
+                       [](unsigned char c) { return (char)std::tolower(c); });
 
-        ImGui::PushID((int)i);
-        const bool selected = (int)i == m_selectedIdx;
-
-        const ImVec2 rowPos = ImGui::GetCursorScreenPos();
-        const float  rowW   = ImGui::GetContentRegionAvail().x;
-        const ImVec2 rowSize(rowW, 56.f);
-
-        // Selection highlight overlay (drawn behind the interactive row).
-        if (selected) {
-            ImDrawList* dl = ImGui::GetWindowDrawList();
-            dl->AddRectFilled(rowPos,
-                              ImVec2(rowPos.x + rowW, rowPos.y + rowSize.y),
-                              IM_COL32(0, 120, 200, 70), 6.f);
-            dl->AddRect(rowPos,
-                        ImVec2(rowPos.x + rowW, rowPos.y + rowSize.y),
-                        IM_COL32(0, 210, 255, 255), 6.f, 0, 2.f);
-            dl->AddRectFilled(rowPos,
-                              ImVec2(rowPos.x + 4, rowPos.y + rowSize.y),
-                              IM_COL32(255, 80, 200, 255));
-        }
-
-        bool clicked = ImGui::Selectable("##proj_row", selected,
-                                          ImGuiSelectableFlags_AllowDoubleClick,
-                                          rowSize);
-        bool dbl = clicked && ImGui::IsMouseDoubleClicked(0);
-
-        // Overlay row content.
-        ImGui::SetCursorScreenPos(ImVec2(rowPos.x + 14, rowPos.y + 8));
-        ImGui::Text("%s", proj.name.c_str());
-        ImGui::SetCursorScreenPos(ImVec2(rowPos.x + 14, rowPos.y + 30));
-        ImGui::TextDisabled("v%s   |   Modified: %s",
-                            proj.version.c_str(),
-                            proj.lastModified.empty() ? "-" : proj.lastModified.c_str());
-
-        // Reset cursor below the row so ImGui lays out the next item correctly.
-        ImGui::SetCursorScreenPos(ImVec2(rowPos.x, rowPos.y + rowSize.y + 4));
-
-        if (clicked) {
-            m_selectedIdx = (int)i;
-            if (dbl && engine) {
-                m_selectedProject = proj;
-                m_projectSelected = true;
-                engine->openProject(proj.path);
-                engine->startScreenEditor().load(proj.path);
-                engine->switchLayer(EditorLayer::StartScreen);
-                if (m_launchCallback) m_launchCallback(proj);
+        int visibleCount = 0;
+        for (size_t i = 0; i < m_projects.size(); ++i) {
+            const auto& proj = m_projects[i];
+            if (!query.empty()) {
+                std::string lower = proj.name;
+                std::transform(lower.begin(), lower.end(), lower.begin(),
+                               [](unsigned char c) { return (char)std::tolower(c); });
+                if (lower.find(query) == std::string::npos) continue;
             }
+            // Mode filter: 0 = Drop2D, 1 = Drop3D, 2 = ScanLine, 3 = Circle.
+            if (m_modeFilter >= 0) {
+                int rowIdx;
+                switch (proj.gameMode) {
+                    case GameModeType::DropNotes:
+                        rowIdx = (proj.gameDim == DropDimension::ThreeD) ? 1 : 0; break;
+                    case GameModeType::ScanLine: rowIdx = 2; break;
+                    case GameModeType::Circle:   rowIdx = 3; break;
+                    default: rowIdx = 0; break;
+                }
+                if (rowIdx != m_modeFilter) continue;
+            }
+            ++visibleCount;
+
+            ImGui::PushID((int)i);
+            const bool selected = (int)i == m_selectedIdx;
+
+            const ImVec2 rowPos = ImGui::GetCursorScreenPos();
+            const float  rowW   = ImGui::GetContentRegionAvail().x;
+            const ImVec2 rowSize(rowW, 56.f);
+
+            if (selected) {
+                ImDrawList* dl = ImGui::GetWindowDrawList();
+                dl->AddRectFilled(rowPos,
+                                  ImVec2(rowPos.x + rowW, rowPos.y + rowSize.y),
+                                  ui::tokens::ToU32(ui::tokens::WithAlpha(ui::tokens::Cyan, 0.10f)), 6.f);
+                dl->AddRect(rowPos,
+                            ImVec2(rowPos.x + rowW, rowPos.y + rowSize.y),
+                            ui::tokens::ToU32(ui::tokens::Cyan), 6.f, 0, 1.5f);
+                dl->AddRectFilled(rowPos,
+                                  ImVec2(rowPos.x + 3, rowPos.y + rowSize.y),
+                                  ui::tokens::ToU32(ui::tokens::Cyan));
+            }
+
+            bool clicked = ImGui::Selectable("##proj_row", selected,
+                                              ImGuiSelectableFlags_AllowDoubleClick,
+                                              rowSize);
+            bool dbl = clicked && ImGui::IsMouseDoubleClicked(0);
+
+            ImGui::SetCursorScreenPos(ImVec2(rowPos.x + 14, rowPos.y + 8));
+            ImGui::Text("%s", proj.name.c_str());
+            ImGui::SetCursorScreenPos(ImVec2(rowPos.x + 14, rowPos.y + 30));
+            ui::PushMono();
+            ImGui::TextDisabled("Projects/%s/  |  v%s  |  %s",
+                                proj.name.c_str(),
+                                proj.version.c_str(),
+                                proj.lastModified.empty() ? "-" : proj.lastModified.c_str());
+            ui::PopMono();
+
+            // Mode pill (right-aligned).
+            const char* modeLabel = "Drop 2D";
+            ImVec4 modeColor = ui::tokens::Cyan;
+            switch (proj.gameMode) {
+                case GameModeType::DropNotes:
+                    if (proj.gameDim == DropDimension::ThreeD) {
+                        modeLabel = "Drop 3D"; modeColor = ui::tokens::Magenta;
+                    } else {
+                        modeLabel = "Drop 2D"; modeColor = ui::tokens::Cyan;
+                    } break;
+                case GameModeType::ScanLine:
+                    modeLabel = "Scan Line"; modeColor = ui::tokens::Amber; break;
+                case GameModeType::Circle:
+                    modeLabel = "Circle";    modeColor = ui::tokens::Lime;  break;
+            }
+            const float pillW = ImGui::CalcTextSize(modeLabel).x + 16.f;
+            ImGui::SetCursorScreenPos(ImVec2(rowPos.x + rowW - pillW - 16.f,
+                                              rowPos.y + (rowSize.y - 18.f) * 0.5f));
+            ui::Pill(modeLabel, modeColor, /*solid*/ false);
+
+            ImGui::SetCursorScreenPos(ImVec2(rowPos.x, rowPos.y + rowSize.y + 4));
+
+            if (clicked) {
+                m_selectedIdx = (int)i;
+                if (dbl && engine) {
+                    m_selectedProject = proj;
+                    m_projectSelected = true;
+                    engine->openProject(proj.path);
+                    engine->startScreenEditor().load(proj.path);
+                    engine->switchLayer(EditorLayer::StartScreen);
+                    if (m_launchCallback) m_launchCallback(proj);
+                }
+            }
+
+            ImGui::PopID();
         }
 
-        ImGui::PopID();
+        if (visibleCount == 0) {
+            ImGui::TextDisabled("No projects match '%s'.", m_searchBuf);
+        }
     }
+    ImGui::EndChild();
 
-    if (visibleCount == 0) {
-        ImGui::TextDisabled("No projects match '%s'.", m_searchBuf);
+    // ── Detail panel (right) ────────────────────────────────────────────────
+    ImGui::SameLine();
+    ImGui::BeginChild("##hub_detail", ImVec2(detailW, colsH), true,
+                      ImGuiWindowFlags_NoScrollbar);
+    {
+        const bool hasSel = m_selectedIdx >= 0
+                            && m_selectedIdx < (int)m_projects.size();
+        if (!hasSel) {
+            ImGui::TextDisabled("Select a project to see details.");
+        } else {
+            const ProjectInfo& sel = m_projects[m_selectedIdx];
+
+            // Header tile: name + mode subtitle (mirrors React mock).
+            ImGui::Text("%s", sel.name.c_str());
+            const char* modeLabel = "Drop 2D";
+            switch (sel.gameMode) {
+                case GameModeType::DropNotes:
+                    modeLabel = (sel.gameDim == DropDimension::ThreeD) ? "Drop 3D" : "Drop 2D"; break;
+                case GameModeType::ScanLine: modeLabel = "Scan Line"; break;
+                case GameModeType::Circle:   modeLabel = "Circle";    break;
+            }
+            ImGui::TextDisabled("%s  |  %d songs", modeLabel, sel.songCount);
+            ImGui::Spacing();
+
+            if (ui::SectionHeader("Metadata")) {
+                auto kv = [](const char* k, const char* v) {
+                    ImGui::TextDisabled("%s", k);
+                    ImGui::SameLine(96.f);
+                    ui::PushMono();
+                    ImGui::TextWrapped("%s", v && *v ? v : "-");
+                    ui::PopMono();
+                };
+                kv("Version",      sel.version.c_str());
+                kv("Default chart",sel.defaultChart.c_str());
+                kv("Shader path",  sel.shaderPath.c_str());
+                kv("Last opened",  sel.lastModified.c_str());
+                kv("Path",         sel.path.c_str());
+                ImGui::Spacing();
+            }
+            ImGui::Spacing();
+            ImGui::Separator();
+            ImGui::Spacing();
+
+            // Open Project — primary action.
+            if (ImGui::Button(("Open " + sel.name).c_str(),
+                              ImVec2(-1, 32))) {
+                m_selectedProject = sel;
+                m_projectSelected = true;
+                if (engine) {
+                    engine->openProject(sel.path);
+                    engine->startScreenEditor().load(sel.path);
+                    engine->switchLayer(EditorLayer::StartScreen);
+                }
+                if (m_launchCallback) m_launchCallback(sel);
+            }
+            ImGui::Spacing();
+
+            // Inline APK build (no popup).
+            if (m_apkRunning) ImGui::BeginDisabled();
+            ImGui::PushStyleColor(ImGuiCol_Button,
+                ui::tokens::WithAlpha(ui::tokens::Amber, 0.85f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ui::tokens::Amber);
+            ImGui::PushStyleColor(ImGuiCol_Text,
+                ImVec4(0.f, 0.f, 0.f, 1.f));
+            if (ImGui::Button("Build APK", ImVec2(-1, 26)))
+                startApkBuild(sel);
+            ImGui::PopStyleColor(3);
+            if (m_apkRunning) ImGui::EndDisabled();
+
+            ImGui::Spacing();
+            renderApkPanel();
+        }
     }
+    ImGui::EndChild();
 
     ImGui::End();
 
     renderCreateDialog(engine);
     renderAddFileDialog();
-    renderApkDialog();
 }
 
 // ── import existing project by path ──────────────────────────────────────────
@@ -684,9 +879,8 @@ void ProjectHub::startApkBuild(const ProjectInfo& proj) {
     });
 }
 
-void ProjectHub::renderApkDialog() {
-    if (!m_showApkDialog) return;
-
+void ProjectHub::renderApkPanel() {
+    // Reap the build future first so status flips before we render.
     if (m_apkRunning && m_apkFuture.valid() &&
         m_apkFuture.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
         m_apkExitCode = m_apkFuture.get();
@@ -701,56 +895,55 @@ void ProjectHub::renderApkDialog() {
         }
     }
 
-    ImVec2 center{ImGui::GetIO().DisplaySize.x * 0.5f,
-                  ImGui::GetIO().DisplaySize.y * 0.5f};
-    ImGui::SetNextWindowPos(center, ImGuiCond_Always, ImVec2(0.5f, 0.5f));
-    ImGui::SetNextWindowSize(ImVec2(560, 240), ImGuiCond_Always);
-    ImGui::Begin("Build APK", nullptr,
-                 ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
-                 ImGuiWindowFlags_NoCollapse);
+    using namespace ui::tokens;
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, BgPanel);
+    ImGui::BeginChild("##apk_panel",
+                      ImVec2(0, 168), true,
+                      ImGuiWindowFlags_NoScrollbar);
+    {
+        ImGui::TextDisabled("PACKAGE APK");
+        ImGui::Separator();
 
-    ImGui::Text("Project: %s", m_apkProjectName.c_str());
-    ImGui::Text("Output:  %s", m_apkOutputPath.c_str());
-    ImGui::Separator();
-    ImGui::Spacing();
-
-    if (m_apkRunning) {
-        ImGui::TextColored(ImVec4(1.f, 0.85f, 0.2f, 1.f),
-                           "Building... (running Gradle, this can take a few minutes)");
-        ImGui::Spacing();
-        ImGui::TextDisabled("Log: %s", m_apkLogPath.c_str());
-    } else if (m_apkExitCode == 0) {
-        ImGui::TextColored(ImVec4(0.3f, 1.f, 0.3f, 1.f), "BUILD SUCCESSFUL");
-        ImGui::Spacing();
-        ImGui::TextWrapped("APK saved to:\n  %s", m_apkOutputPath.c_str());
-        ImGui::Spacing();
-#ifdef _WIN32
-        if (ImGui::Button("Show in Explorer", ImVec2(160, 28))) {
-            std::string arg = "/select,\"" + m_apkOutputPath + "\"";
-            ShellExecuteA(nullptr, "open", "explorer.exe", arg.c_str(), nullptr, SW_SHOWNORMAL);
+        if (m_apkProjectName.empty()) {
+            ImGui::TextWrapped("Build an Android APK from the selected project. "
+                               "Output lands under <project>/build/.");
+        } else {
+            ImGui::Text("Project: %s", m_apkProjectName.c_str());
+            if (!m_apkOutputPath.empty())
+                ImGui::TextDisabled("Out: %s", m_apkOutputPath.c_str());
         }
-        ImGui::SameLine();
-#endif
-    } else {
-        ImGui::TextColored(ImVec4(1.f, 0.35f, 0.35f, 1.f),
-                           "BUILD FAILED (exit %d)", m_apkExitCode);
         ImGui::Spacing();
-        ImGui::TextWrapped("See log for details:\n  %s", m_apkLogPath.c_str());
-        ImGui::Spacing();
+
+        if (m_apkRunning) {
+            ImGui::TextColored(Amber,
+                               "Building... (running Gradle)");
+            if (!m_apkLogPath.empty())
+                ImGui::TextDisabled("Log: %s", m_apkLogPath.c_str());
+        } else if (!m_apkProjectName.empty() && m_apkExitCode == 0
+                   && !m_apkOutputPath.empty()) {
+            ImGui::TextColored(Lime, "BUILD SUCCESSFUL");
+            ImGui::TextDisabled("%s", m_apkOutputPath.c_str());
 #ifdef _WIN32
-        if (ImGui::Button("Open Log", ImVec2(160, 28))) {
-            ShellExecuteA(nullptr, "open", m_apkLogPath.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
-        }
-        ImGui::SameLine();
+            if (ImGui::Button("Show in Explorer", ImVec2(-1, 26))) {
+                std::string arg = "/select,\"" + m_apkOutputPath + "\"";
+                ShellExecuteA(nullptr, "open", "explorer.exe",
+                              arg.c_str(), nullptr, SW_SHOWNORMAL);
+            }
 #endif
+        } else if (!m_apkProjectName.empty() && m_apkExitCode != 0) {
+            ImGui::TextColored(Red, "BUILD FAILED (exit %d)", m_apkExitCode);
+            if (!m_apkLogPath.empty())
+                ImGui::TextDisabled("Log: %s", m_apkLogPath.c_str());
+#ifdef _WIN32
+            if (ImGui::Button("Open Log", ImVec2(-1, 26))) {
+                ShellExecuteA(nullptr, "open", m_apkLogPath.c_str(),
+                              nullptr, nullptr, SW_SHOWNORMAL);
+            }
+#endif
+        } else {
+            ImGui::TextDisabled("Idle. Click Build to package.");
+        }
     }
-
-    bool canClose = !m_apkRunning;
-    if (!canClose) ImGui::BeginDisabled();
-    if (ImGui::Button("Close", ImVec2(110, 28))) {
-        m_showApkDialog = false;
-    }
-    if (!canClose) ImGui::EndDisabled();
-
-    ImGui::End();
+    ImGui::EndChild();
+    ImGui::PopStyleColor();
 }

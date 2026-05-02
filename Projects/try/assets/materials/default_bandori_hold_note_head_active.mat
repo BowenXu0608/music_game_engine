@@ -1,0 +1,8 @@
+{
+  "name": "default_bandori_hold_note_head_active",
+  "kind": "glow",
+  "tint": [0.3, 0.8, 1, 1],
+  "params": [1, 0, 0, 0],
+  "targetMode": "bandori",
+  "targetSlot": "hold_note_head_active"
+}

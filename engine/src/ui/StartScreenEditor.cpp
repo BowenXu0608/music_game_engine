@@ -1,4 +1,5 @@
 #include "StartScreenEditor.h"
+#include "Widgets.h"
 #include "engine/Engine.h"
 #include "renderer/vulkan/VulkanContext.h"
 #include "renderer/vulkan/BufferManager.h"
@@ -418,62 +419,196 @@ void StartScreenEditor::render(Engine* engine) {
         ImGui::SetNextWindowPos(ImVec2(0, 0));
         ImGui::SetNextWindowSize(ImVec2(ds.x, ds.y));
     }
-    ImGui::Begin("Start Screen Editor", nullptr,
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
+    ImGui::Begin("##start_screen_editor", nullptr,
                  ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse |
-                 ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoBringToFrontOnFocus);
+                 ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoTitleBar |
+                 ImGuiWindowFlags_NoBringToFrontOnFocus);
+    ImGui::PopStyleVar();
 
+    // Top bar matching MIGRATION mock — gradient logo + crumbs +
+    // back-to-Hub / forward-to-Music-Selection / Test Game.
+    {
+        std::string projName = m_projectPath;
+        auto slash = projName.find_last_of("/\\");
+        if (slash != std::string::npos) projName = projName.substr(slash + 1);
+        if (projName.empty()) projName = "Start Screen";
+        ui::TopBar({projName.c_str(), "Start Screen"}, [&]{
+            if (ui::TopNavBack("Hub"))
+                if (engine) engine->switchLayer(EditorLayer::ProjectHub);
+            ImGui::SameLine(0.f, 4.f);
+            if (ui::TopNavForward("Music Selection")) {
+                if (engine) {
+                    engine->musicSelectionEditor().load(m_projectPath);
+                    engine->switchLayer(EditorLayer::MusicSelection);
+                }
+            }
+            ImGui::SameLine(0.f, 16.f);
+            if (ui::TopTestGame())
+                if (engine) engine->enterTestMode(EditorLayer::StartScreen);
+        });
+    }
+
+    using namespace ui::tokens;
     ImVec2 contentSize = ImGui::GetContentRegionAvail();
     const float splitterThick = 4.f;
-    const float navH  = 36.f;
-    // Copilot sidebar reservation - body row only, Assets strip full width.
     const float copilotW = engine ? engine->songEditor().copilotOverlayWidth() : 0.f;
     const float bodyW    = std::max(200.f, contentSize.x - copilotW);
-    // Pinned bottom Assets strip - same pattern as SongEditor.
+
+    // Pinned bottom Assets strip (collapsed by default — the mock doesn't
+    // show an asset rail on this page; users still want it collapsible).
     const float assetsHeaderH = ImGui::GetFrameHeightWithSpacing();
     float assetsH = m_assetsBarOpen
         ? std::clamp(m_assetsBarH, 80.f, contentSize.y * 0.5f)
         : assetsHeaderH;
-    float totalH  = std::max(100.f, contentSize.y - navH - 8.f - assetsH - 4.f);
-    float topH    = totalH;
-    float previewW = bodyW * m_hSplit - splitterThick * 0.5f;
-    float propsW   = bodyW * (1.f - m_hSplit) - splitterThick * 0.5f;
+    float topH    = std::max(100.f, contentSize.y - assetsH - 4.f);
 
-    // Tell the overlay how many pixels to leave free at the bottom. Computed
-    // from stable inputs (no GetCursorScreenPos dependency) so the overlay
-    // height is consistent across page transitions and does not snap when
-    // navigating in or out of this page.
-    if (engine) {
-        engine->songEditor().setOverlayBottomReserve(navH + 8.f + assetsH + 4.f);
+    // Three-column layout per MIGRATION §3.2: Hierarchy | Preview | Props.
+    const float hierW  = std::min(220.f, bodyW * 0.20f);
+    const float propsW = std::min(m_propertiesW, bodyW * 0.32f);
+    const float previewW = std::max(200.f,
+        bodyW - hierW - propsW - splitterThick * 2.f);
+
+    if (engine)
+        engine->songEditor().setOverlayBottomReserve(assetsH + 4.f);
+
+    // The mock renders all three editor columns on the same pure-black
+    // canvas — only thin borders divide them. Push ChildBg=BgVoid so the
+    // BeginChild calls below don't paint a lifted-gray panel underneath.
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, BgVoid);
+
+    // ── Hierarchy column ─────────────────────────────────────────────────
+    ImGui::BeginChild("##sshier", ImVec2(hierW, topH), true);
+    {
+        // Tab strip (single tab, mirrors mock).
+        if (ImGui::BeginTabBar("##sshier_tabs")) {
+            if (ImGui::BeginTabItem("Hierarchy")) ImGui::EndTabItem();
+            ImGui::EndTabBar();
+        }
+        ImGui::Spacing();
+
+        // Section title + 5 nav items with chevron / icon-dot / label.
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        ImGui::TextColored(TextLow, "START SCREEN");
+        ImGui::Spacing();
+
+        enum class HierIcon { Image, Text, Sparkle, Audio };
+        struct HierEntry { HierItem id; const char* label; HierIcon icon; };
+        const HierEntry entries[] = {
+            { HierItem::Background, "Background",        HierIcon::Image   },
+            { HierItem::Logo,       "Logo",              HierIcon::Text    },
+            { HierItem::TapText,    "Tap Text",          HierIcon::Text    },
+            { HierItem::Transition, "Transition Effect", HierIcon::Sparkle },
+            { HierItem::Audio,      "Audio",             HierIcon::Audio   },
+        };
+        auto drawHierIcon = [&](HierIcon ic, ImVec2 c, ImU32 col) {
+            // 14 px icons drawn with primitives — keeps the file glyph-clean
+            // (CP936 rejection) and stays sharp at any DPI.
+            switch (ic) {
+                case HierIcon::Image: {
+                    const ImVec2 a{c.x - 7.f, c.y - 5.f}, b{c.x + 7.f, c.y + 5.f};
+                    dl->AddRect(a, b, col, 1.5f, 0, 1.4f);
+                    dl->AddCircleFilled({c.x - 3.f, c.y - 1.5f}, 1.4f, col);
+                    dl->AddTriangleFilled({c.x - 4.f, c.y + 4.f},
+                                          {c.x + 1.f, c.y - 1.f},
+                                          {c.x + 6.f, c.y + 4.f}, col);
+                    break;
+                }
+                case HierIcon::Text: {
+                    // Vertical stroke "I" with serifs.
+                    dl->AddLine({c.x, c.y - 6.f}, {c.x, c.y + 6.f}, col, 1.5f);
+                    dl->AddLine({c.x - 4.f, c.y - 6.f}, {c.x + 4.f, c.y - 6.f}, col, 1.5f);
+                    dl->AddLine({c.x - 4.f, c.y + 6.f}, {c.x + 4.f, c.y + 6.f}, col, 1.5f);
+                    break;
+                }
+                case HierIcon::Sparkle: {
+                    dl->AddLine({c.x, c.y - 7.f}, {c.x, c.y + 7.f}, col, 1.4f);
+                    dl->AddLine({c.x - 7.f, c.y}, {c.x + 7.f, c.y}, col, 1.4f);
+                    dl->AddLine({c.x - 5.f, c.y - 5.f}, {c.x + 5.f, c.y + 5.f}, col, 1.0f);
+                    dl->AddLine({c.x - 5.f, c.y + 5.f}, {c.x + 5.f, c.y - 5.f}, col, 1.0f);
+                    break;
+                }
+                case HierIcon::Audio: {
+                    // Speaker triangle + arcs.
+                    dl->AddTriangleFilled({c.x - 5.f, c.y - 3.f},
+                                          {c.x - 5.f, c.y + 3.f},
+                                          {c.x + 1.f, c.y + 0.f}, col);
+                    dl->AddCircle({c.x + 3.f, c.y}, 4.5f, col, 0, 1.2f);
+                    dl->AddCircle({c.x + 3.f, c.y}, 7.5f, col, 0, 1.0f);
+                    break;
+                }
+            }
+        };
+        for (const auto& e : entries) {
+            const bool active = (m_hierActive == e.id);
+            const ImVec2 rowMin = ImGui::GetCursorScreenPos();
+            const float  rowW   = ImGui::GetContentRegionAvail().x;
+            const float  rowH   = 28.f;
+            const ImVec2 rowMax = {rowMin.x + rowW, rowMin.y + rowH};
+            if (active) {
+                dl->AddRectFilled(rowMin, rowMax,
+                                  ToU32(WithAlpha(Cyan, 0.10f)), 4.f);
+                dl->AddRectFilled(rowMin, {rowMin.x + 2.f, rowMax.y},
+                                  ToU32(Cyan));
+            }
+            ImGui::PushID((int)e.id);
+            if (ImGui::InvisibleButton("##hier_row", {rowW, rowH})) {
+                m_hierActive = e.id;
+                m_hierJumpTo = e.id;
+                m_hierJump   = true;
+            }
+            const bool hovered = ImGui::IsItemHovered();
+            ImGui::PopID();
+            if (!active && hovered) {
+                dl->AddRectFilled(rowMin, rowMax,
+                                  ToU32(WithAlpha(Cyan, 0.04f)), 4.f);
+            }
+            const ImU32 iconCol = ToU32(active ? Cyan
+                                               : (hovered ? TextMid : TextLow));
+            drawHierIcon(e.icon, {rowMin.x + 18.f, rowMin.y + rowH * 0.5f}, iconCol);
+            const ImU32 textCol = ToU32(active ? TextHi
+                                               : (hovered ? TextMid : TextLow));
+            dl->AddText({rowMin.x + 36.f,
+                         rowMin.y + (rowH - ImGui::GetFontSize()) * 0.5f},
+                        textCol, e.label);
+        }
     }
+    ImGui::EndChild();
+    ImGui::SameLine();
 
-    // ── Top row: Preview | vsplitter | Properties ─────────────────────────────
-    ImGui::BeginChild("Preview", ImVec2(previewW, topH), true);
+    // ── Preview column ───────────────────────────────────────────────────
+    ImGui::BeginChild("##sspreview", ImVec2(previewW, topH), true);
     renderPreview();
     ImGui::EndChild();
-
     ImGui::SameLine();
 
-    // Vertical splitter
-    ImGui::InvisibleButton("vsplit", ImVec2(splitterThick, topH));
-    if (ImGui::IsItemActive()) {
-        m_hSplit += ImGui::GetIO().MouseDelta.x / std::max(1.f, bodyW);
-        m_hSplit = std::clamp(m_hSplit, 0.2f, 0.8f);
+    // ── Properties / Materials column ────────────────────────────────────
+    ImGui::BeginChild("##ssprops", ImVec2(propsW, topH), true);
+    {
+        if (ImGui::BeginTabBar("##ssprops_tabs",
+                               ImGuiTabBarFlags_NoCloseWithMiddleMouseButton)) {
+            ImGuiTabItemFlags propsFlags = ImGuiTabItemFlags_None;
+            ImGuiTabItemFlags matsFlags  = ImGuiTabItemFlags_None;
+            if (m_materialsTabRequested) {
+                matsFlags |= ImGuiTabItemFlags_SetSelected;
+                m_materialsTabRequested = false;
+            }
+            if (ImGui::BeginTabItem("Properties", nullptr, propsFlags)) {
+                m_rightTab = RightTab::Properties;
+                renderProperties();
+                ImGui::EndTabItem();
+            }
+            if (ImGui::BeginTabItem("Materials", nullptr, matsFlags)) {
+                m_rightTab = RightTab::Materials;
+                renderMaterials(engine, /*hideSelector=*/false);
+                ImGui::EndTabItem();
+            }
+            ImGui::EndTabBar();
+        }
     }
-    if (ImGui::IsItemHovered() || ImGui::IsItemActive())
-        ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
-
-    ImGui::SameLine();
-
-    ImGui::BeginChild("Properties", ImVec2(propsW, topH), true);
-    // Material builder moved to the SongEditor (gameplay) page — this
-    // panel is purely start-screen properties now.
-    renderProperties();
-    // Request flag is obsolete; swallow any stale true so the click on a
-    // MAT tile no longer tries to open a non-existent tab.
-    m_materialsTabRequested = false;
     ImGui::EndChild();
 
-    // ── Bottom strip: pinned Assets (always docked, collapsible) ────────────
+    // ── Bottom strip: pinned Assets (collapsed default) ───────────────────
     ImGui::BeginChild("Assets", ImVec2(contentSize.x, assetsH), true);
     {
         ImGui::SetNextItemOpen(m_assetsBarOpen, ImGuiCond_Always);
@@ -484,28 +619,11 @@ void StartScreenEditor::render(Engine* engine) {
     }
     ImGui::EndChild();
 
-    // ── Nav bar ───────────────────────────────────────────────────────────────
-    if (ImGui::Button("< Back")) {
-        if (engine) engine->switchLayer(EditorLayer::ProjectHub);
-    }
-    ImGui::SameLine();
-    if (ImGui::Button("Save")) {
-        save();
-        m_statusMsg   = "Saved!";
-        m_statusTimer = 2.f;
-    }
     if (m_statusTimer > 0.f) {
-        ImGui::SameLine();
-        ImGui::TextColored(ImVec4(0.4f, 1.f, 0.4f, 1.f), "%s", m_statusMsg.c_str());
+        ImGui::TextColored(Lime, "%s", m_statusMsg.c_str());
     }
-    ImGui::SameLine();
-    ImGui::SetCursorPosX(contentSize.x - 200.f);
-    if (ImGui::Button("Next: Music Selection >")) {
-        if (engine) {
-            engine->musicSelectionEditor().load(m_projectPath);
-            engine->switchLayer(EditorLayer::MusicSelection);
-        }
-    }
+
+    ImGui::PopStyleColor();   // ChildBg = BgVoid
 
     ImGui::End();
 }
@@ -513,9 +631,11 @@ void StartScreenEditor::render(Engine* engine) {
 // ── renderPreview ─────────────────────────────────────────────────────────────
 
 void StartScreenEditor::renderPreview() {
+    using namespace ui::tokens;
 
-    // Aspect-ratio controls row. Device frame follows the author's choice so
-    // what they see here matches what ships on the target phone/tablet.
+    // Aspect-ratio controls — original engine widget (preserves preset combo
+    // + W:H numeric inputs). Per user request, the canvas ratio handling
+    // stays exactly as it was before the layout pass.
     if (m_engine)
         previewAspect::renderControls(m_engine->previewAspect());
     ImGui::Spacing();
@@ -558,9 +678,35 @@ void StartScreenEditor::renderPreview() {
                         IM_COL32(180, 180, 180, 200), label.c_str());
             break;
         }
-        default:
-            dl->AddRectFilled(p, ImVec2(p.x + pw, p.y + ph), IM_COL32(40, 40, 50, 255));
+        default: {
+            // Hero gradient backdrop matching React mock — radial dark cyan
+            // top-left, vertical fade to black, plus two soft glow blobs.
+            const ImVec2 br = {p.x + pw, p.y + ph};
+            dl->AddRectFilledMultiColor(p, br,
+                IM_COL32(10, 5, 24, 255),  IM_COL32(10, 5, 24, 255),
+                IM_COL32(0, 0, 0, 255),    IM_COL32(0, 0, 0, 255));
+            const float blobR1 = pw * 0.30f;
+            const ImVec2 blob1{p.x + pw * 0.18f, p.y + ph * 0.22f};
+            for (int i = 8; i > 0; --i) {
+                const float r = blobR1 * (i / 8.f);
+                dl->AddCircleFilled(blob1, r,
+                    IM_COL32(34, 230, 255, 6 + i * 3));
+            }
+            const float blobR2 = pw * 0.28f;
+            const ImVec2 blob2{p.x + pw * 0.85f, p.y + ph * 0.78f};
+            for (int i = 8; i > 0; --i) {
+                const float r = blobR2 * (i / 8.f);
+                dl->AddCircleFilled(blob2, r,
+                    IM_COL32(255, 61, 240, 5 + i * 2));
+            }
+            const ImU32 gridCol = IM_COL32(34, 230, 255, 12);
+            const float gridStep = std::max(28.f, pw / 30.f);
+            for (float x = p.x; x < br.x; x += gridStep)
+                dl->AddLine({x, p.y}, {x, br.y}, gridCol, 1.f);
+            for (float y = p.y; y < br.y; y += gridStep)
+                dl->AddLine({p.x, y}, {br.x, y}, gridCol, 1.f);
             break;
+        }
     }
 
     // Logo
@@ -639,6 +785,90 @@ void StartScreenEditor::renderPreview() {
                 IM_COL32(255, 255, 255, 255), m_tapText);
 
     dl->PopClipRect();
+
+    // ── Overlay chrome (matches MIGRATION mock §3.2) ─────────────────────
+    using namespace ui::tokens;
+
+    // Aspect/resolution badge — top-left.
+    char aspectLabel[48] = "16:9 - 1920x1080";
+    if (m_engine) {
+        const auto& a = m_engine->previewAspect();
+        snprintf(aspectLabel, sizeof(aspectLabel),
+                 "%d:%d - %dx%d", a.w, a.h, (int)pw, (int)ph);
+    }
+    {
+        ui::PushMono();
+        ImVec2 sz = ImGui::CalcTextSize(aspectLabel);
+        const ImVec2 bMin{p.x + 8.f, p.y + 8.f};
+        const ImVec2 bMax{bMin.x + sz.x + 12.f, bMin.y + sz.y + 6.f};
+        dl->AddRectFilled(bMin, bMax, IM_COL32(0, 0, 0, 160), 4.f);
+        dl->AddRect(bMin, bMax, ToU32(BorderHi), 4.f);
+        dl->AddText({bMin.x + 6.f, bMin.y + 3.f},
+                    ToU32(TextMid), aspectLabel);
+        ui::PopMono();
+    }
+
+    // Zoom % readout — top-right.
+    {
+        char zoom[24];
+        snprintf(zoom, sizeof(zoom), "%d%%", (int)(m_previewZoom * 100.f));
+        ui::PushMono();
+        ImVec2 sz = ImGui::CalcTextSize(zoom);
+        const ImVec2 bMax{p.x + pw - 8.f, p.y + 8.f + sz.y + 6.f};
+        const ImVec2 bMin{bMax.x - sz.x - 12.f, p.y + 8.f};
+        dl->AddRectFilled(bMin, bMax, IM_COL32(0, 0, 0, 160), 4.f);
+        dl->AddRect(bMin, bMax, ToU32(BorderHi), 4.f);
+        dl->AddText({bMin.x + 6.f, bMin.y + 3.f},
+                    ToU32(TextHi), zoom);
+        ui::PopMono();
+    }
+
+    // Selection box around the active hierarchy item — dashed cyan with
+    // 4 corner dots. Matches mock's logo-selected look.
+    auto drawSelBox = [&](float ax, float ay, float bx, float by) {
+        const ImU32 sel  = ToU32(Cyan);
+        const ImU32 selH = ToU32(WithAlpha(Cyan, 0.30f));
+        dl->AddRect({ax - 1.f, ay - 1.f}, {bx + 1.f, by + 1.f}, selH, 0.f, 0, 3.f);
+        const float step = 6.f;
+        for (float x = ax; x < bx; x += step * 2.f) {
+            dl->AddLine({std::min(x + step, bx), ay}, {std::min(x + step * 2.f, bx), ay}, sel, 1.f);
+            dl->AddLine({std::min(x + step, bx), by}, {std::min(x + step * 2.f, bx), by}, sel, 1.f);
+        }
+        for (float y = ay; y < by; y += step * 2.f) {
+            dl->AddLine({ax, std::min(y + step, by)}, {ax, std::min(y + step * 2.f, by)}, sel, 1.f);
+            dl->AddLine({bx, std::min(y + step, by)}, {bx, std::min(y + step * 2.f, by)}, sel, 1.f);
+        }
+        const float d = 6.f;
+        for (auto& c : {ImVec2{ax, ay}, ImVec2{bx, ay},
+                        ImVec2{ax, by}, ImVec2{bx, by}}) {
+            dl->AddRectFilled({c.x - d * 0.5f, c.y - d * 0.5f},
+                              {c.x + d * 0.5f, c.y + d * 0.5f}, sel);
+        }
+    };
+    switch (m_hierActive) {
+        case HierItem::Background:
+            drawSelBox(p.x + 4.f, p.y + 4.f, p.x + pw - 4.f, p.y + ph - 4.f);
+            break;
+        case HierItem::Logo: {
+            float lx = p.x + pw * m_logoPos[0];
+            float ly = p.y + ph * m_logoPos[1];
+            float boxW = std::max(80.f, pw * 0.40f * m_logoScale);
+            float boxH = std::max(48.f, ph * 0.18f * m_logoScale);
+            drawSelBox(lx - boxW * 0.5f, ly - boxH * 0.5f,
+                       lx + boxW * 0.5f, ly + boxH * 0.5f);
+            break;
+        }
+        case HierItem::TapText: {
+            float tx = p.x + pw * m_tapTextPos[0];
+            float ty = p.y + ph * m_tapTextPos[1];
+            float boxW = pw * 0.40f;
+            float boxH = (float)m_tapTextSize + 12.f;
+            drawSelBox(tx - boxW * 0.5f, ty - boxH * 0.5f,
+                       tx + boxW * 0.5f, ty + boxH * 0.5f);
+            break;
+        }
+        default: break; // Transition / Audio aren't visually framed.
+    }
 }
 
 // ── renderGamePreview ─────────────────────────────────────────────────────────
@@ -729,28 +959,23 @@ void StartScreenEditor::renderGamePreview(ImVec2 p, ImVec2 size) {
 // ── renderProperties ──────────────────────────────────────────────────────────
 
 void StartScreenEditor::renderProperties() {
-    ImGui::Text("Properties");
-    ImGui::Separator();
+    // The right column tab strip already shows "Properties / Materials" — no
+    // additional title needed here. Each section uses ui::SectionHeader's
+    // right-slot to render a clickable Default pill matching the React mock.
 
-    // Small inline "Default" pill — drawn inside each section body (first
-    // line) so it's fully inside the content region (no scrollbar clipping)
-    // and its click cannot be stolen by the CollapsingHeader's hit area.
-    auto renderDefaultBtn = [&](const char* id, std::function<void()> reset) {
-        ImGui::PushID(id);
-        if (ImGui::SmallButton("Default")) reset();
-        ImGui::PopID();
-        ImGui::SameLine();
-        ImGui::TextDisabled("(reset this section)");
-        ImGui::Spacing();
+    auto sectionDefault = [&](const char* label,
+                              std::function<void()> reset) -> bool {
+        return ui::SectionHeader(label, [&]{
+            if (ui::DefaultPill(label)) reset();
+        });
     };
 
     // ── Background ────────────────────────────────────────────────────────────
-    if (ImGui::CollapsingHeader("Background", ImGuiTreeNodeFlags_DefaultOpen)) {
-        renderDefaultBtn("bgdef", [&]() {
+    if (sectionDefault("Background", [&]{
             m_bgFile[0] = '\0';
             if (m_ctx) unloadBackground(*m_ctx, *m_bufMgr);
             m_bgType = BgType::None;
-        });
+        })) {
         // Drop zone — drag a thumbnail from the asset panel below onto this area
         const float zoneW = ImGui::GetContentRegionAvail().x - 74.f;
         const float zoneH = 54.f;
@@ -802,8 +1027,7 @@ void StartScreenEditor::renderProperties() {
     ImGui::Spacing();
 
     // ── Logo ──────────────────────────────────────────────────────────────────
-    if (ImGui::CollapsingHeader("Logo", ImGuiTreeNodeFlags_DefaultOpen)) {
-        renderDefaultBtn("logodef", [&]() {
+    if (sectionDefault("Logo", [&]{
             m_logoType = LogoType::Text;
             m_logoText[0] = '\0';
             m_logoColor[0] = m_logoColor[1] = m_logoColor[2] = m_logoColor[3] = 1.f;
@@ -817,11 +1041,12 @@ void StartScreenEditor::renderProperties() {
             m_logoGlowRadius = 8.f;
             m_logoImageFile[0] = '\0';
             if (m_ctx) unloadLogoImage(*m_ctx, *m_bufMgr);
-        });
-        const char* logoTypes[] = {"Text", "Image"};
+        })) {
+        ImGui::TextDisabled("TYPE");
         int lt = static_cast<int>(m_logoType);
-        if (ImGui::Combo("Logo Type", &lt, logoTypes, 2))
+        if (ui::SegBar("##logoType", {"Text", "Image"}, &lt))
             m_logoType = static_cast<LogoType>(lt);
+        ImGui::Spacing();
 
         // Hard limits on anything that controls rendered text size. Kept
         // here (not at load/save) so even programmatic edits or stale
@@ -836,9 +1061,9 @@ void StartScreenEditor::renderProperties() {
         if (m_logoType == LogoType::Text) {
             ImGui::InputText("Text##logo", m_logoText, 256);
             // Font Size + Bold on one row; Color on its own row.
-            ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 80.f);
-            ImGui::SliderFloat("##fsize", &m_logoFontSize, 12.f, kLogoFontMax, "%.0f px");
-            ImGui::SameLine();
+            ui::Slider("Font size", &m_logoFontSize, 12.f, kLogoFontMax, " px",
+                       ui::tokens::Cyan);
+            ImGui::Spacing();
             ImGui::Checkbox("Bold", &m_logoBold);
             ImGui::ColorEdit4("Color##logo", m_logoColor,
                               ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_AlphaBar);
@@ -891,8 +1116,13 @@ void StartScreenEditor::renderProperties() {
         }
 
         // Position + Scale on compact rows.
-        ImGui::SliderFloat2("Position##logo", m_logoPos, 0.f, 1.f, "%.2f");
-        ImGui::SliderFloat("Scale##logo", &m_logoScale, 0.1f, kLogoScaleMax, "%.2fx");
+        ui::Slider("X", &m_logoPos[0], 0.f, 1.f, "", ui::tokens::Cyan);
+        ImGui::Spacing();
+        ui::Slider("Y", &m_logoPos[1], 0.f, 1.f, "", ui::tokens::Cyan);
+        ImGui::Spacing();
+        ui::Slider("Scale", &m_logoScale, 0.1f, kLogoScaleMax, "x",
+                   ui::tokens::Cyan);
+        ImGui::Spacing();
         // Glow: single-line toggle with compact color + radius beneath.
         ImGui::Checkbox("Glow / Outline", &m_logoGlow);
         if (m_logoGlow) {
@@ -900,7 +1130,9 @@ void StartScreenEditor::renderProperties() {
             ImGui::ColorEdit4("##glowcol", m_logoGlowColor,
                               ImGuiColorEditFlags_NoInputs |
                               ImGuiColorEditFlags_NoLabel);
-            ImGui::SliderFloat("Glow Radius", &m_logoGlowRadius, 1.f, 32.f, "%.0f");
+            ui::Slider("Glow radius", &m_logoGlowRadius, 1.f, 32.f, "",
+                       ui::tokens::Amber);
+            ImGui::Spacing();
         }
     }
 
@@ -909,31 +1141,42 @@ void StartScreenEditor::renderProperties() {
     // ── Tap Text ──────────────────────────────────────────────────────────────
     // Per user request: only size is editable here. Position + content are
     // fixed (centered, "Tap to Start") so the start screen stays uniform.
-    if (ImGui::CollapsingHeader("Tap Text", ImGuiTreeNodeFlags_DefaultOpen)) {
-        renderDefaultBtn("tapdef", [&]() {
+    if (sectionDefault("Tap Text", [&]{
             std::strcpy(m_tapText, "Tap to Start");
             m_tapTextPos[0] = 0.5f; m_tapTextPos[1] = 0.8f;
             m_tapTextSize = 24;
-        });
+        })) {
         constexpr int kTapMax = 72;
         if (m_tapTextSize > kTapMax) m_tapTextSize = kTapMax;
-        ImGui::SliderInt("Size##tap", &m_tapTextSize, 12, kTapMax, "%d px");
+        float sz = (float)m_tapTextSize;
+        if (ui::Slider("Size", &sz, 12.f, (float)kTapMax, " px", ui::tokens::Cyan))
+            m_tapTextSize = (int)(sz + 0.5f);
+        ImGui::Spacing();
     }
 
     ImGui::Spacing();
 
     // ── Transition ────────────────────────────────────────────────────────────
-    if (ImGui::CollapsingHeader("Transition Effect", ImGuiTreeNodeFlags_DefaultOpen)) {
-        renderDefaultBtn("transdef", [&]() {
+    if (sectionDefault("Transition Effect", [&]{
             m_transition    = TransitionEffect::Fade;
             m_transitionDur = 0.5f;
             m_customScript[0] = '\0';
-        });
-        const char* effects[] = {"Fade to Black", "Slide Left", "Zoom In", "Ripple", "Custom"};
-        int eff = static_cast<int>(m_transition);
-        ImGui::Combo("Effect", &eff, effects, 5);
-        m_transition = static_cast<TransitionEffect>(eff);
-        ImGui::SliderFloat("Duration (s)", &m_transitionDur, 0.1f, 2.f);
+        })) {
+        static const char* fxItems[][2] = {
+            {"fade",   "Fade to Black"},
+            {"slide",  "Slide Left"},
+            {"zoom",   "Zoom In"},
+            {"ripple", "Ripple"},
+            {"custom", "Custom"},
+        };
+        const char* curId = fxItems[static_cast<int>(m_transition)][0];
+        if (ui::Dropdown("##fx", fxItems, 5, &curId)) {
+            for (int i = 0; i < 5; ++i)
+                if (std::strcmp(fxItems[i][0], curId) == 0)
+                    m_transition = static_cast<TransitionEffect>(i);
+        }
+        ui::Slider("Duration", &m_transitionDur, 0.1f, 2.f, " s",
+                   ui::tokens::Magenta);
         if (m_transition == TransitionEffect::Custom) {
             ImGui::InputText("Script Path", m_customScript, 256);
             ImGui::TextDisabled("Lua script receives: progress, tap_x, tap_y");
@@ -943,14 +1186,13 @@ void StartScreenEditor::renderProperties() {
     ImGui::Spacing();
 
     // ── Audio ─────────────────────────────────────────────────────────────────
-    if (ImGui::CollapsingHeader("Audio", ImGuiTreeNodeFlags_DefaultOpen)) {
-        renderDefaultBtn("audiodef", [&]() {
+    if (sectionDefault("Audio", [&]{
             m_bgMusic[0]     = '\0';
             m_tapSfx[0]      = '\0';
             m_bgMusicVolume  = 1.f;
             m_bgMusicLoop    = true;
             m_tapSfxVolume   = 1.f;
-        });
+        })) {
         // helper to draw a small audio drop zone
         auto audioZone = [&](const char* label, char* buf, float& vol, bool* loop) {
             ImGui::TextDisabled("%s", label);
@@ -989,7 +1231,8 @@ void StartScreenEditor::renderProperties() {
             std::string clearId = std::string("Clear##") + label;
             if (ImGui::Button(clearId.c_str())) buf[0] = '\0';
             ImGui::EndGroup();
-            ImGui::SliderFloat((std::string("Volume##") + label).c_str(), &vol, 0.f, 1.f);
+            ui::Slider("Volume", &vol, 0.f, 1.f, "", ui::tokens::Cyan);
+            ImGui::Spacing();
             if (loop) ImGui::Checkbox((std::string("Loop##") + label).c_str(), loop);
             ImGui::Spacing();
         };

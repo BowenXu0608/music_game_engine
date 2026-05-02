@@ -1570,3 +1570,197 @@ Asset tiles in the bottom Assets strip used to hover-tooltip the full relative p
 - `engine/src/ui/MusicSelectionEditor.cpp` — 3 tooltip sites (image, audio, material — both rich and fallback branches).
 - `engine/src/ui/StartScreenEditor.cpp` — 3 tooltip sites (same coverage).
 - `engine/src/ui/SongEditor.cpp` — 3 tooltip sites (same coverage).
+
+---
+
+## 2026-05-02 — UI migration pass against `Downloads/UI_design/` mock
+
+A high-fidelity React mockup of the editor was provided
+(`Downloads/UI_design/`) with a porting guide (`MIGRATION.md`). This
+session was an attempt to bring the C++/Vulkan/ImGui editor's chrome
+into pixel-fidelity with that mock while keeping every existing function,
+dialog, and JSON schema intact (per MIGRATION §5). The full
+implementation plan is preserved verbatim at
+[`ui_migration_plan.md`](ui_migration_plan.md).
+
+### What landed and stuck
+
+The plan's Phases A–G shipped to the `ui-test` branch and survive the
+final revert state of this session:
+
+- **Phase A — `ui::Dropdown` + `ui::Slider`** (`Widgets.{h,cpp}`).
+  Dropdown is a chevroned `BeginCombo` styled with `BgPanel` /
+  `BorderHi` / `TextHi`. Slider draws a custom 6 px track with accent
+  fill from min→value, white thumb with accent halo, and a mono
+  right-aligned readout. Used in StartScreen, MusicSelection, Settings,
+  and SongEditor sliders.
+- **Phase B — Mono font** (`ImGuiLayer.cpp`, `Widgets.h`).
+  `Cousine-Regular.ttf` (already bundled with imgui demo assets) loaded
+  at 13 px as `ui::s_monoFont`. `ui::PushMono()` / `ui::PopMono()`
+  helpers wrap timecodes, paths, and numbers across all editor pages.
+- **Phase C — ProjectHub polish** (`ProjectHub.{h,cpp}`).
+  - New `ProjectInfo` fields: `gameMode`, `gameDim`, `songCount`,
+    populated during `scanProjects()` by parsing the project's
+    `music_selection.json` first song's `gameMode` block.
+  - `m_modeFilter` state drives a filter-pills row (`All / Drop 2D /
+    Drop 3D / Scan Line / Circle`) styled with `ui::Pill`.
+  - Header row with large "Projects" title + mono subtitle (`N
+    projects | last opened X`), right-aligned 220 px search +
+    `Add file` outline + `Create game` cyan-glow primary.
+  - Project rows render a mono path/version/mtime line + right-aligned
+    mode pill.
+  - Detail panel metadata wrapped in `ui::SectionHeader("Metadata")`.
+- **Phase D — StartScreen widget swaps** (`StartScreenEditor.cpp`).
+  All five `CollapsingHeader` calls (Background / Logo / Tap Text /
+  Transition Effect / Audio) replaced with
+  `ui::SectionHeader(label, [&]{ ui::DefaultPill(label); })`.
+  Transition's `ImGui::Combo` replaced with `ui::Dropdown`.
+  Volume / scale / position / glow-radius sliders converted to
+  `ui::Slider`.
+- **Phase E — MusicSelection widget swaps** (`MusicSelectionEditor.cpp`).
+  Charts / Game Mode / HUD `CollapsingHeader` calls replaced with
+  `ui::SectionHeader`. Tracks / sky-height / disk / judgment / HUD
+  sliders converted to `ui::Slider`. Difficulty pills already used
+  `ui::Pill`; restyled to mock's lime/cyan/magenta palette with active =
+  solid + 30% outer glow.
+- **Phase F — SongEditor sidebar polish** (`SongEditor.{h,cpp}`).
+  - 12 `ImGui::CollapsingHeader` call sites in `renderProperties` /
+    `renderGameModeConfig` / `renderNotePage` /
+    `renderMaterialBuilderPage` / `renderAuditPanel` /
+    `renderStylePanel` swapped to `ui::SectionHeader` (Audio, BPM Map,
+    Lane Layout, per-note-type, Playfield, Disk Animation, Scan Line
+    Speed, Judgment & Scoring, HUD, Background, Chart Audit, Style
+    Transfer).
+  - 4-way Game Mode SegBar (`Drop 2D / Drop 3D / Circle / Scan Line`)
+    in `renderGameModeConfig(structureOnly=true)` replaces the original
+    3-button type picker + 2-button dimension picker. Dimension
+    redundancy dropped. `exportAllCharts()` /
+    `reloadChartsForCurrentMode()` invariants preserved.
+  - `renderNoteToolbar`'s `Audit` button right-aligned via the
+    remaining-content-width hack so the order
+    `Marker | <chips> | Analyze · Clr Mrk · Thin · Undo · Place · AI ·
+    Clr Note | Audit` matches MIGRATION §3.4. Audit button restyled to
+    a violet outline-ghost (was inline blue), `Clr Note` to a red
+    outline-ghost (was inline red).
+- **Phase G — Settings: Apply button** (`SettingsPageUI.cpp`).
+  Single `Back` button replaced with `Cancel` (ghost, calls `onBack`)
+  + `Apply` (cyan-glow primary, calls `onSave` then `onBack`). 5
+  sliders converted to `ui::Slider` with section-accent colors. Local
+  `sectionHeader()` helper kept (it provides per-section accent label
+  colors that the bare `ui::SectionHeader` doesn't accept).
+- **Cross-page TopBar wiring** — `ui::TopBar` widget added (gradient
+  cyan→magenta `M` tile + crumbs joined with `>` + right-slot lambda
+  for actions). Helpers: `ui::TopNavBack(label)`,
+  `ui::TopNavForward(label)`, `ui::TopTestGame()`. Wired on
+  ProjectHub, StartScreen, MusicSelection, SongEditor.
+  `NoTitleBar` flag added to all four `ImGui::Begin` calls so the
+  TopBar is the only chrome at the top of each page.
+  `WindowPadding=(0,0)` push around `Begin` so the TopBar sits flush.
+  `WindowBg` set to `BgVoid` (`#000000`) instead of `BgBase` so the
+  page canvas is true black.
+- **Test-Game logic from TopBar in SongEditor** — uses the validated
+  launch path: counts notes per difficulty, shows the "no notes" /
+  "current difficulty empty" error popup, calls `exportAllCharts()` +
+  `m_engine->musicSelectionEditor().save()` + `launchTestProcess()`.
+  Same path as the bottom-bar Test Game button.
+
+### What got reverted at the end of the session
+
+The user repeatedly reported the StartScreen TopBar and chrome as
+visually wrong against the mock. I made several batch-fix attempts;
+each was reverted at the user's request. The reverts include:
+
+- TopBar height bumped 56 → 64 px → reverted to 56.
+- Larger `M` tile (32 px) and `Test Game` padding (22×11) → reverted
+  to 28 px / 16×7.
+- StartScreen aspect bar replaced with segmented `[16:9][16:10][21:9]
+  [Custom]` + zoom controls → reverted to the original
+  `previewAspect::renderControls` (preset combo + numeric inputs).
+- StartScreen Hierarchy header drawn manually as a tab with a
+  cyan-underline + chevron-prefixed `START SCREEN` heading → reverted
+  to plain `BeginTabBar` + `TextColored` heading.
+- Logo selection box corner squares (5 px filled + 1 px glow) →
+  reverted to the previous 6 px filled squares.
+- Per-section breathing-room `Dummy({0,6})` above each section header
+  → reverted.
+- Background drop zone replaced with the mock's diagonal-stripe
+  placeholder + `BG.PNG - DROP IMAGE OR VIDEO` mono caption + IMAGE
+  label + path field → reverted to the original drag-drop preview /
+  `Drop background here` + Clear button.
+- `ui::DefaultPill` cyan-border alpha bumped 0.30 → 0.65 with tighter
+  padding → reverted.
+
+The reverts were applied per-file via targeted `Edit` calls; the final
+state of the branch is the post-Phase-G snapshot before any of the
+StartScreen iteration attempts.
+
+### Lessons / process failures
+
+1. **Single-issue scoping kills mock fidelity.** Each user message
+   ("fix the topbar", "fix the gray", "fix the test game") was treated
+   as a one-issue ticket. Every other delta against the mock was left
+   alone. The right shape is a full diff-against-mock at the start of
+   each batch and a sweep that fixes everything visible at once.
+2. **"Build green + runs" ≠ "matches the mock".** I kept handing the
+   editor back to the user for visual review without doing a
+   side-by-side comparison myself. The user did all the QA. That
+   pushed every layout discrepancy to a separate turn.
+3. **"Don't change the original" can mean two things.** When the user
+   said "you should remain the original setting here" about the scene
+   aspect ratio, I read it as "keep the data model" but they meant
+   "keep the entire UI widget unchanged." Same phrase, different
+   scope. Should have asked before reverting.
+4. **`ImGuiCol_ChildBg = BgPanel` defeats `WindowBg = BgVoid`.** Setting
+   the window to black is invisible if every `BeginChild(border=true)`
+   on the page paints a `BgPanel` panel on top. To match the mock's
+   pure-black canvas, the chrome panels need either `border=false`
+   children or `PushStyleColor(ImGuiCol_ChildBg, BgVoid)` around the
+   `BeginChild` calls. The TopBar widget itself was painting
+   `BgPanel` via `ImDrawList` — also had to drop that fill so the void
+   underneath shows through.
+5. **Treat MIGRATION's mock as the spec, not the existing code.**
+   Several gaps existed because the existing code had old chrome
+   (renderControls combo, drop-zone Clear button, "Editing:" sidebar
+   header, bottom Save/Next nav row) that the mock obviously does not
+   have. Defaulting to "preserve existing behavior" caused these to
+   linger.
+
+### Files modified during this session (final post-revert state)
+
+- `engine/src/ui/StyleTokens.cpp` — `WindowBg` switched to `BgVoid`.
+- `engine/src/ui/Widgets.h` — Dropdown + Slider declarations,
+  TopBar / TopNavBack / TopNavForward / TopTestGame declarations,
+  PushMono / PopMono inline helpers, `s_monoFont` extern.
+- `engine/src/ui/Widgets.cpp` — Dropdown + Slider implementations,
+  TopBar widget, three TopNav helpers.
+- `engine/src/ui/ImGuiLayer.{h,cpp}` — Cousine font load into
+  `ui::s_monoFont`.
+- `engine/src/ui/ProjectHub.{h,cpp}` — `gameMode/gameDim/songCount`
+  fields, `m_modeFilter`, header row, filter pills, mode pill column,
+  detail SectionHeader wrap.
+- `engine/src/ui/StartScreenEditor.{h,cpp}` — TopBar invocation,
+  3-column body (Hierarchy / Preview / Properties), Hierarchy nav
+  with custom icons, RightTab Properties/Materials, NoTitleBar flag,
+  ChildBg=BgVoid push, SectionHeader/SegBar/Dropdown/Slider widget
+  wiring, hero-gradient backdrop in renderPreview's empty-bg fallback,
+  aspect badge top-left + zoom % top-right + selection-corner-dots
+  overlay.
+- `engine/src/ui/MusicSelectionEditor.cpp` — TopBar invocation,
+  NoTitleBar, SectionHeader / Slider widget wiring, difficulty pill
+  repalette + glow.
+- `engine/src/ui/SongEditor.{h,cpp}` — TopBar invocation w/ diff +
+  mode pills, NoTitleBar, sidebar SectionHeader sweep (12 sites),
+  4-way Game Mode SegBar replacing dimension picker, NoteToolbar
+  Audit right-align + Clr Note / Audit outline-ghost restyle,
+  Test Game uses `launchTestProcess()` validated path.
+- `engine/src/ui/SettingsPageUI.cpp` — Cancel / Apply footer split,
+  SectionHeader retained with local helper for accent labels,
+  `ui::Slider` wiring on all 5 sliders.
+
+The new doc [`ui_migration_plan.md`](ui_migration_plan.md) preserves
+the implementation plan verbatim. The MIGRATION.md acceptance
+checklist (§6) is **not** fully passing — Start Screen layout in
+particular still drifts from the mock per the screenshots collected
+during this session (TopBar chrome height + bg color, Hierarchy nav
+icons, Background drop-zone treatment, aspect-bar visual). Those are
+open items for a follow-up pass.

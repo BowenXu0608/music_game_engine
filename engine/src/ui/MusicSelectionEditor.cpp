@@ -1,4 +1,6 @@
 #include "MusicSelectionEditor.h"
+#include "StyleTokens.h"
+#include "Widgets.h"
 #include "SettingsPageUI.h"
 #include "StartScreenEditor.h"
 #include "engine/Engine.h"
@@ -587,7 +589,7 @@ void MusicSelectionEditor::render(Engine* engine) {
             ImGui::Begin("##settings_gear_btn", nullptr,
                 ImGuiWindowFlags_NoDecoration  | ImGuiWindowFlags_NoMove |
                 ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoScrollbar);
-            if (ImGui::Button("\xE2\x9A\x99  Settings",
+            if (ImGui::Button("Settings",
                               ImVec2(gearW - 4.f, gearH - 4.f))) {
                 m_showSettings = true;
             }
@@ -603,14 +605,34 @@ void MusicSelectionEditor::render(Engine* engine) {
         ImGui::SetNextWindowPos(ImVec2(0, 0));
         ImGui::SetNextWindowSize(ImVec2(ds.x, ds.y));
     }
-    ImGui::Begin("Music Selection", nullptr,
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
+    ImGui::Begin("##music_selection", nullptr,
                  ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse |
-                 ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoBringToFrontOnFocus);
+                 ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoTitleBar |
+                 ImGuiWindowFlags_NoBringToFrontOnFocus);
+    ImGui::PopStyleVar();
 
     // Scan assets once per project
     if (!m_assetsScanned && !m_projectPath.empty()) {
         m_assets        = scanAssets(m_projectPath);
         m_assetsScanned = true;
+    }
+
+    // Top bar matching MIGRATION mock (crumbs + Auto-Play + Test Game).
+    {
+        std::string projName = m_projectPath;
+        auto slash = projName.find_last_of("/\\");
+        if (slash != std::string::npos) projName = projName.substr(slash + 1);
+        if (projName.empty()) projName = "Music Selection";
+        ui::TopBar({projName.c_str(), "Music Selection"}, [&]{
+            if (ui::TopNavBack("Start Screen"))
+                if (engine) engine->switchLayer(EditorLayer::StartScreen);
+            ImGui::SameLine(0.f, 8.f);
+            ImGui::Checkbox("Auto-Play", &m_autoPlay);
+            ImGui::SameLine(0.f, 16.f);
+            if (ui::TopTestGame())
+                if (engine) engine->enterTestMode(EditorLayer::MusicSelection);
+        });
     }
 
     ImVec2 contentSize = ImGui::GetContentRegionAvail();
@@ -1372,48 +1394,68 @@ void MusicSelectionEditor::renderCoverPhoto(ImVec2 origin, float size) {
 // ── Difficulty buttons ───────────────────────────────────────────────────────
 
 void MusicSelectionEditor::renderDifficultyButtons(ImVec2 origin, float width) {
+    using namespace ui::tokens;
     ImDrawList* dl = ImGui::GetWindowDrawList();
 
+    // Mock palette: EZ lime / NM cyan / HD magenta. Active = solid + glow,
+    // inactive = outline pill with low-alpha fill.
     struct DiffInfo {
         const char* label;
+        const char* shortLabel;
         Difficulty  diff;
-        ImU32       color;
-        ImU32       activeColor;
+        ImVec4      accent;
     };
     DiffInfo diffs[] = {
-        { "EASY",   Difficulty::Easy,   IM_COL32(60, 160, 80, 200),  IM_COL32(80, 220, 100, 255) },
-        { "MEDIUM", Difficulty::Medium, IM_COL32(180, 160, 40, 200), IM_COL32(240, 210, 50, 255)  },
-        { "HARD",   Difficulty::Hard,   IM_COL32(180, 50, 50, 200),  IM_COL32(240, 60, 60, 255)   },
+        { "EZ", "5.0",  Difficulty::Easy,   Lime    },
+        { "NM", "7.4",  Difficulty::Medium, Cyan    },
+        { "HD", "9.7",  Difficulty::Hard,   Magenta },
     };
 
-    float btnW = 90.f;
-    float btnH = 32.f;
-    float gap  = 16.f;
-    float totalW = 3.f * btnW + 2.f * gap;
-    float startX = origin.x - totalW * 0.5f;
+    const float btnW = 88.f;
+    const float btnH = 56.f;
+    const float gap  = 12.f;
+    const float totalW = 3.f * btnW + 2.f * gap;
+    const float startX = origin.x - totalW * 0.5f;
 
     for (int i = 0; i < 3; ++i) {
-        float bx = startX + (float)i * (btnW + gap);
-        float by = origin.y;
-        bool active = (m_selectedDifficulty == diffs[i].diff);
+        const float bx = startX + (float)i * (btnW + gap);
+        const float by = origin.y;
+        const bool active = (m_selectedDifficulty == diffs[i].diff);
+        const ImVec4 a    = diffs[i].accent;
 
-        ImU32 col = active ? diffs[i].activeColor : diffs[i].color;
-        dl->AddRectFilled(ImVec2(bx, by), ImVec2(bx + btnW, by + btnH), col, 6.f);
-
+        // Outer glow on active.
         if (active) {
-            dl->AddRect(ImVec2(bx, by), ImVec2(bx + btnW, by + btnH),
-                        IM_COL32(255, 255, 255, 200), 6.f, 0, 2.f);
+            dl->AddRectFilled(ImVec2(bx - 4.f, by - 4.f),
+                              ImVec2(bx + btnW + 4.f, by + btnH + 4.f),
+                              ToU32(WithAlpha(a, 0.30f)), 8.f);
         }
 
-        ImVec2 textSz = ImGui::CalcTextSize(diffs[i].label);
-        dl->AddText(ImVec2(bx + (btnW - textSz.x) * 0.5f, by + (btnH - textSz.y) * 0.5f),
-                    IM_COL32(255, 255, 255, 255), diffs[i].label);
+        const ImU32 fill   = active ? ToU32(a)
+                                    : ToU32(WithAlpha(a, 0.15f));
+        const ImU32 border = ToU32(a);
+        dl->AddRectFilled({bx, by}, {bx + btnW, by + btnH}, fill, 6.f);
+        dl->AddRect      ({bx, by}, {bx + btnW, by + btnH}, border, 6.f, 0,
+                          active ? 2.f : 1.f);
+
+        const ImU32 textCol = active ? IM_COL32(0, 0, 0, 255)
+                                     : ToU32(a);
+        const ImVec2 lbSz = ImGui::CalcTextSize(diffs[i].label);
+        dl->AddText({bx + (btnW - lbSz.x) * 0.5f, by + 8.f},
+                    textCol, diffs[i].label);
+
+        ImFont* mono = ui::s_monoFont ? ui::s_monoFont : ImGui::GetFont();
+        const float ratingFontSize = ImGui::GetFontSize() * 1.4f;
+        const ImVec2 rtSz = mono->CalcTextSizeA(ratingFontSize, FLT_MAX, 0.f,
+                                                diffs[i].shortLabel);
+        dl->AddText(mono, ratingFontSize,
+                    {bx + (btnW - rtSz.x) * 0.5f, by + btnH - rtSz.y - 6.f},
+                    textCol, diffs[i].shortLabel);
 
         // Clickable
-        ImGui::SetCursorScreenPos(ImVec2(bx, by));
+        ImGui::SetCursorScreenPos({bx, by});
         char id[32];
         snprintf(id, sizeof(id), "##diff_%d", i);
-        if (ImGui::InvisibleButton(id, ImVec2(btnW, btnH))) {
+        if (ImGui::InvisibleButton(id, {btnW, btnH})) {
             m_selectedDifficulty = diffs[i].diff;
         }
     }
@@ -1485,18 +1527,27 @@ void MusicSelectionEditor::renderPlayButton(ImVec2 origin, float width) {
     float abx = bx;
     float aby = by + btnH + 8.f;
 
-    ImU32 aBg   = m_autoPlay ? IM_COL32(220, 140, 50, 240) : IM_COL32(60, 60, 70, 200);
-    ImU32 aText = m_autoPlay ? IM_COL32(255, 255, 255, 255) : IM_COL32(200, 200, 210, 230);
+    using namespace ui::tokens;
+    const ImU32 amberSolid    = ToU32(Amber);
+    const ImU32 amberHover    = ToU32(WithAlpha(Amber, 0.85f));
+    const ImU32 amberDimSolid = ToU32(WithAlpha(Amber, 0.18f));
+    const ImU32 amberDimHover = ToU32(WithAlpha(Amber, 0.32f));
+    const ImU32 borderC       = ToU32(BorderHi);
+    const ImU32 textOn        = IM_COL32(0, 0, 0, 255);
+    const ImU32 textOff       = ToU32(TextMid);
 
     ImVec2 mPos = ImGui::GetIO().MousePos;
     bool aHover = mPos.x >= abx && mPos.x <= abx + abtnW &&
                   mPos.y >= aby && mPos.y <= aby + abtnH;
-    if (aHover && !m_autoPlay) aBg = IM_COL32(90, 90, 100, 230);
-    if (aHover &&  m_autoPlay) aBg = IM_COL32(240, 160, 70, 255);
+
+    ImU32 aBg   = m_autoPlay
+        ? (aHover ? amberHover    : amberSolid)
+        : (aHover ? amberDimHover : amberDimSolid);
+    ImU32 aText = m_autoPlay ? textOn : textOff;
 
     dl->AddRectFilled(ImVec2(abx, aby), ImVec2(abx + abtnW, aby + abtnH), aBg, 6.f);
     dl->AddRect(ImVec2(abx, aby), ImVec2(abx + abtnW, aby + abtnH),
-                IM_COL32(180, 180, 200, 180), 6.f, 0, 1.2f);
+                borderC, 6.f, 0, 1.f);
 
     const char* aLabel = m_autoPlay ? "AUTO PLAY: ON" : "AUTO PLAY: OFF";
     ImVec2 aSz = ImGui::CalcTextSize(aLabel);
@@ -1833,6 +1884,126 @@ void MusicSelectionEditor::renderHierarchy(float width, float height) {
                 ImGui::SameLine();
                 if (ImGui::SmallButton("Clear##songcover"))
                     song.coverImage.clear();
+            }
+
+            // ── Charts (per-difficulty) ──────────────────────────────────────
+            // Read-only file path + best score + achievement letter for each
+            // difficulty. Editing chart files happens in SongEditor.
+            ImGui::Spacing();
+            if (ui::SectionHeader("Charts")) {
+                auto achievementLetter = [](const std::string& s) -> const char* {
+                    if (s.empty()) return "-";
+                    const char* p = s.c_str();
+                    if (*p == 'S' || *p == 'A' || *p == 'B' || *p == 'C' || *p == 'D')
+                        return p;
+                    return "-";
+                };
+                struct DiffRow {
+                    const char*        label;
+                    const std::string& file;
+                    int                score;
+                    const std::string& ach;
+                    ImVec4             pillColor;
+                };
+                using namespace ui::tokens;
+                DiffRow rows[] = {
+                    { "EASY",   song.chartEasy,   song.scoreEasy,   song.achievementEasy,   Lime    },
+                    { "MEDIUM", song.chartMedium, song.scoreMedium, song.achievementMedium, Cyan    },
+                    { "HARD",   song.chartHard,   song.scoreHard,   song.achievementHard,   Magenta },
+                };
+                for (const auto& r : rows) {
+                    ui::Pill(r.label, r.pillColor, true);
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("%s",
+                        r.file.empty() ? "(no chart)" : r.file.c_str());
+                    ImGui::SameLine(ImGui::GetContentRegionAvail().x - 90.f);
+                    ImGui::Text("%d", r.score);
+                    ImGui::SameLine();
+                    ui::Pill(achievementLetter(r.ach),
+                             r.ach.empty() ? TextLow : Amber);
+                }
+            }
+
+            // ── Game Mode (per-song) ─────────────────────────────────────────
+            if (ui::SectionHeader("Game Mode")) {
+                GameModeConfig& gm = song.gameMode;
+                int modeIdx = (gm.type == GameModeType::DropNotes)
+                              ? ((gm.dimension == DropDimension::ThreeD) ? 1 : 0)
+                              : (gm.type == GameModeType::Circle)   ? 2
+                              : (gm.type == GameModeType::ScanLine) ? 3 : 0;
+                if (ui::SegBar("##songmode_segbar",
+                               {"Drop 2D","Drop 3D","Circle","Scan"}, &modeIdx)) {
+                    switch (modeIdx) {
+                        case 0: gm.type = GameModeType::DropNotes; gm.dimension = DropDimension::TwoD;   break;
+                        case 1: gm.type = GameModeType::DropNotes; gm.dimension = DropDimension::ThreeD; break;
+                        case 2: gm.type = GameModeType::Circle;    break;
+                        case 3: gm.type = GameModeType::ScanLine;  break;
+                    }
+                }
+                ImGui::Spacing();
+                if (gm.type != GameModeType::ScanLine) {
+                    int trackMax = (gm.type == GameModeType::Circle) ? 36 : 12;
+                    if (gm.trackCount > trackMax) gm.trackCount = trackMax;
+                    float tracks = (float)gm.trackCount;
+                    if (ui::Slider("Tracks", &tracks, 3.f, (float)trackMax, "",
+                                   ui::tokens::Cyan))
+                        gm.trackCount = (int)(tracks + 0.5f);
+                    ImGui::Spacing();
+                }
+                if (gm.type == GameModeType::DropNotes &&
+                    gm.dimension == DropDimension::ThreeD) {
+                    ui::Slider("Sky height", &gm.skyHeight, -1.f, 3.f, "",
+                               ui::tokens::Magenta);
+                    ImGui::Spacing();
+                }
+                if (gm.type == GameModeType::Circle) {
+                    ui::Slider("Disk inner",   &gm.diskInnerRadius, 0.2f, 3.0f,
+                               "", ui::tokens::Lime);
+                    ImGui::Spacing();
+                    ui::Slider("Ring spacing", &gm.diskRingSpacing, 0.1f, 1.5f,
+                               "", ui::tokens::Lime);
+                    ImGui::Spacing();
+                }
+                ImGui::TextDisabled("JUDGMENT WINDOWS (ms)");
+                ui::Slider("Perfect", &gm.perfectMs, 10.f, 200.f, " ms",
+                           ui::tokens::Lime);
+                ImGui::Spacing();
+                ui::Slider("Good",    &gm.goodMs,    10.f, 250.f, " ms",
+                           ui::tokens::Cyan);
+                ImGui::Spacing();
+                ui::Slider("Bad",     &gm.badMs,     10.f, 400.f, " ms",
+                           ui::tokens::Amber);
+            }
+
+            // ── HUD (Score + Combo) ──────────────────────────────────────────
+            if (ui::SectionHeader("HUD")) {
+                GameModeConfig& gm = song.gameMode;
+                auto hudBlock = [](const char* label, HudTextConfig& h) {
+                    ImGui::PushID(label);
+                    ImGui::TextColored(ui::tokens::TextLow, "%s", label);
+                    ui::Slider("X",    &h.pos[0],   0.f, 1.f, "", ui::tokens::Cyan);
+                    ImGui::Spacing();
+                    ui::Slider("Y",    &h.pos[1],   0.f, 1.f, "", ui::tokens::Cyan);
+                    ImGui::Spacing();
+                    ui::Slider("Size", &h.fontSize, 8.f, 96.f, " px", ui::tokens::Magenta);
+                    ImGui::Spacing();
+                    ImGui::ColorEdit4("Color", h.color,
+                                      ImGuiColorEditFlags_NoInputs |
+                                      ImGuiColorEditFlags_AlphaBar);
+                    ImGui::Checkbox("Glow", &h.glow);
+                    if (h.glow) {
+                        ImGui::ColorEdit4("Glow Color", h.glowColor,
+                                          ImGuiColorEditFlags_NoInputs |
+                                          ImGuiColorEditFlags_AlphaBar);
+                        ui::Slider("Glow radius", &h.glowRadius, 1.f, 32.f, "",
+                                   ui::tokens::Amber);
+                        ImGui::Spacing();
+                    }
+                    ImGui::PopID();
+                };
+                hudBlock("SCORE", gm.scoreHud);
+                ImGui::Separator();
+                hudBlock("COMBO", gm.comboHud);
             }
 
             ImGui::Spacing();

@@ -99,6 +99,13 @@ struct ProjectInfo {
     std::string shaderPath;
     std::string lastModified;     // formatted "YYYY-MM-DD HH:MM"
     long long   lastModifiedRaw = 0; // unix seconds — for sorting
+
+    // Read from the first song's gameMode in music_selection.json during
+    // scan. Drives the row mode pill and the Hub's mode filter (MIGRATION
+    // §3.1). Defaults to Drop2D when the file is missing or unparsable.
+    GameModeType  gameMode  = GameModeType::DropNotes;
+    DropDimension gameDim   = DropDimension::TwoD;
+    int           songCount = 0;
 };
 
 class ProjectHub {
@@ -117,7 +124,11 @@ private:
     bool createProject(const std::string& name);
     bool importProject(const std::string& srcPath);
     void startApkBuild(const ProjectInfo& proj);
-    void renderApkDialog();
+    // Inline APK build panel (per MIGRATION §3.1) — rendered as a child
+    // inside the right-side project detail column. Reaps the build future,
+    // prints status, and offers Build / Show in Explorer / Open Log buttons.
+    // Was previously a separate floating window (`renderApkDialog`).
+    void renderApkPanel();
 
     std::vector<ProjectInfo> m_projects;
     ProjectInfo              m_selectedProject;
@@ -127,6 +138,9 @@ private:
     int                      m_selectedIdx     = -1;  // highlight in hub list
 
     char        m_searchBuf[128] = {};
+
+    // Filter pill: All / Drop2D / Drop3D / ScanLine / Circle. -1 = All.
+    int         m_modeFilter = -1;
 
     bool        m_showCreateDialog = false;
     char        m_newProjectName[128] = {};

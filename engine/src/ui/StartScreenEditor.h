@@ -155,8 +155,22 @@ private:
     // ── panel split ratios (draggable) ───────────────────────────────────────
     float m_hSplit = 0.60f;   // Preview / Properties horizontal split
     float m_vSplit = 0.72f;   // Top row / Assets vertical split
-    bool  m_assetsBarOpen = true;  // Bottom Assets strip expanded?
+    bool  m_assetsBarOpen = false; // Bottom Assets strip expanded?
     float m_assetsBarH   = 200.f;  // Expanded height
+    float m_hierarchyW   = 220.f;  // Left Hierarchy column width
+    float m_propertiesW  = 296.f;  // Right Properties / Materials column width
+    float m_previewZoom  = 0.78f;  // Preview zoom %, displayed top-right of canvas
+
+    // Right-sidebar tab (Properties / Materials), MIGRATION §3.2 mock.
+    enum class RightTab { Properties, Materials };
+    RightTab m_rightTab = RightTab::Properties;
+
+    // Hierarchy nav highlight — visual focus indicator only. Click jumps the
+    // Properties scrollbar to the matching SectionHeader on the next render.
+    enum class HierItem { Background, Logo, TapText, Transition, Audio };
+    HierItem m_hierActive  = HierItem::Logo;
+    HierItem m_hierJumpTo  = HierItem::Logo;
+    bool     m_hierJump    = false;
 
     // ── preview tab ─────────────────────────────────────────────────────────
     int  m_previewTab = 0;    // 0=Editor, 1=Game Preview
