@@ -3,8 +3,11 @@
 #include "renderer/MaterialAssetLibrary.h"
 #include "renderer/vulkan/TextureManager.h"
 #include "game/modes/GameModeRenderer.h"
+#include "game/screens/GameplayHudView.h"
+#include "game/screens/ResultsView.h"
 #include "engine/GameClock.h"
 #include "engine/AudioEngine.h"
+#include "engine/IPlayerEngine.h"
 #include "ui/ImGuiLayer.h"
 #include "ui/SceneViewer.h"
 #include "ui/ProjectHub.h"
@@ -26,10 +29,10 @@
 enum class GameMode { Bandori, Cytus, Phigros, Arcaea, Lanota };
 enum class EditorLayer { ProjectHub, StartScreen, MusicSelection, Settings, SongEditor, GamePlay };
 
-class Engine {
+class Engine : public IPlayerEngine {
 public:
     Engine();
-    ~Engine();
+    ~Engine() override;
 
     void init(uint32_t width, uint32_t height, const std::string& title,
               const std::string& shaderDir, bool vsync = true);
@@ -43,25 +46,32 @@ public:
     void switchLayer(EditorLayer layer) { m_currentLayer = layer; }
 
     void launchGameplay(const SongInfo& song, Difficulty difficulty,
-                        const std::string& projectPath, bool autoPlay = false);
+                        const std::string& projectPath, bool autoPlay = false) override;
     void launchGameplayDirect(const SongInfo& song, const ChartData& chart,
                               const std::string& projectPath);
-    void exitGameplay();
+    void exitGameplay() override;
+    void requestStop() override;
     void restartGameplay();
     StartScreenEditor& startScreenEditor() { return m_startScreenEditor; }
     MusicSelectionEditor& musicSelectionEditor() { return m_musicSelectionEditor; }
     SongEditor& songEditor() { return m_songEditor; }
     SettingsEditor& settingsEditor() { return m_settingsEditor; }
     GameFlowPreview& gameFlowPreview() { return m_gameFlowPreview; }
-    PlayerSettings& playerSettings() { return m_playerSettings; }
+    PlayerSettings& playerSettings() override { return m_playerSettings; }
     // Push m_playerSettings into the live audio engine, hit detector, and
     // active game-mode renderer. Safe to call at any time — applies what's
     // currently available.
     void applyPlayerSettings();
     ProjectHub& hub() { return m_hub; }
-    AudioEngine& audio() { return m_audio; }
-    Renderer& renderer() { return m_renderer; }
-    GameClock& clock() { return m_clock; }
+    AudioEngine& audio() override { return m_audio; }
+    Renderer& renderer() override { return m_renderer; }
+    GameClock& clock() override { return m_clock; }
+    ImGuiLayer* imguiLayer() override { return &m_imgui; }
+    ScoreTracker& score() override { return m_score; }
+    JudgmentSystem& judgment() override { return m_judgment; }
+    HitDetector& hitDetector() override { return m_hitDetector; }
+    GameModeRenderer* activeMode() override { return m_activeMode.get(); }
+    const GameModeConfig& gameplayConfig() const override { return m_gameplayConfig; }
 
     // Preview: set up a renderer and render one frame at the given time
     void setupPreviewMode(const GameModeConfig& config, const ChartData& chart,
@@ -72,8 +82,8 @@ public:
     VkDescriptorSet sceneTexture() const { return m_sceneViewer.sceneTexture(); }
 
     // Expose InputManager so platform code (Android JNI, iOS bridge) can inject touches
-    InputManager& inputManager() { return m_input; }
-    MaterialAssetLibrary& materialLibrary() { return m_materialLibrary; }
+    InputManager& inputManager() override { return m_input; }
+    MaterialAssetLibrary& materialLibrary() override { return m_materialLibrary; }
 
     // Point the material library at a project and reload its assets.
     // ProjectHub/StartScreenEditor call this when a project is opened; the
@@ -157,6 +167,8 @@ private:
     MaterialAssetLibrary               m_materialLibrary;
 
     PreviewAspect                      m_previewAspect;
+    GameplayHudView                    m_hudView;
+    ResultsView                        m_resultsView;
     std::string                        m_currentAudioPath;       // resolved audio path for restart
     bool                               m_framebufferResized = false;
     bool                               m_running = false;
@@ -182,9 +194,9 @@ private:
     EditorLayer m_testTransTo   = EditorLayer::MusicSelection;
 
 public:
-    bool isTestMode() const { return m_testMode; }
-    bool isTestTransitioning() const { return m_testTransitioning; }
-    float testTransProgress() const { return m_testTransProgress; }
+    bool  isTestMode()         const override { return m_testMode; }
+    bool  isTestTransitioning() const override { return m_testTransitioning; }
+    float testTransProgress()   const override { return m_testTransProgress; }
     void enterTestMode(EditorLayer returnLayer);
     void exitTestMode();
     void testTransitionTo(EditorLayer target);

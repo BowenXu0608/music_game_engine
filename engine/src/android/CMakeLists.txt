@@ -58,11 +58,16 @@ set(SHARED_GAME_SOURCES
     ${ENGINE_SRC}/game/modes/LanotaRenderer.cpp
     ${ENGINE_SRC}/game/chart/ChartLoader.cpp
     ${ENGINE_SRC}/game/PlayerSettings.cpp
+    ${ENGINE_SRC}/game/screens/StartScreenView.cpp
+    ${ENGINE_SRC}/game/screens/MusicSelectionView.cpp
+    ${ENGINE_SRC}/game/screens/GameplayHudView.cpp
+    ${ENGINE_SRC}/game/screens/ResultsView.cpp
 )
 
 # UI sources that the Android runtime uses (most ui/ editors stay desktop-only).
 set(SHARED_UI_SOURCES
     ${ENGINE_SRC}/ui/SettingsPageUI.cpp
+    ${ENGINE_SRC}/ui/GifPlayer.cpp
 )
 
 set(SHARED_GAMEPLAY_SOURCES
@@ -87,8 +92,10 @@ set(ANDROID_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/AndroidVulkanContext.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/AndroidSwapchain.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/AndroidEngine.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/AndroidEngineAdapter.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/AndroidFileIO.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/android_main.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/ImGuiLayerStub.cpp
 )
 
 # ── ImGui sources (Vulkan backend only — no GLFW backend on Android) ─────────
@@ -122,6 +129,7 @@ target_include_directories(musicgame PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/stubs    # GLFW stub (must be first!)
     ${ENGINE_ROOT}/engine/include
     ${ENGINE_SRC}
+    ${TP}                                # parent of nlohmann/ for <nlohmann/json.hpp>
     ${GLM_INCLUDE_DIR}
     ${VMA_INCLUDE_DIR}
     ${STB_INCLUDE_DIR}

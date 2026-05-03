@@ -1,6 +1,5 @@
 #pragma once
 #include "renderer/vulkan/TextureManager.h"
-#include "ui/ImGuiLayer.h"
 #include <vulkan/vulkan.h>
 #include <string>
 #include <vector>
@@ -15,7 +14,7 @@ class GifPlayer {
 public:
     // Load all frames from a GIF file. Returns false on failure.
     bool load(const std::string& path, VulkanContext& ctx,
-              BufferManager& bufMgr, ImGuiLayer& imgui);
+              BufferManager& bufMgr);
 
     // Advance the frame timer by dt seconds.
     void update(float dt);

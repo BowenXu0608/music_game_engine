@@ -1,11 +1,13 @@
 #include "GifPlayer.h"
 #include "renderer/vulkan/VulkanContext.h"
 #include "renderer/vulkan/BufferManager.h"
+#include <imgui.h>
+#include <backends/imgui_impl_vulkan.h>
 #include <stb_image.h>
 #include <cstring>
 
 bool GifPlayer::load(const std::string& path, VulkanContext& ctx,
-                     BufferManager& bufMgr, ImGuiLayer& imgui) {
+                     BufferManager& bufMgr) {
     // Read file into memory
     FILE* f = fopen(path.c_str(), "rb");
     if (!f) return false;
@@ -120,7 +122,8 @@ bool GifPlayer::load(const std::string& path, VulkanContext& ctx,
         si.mipmapMode   = VK_SAMPLER_MIPMAP_MODE_LINEAR;
         vkCreateSampler(ctx.device(), &si, nullptr, &frame.tex.sampler);
 
-        frame.desc  = imgui.addTexture(frame.tex.view, frame.tex.sampler);
+        frame.desc  = ImGui_ImplVulkan_AddTexture(frame.tex.sampler, frame.tex.view,
+                                                  VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
         // GIF delays are in centiseconds; convert to seconds
         frame.delay = delays ? (delays[i] * 0.01f) : 0.1f;
         if (frame.delay <= 0.f) frame.delay = 0.1f;

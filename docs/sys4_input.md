@@ -43,3 +43,17 @@ Keys 1-9, 0, Q, W -> lanes 0-11 (up to 12 tracks). Keyboard callback in Engine.c
 - Hit radius: `HitDetector::HIT_RADIUS_PX = 90.0f` for Arcaea position-based
 
 Mobile layout: BanG Dream uses ultrawide layout (50% highway, raised camera, larger notes).
+
+## TouchThresholds DPI scaling (2026-05-03)
+
+`engine/src/input/TouchTypes.h::TouchThresholds` had `TAP_SLOP_PX = 20.0f` and `SLIDE_SLOP_PX = 25.0f` declared `inline constexpr`. On a high-DPI Android device (e.g. 458 dpi → ~2.86 px/dp), 20 px reads as ~7 dp — well below the 44 dp accessibility minimum and a hair-trigger for drag detection.
+
+The fix:
+
+- Both `TAP_SLOP_PX` and `SLIDE_SLOP_PX` converted from `inline constexpr float` to `inline float` so they're runtime-mutable.
+- New helper: `inline void TouchThresholds::scaleByDpi(float dpiScale)` multiplies them in-place; the input is clamped to `>= 1.0f` so call sites can pass 0 or negative without zeroing the slop.
+- `AndroidEngine::onWindowInit` calls `TouchThresholds::scaleByDpi(dpiScale)` after the DPI is computed (`AConfiguration_getDensity → density / 160.0f`). The same `dpiScale` drives ImGui font + `ScaleAllSizes`.
+
+The `*_S` (`TAP_MAX_DURATION_S`, `VELOCITY_WINDOW_S`) and `FLICK_MIN_VELOCITY` constants stay `constexpr` — they're seconds and pixels-per-second, dimensionally density-independent.
+
+Desktop builds keep the 20/25 baseline (no `scaleByDpi` call — `dpiScale` is always 1.0 on desktop where the editor authors charts). On phones, the scale lands somewhere between 1.5 and 4.0 depending on the device class.

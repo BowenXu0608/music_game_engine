@@ -213,3 +213,42 @@ Each SongEditor slot dropdown lists only the materials whose `(targetMode, targe
 | GLFW 3.x | Window + Vulkan surface | `third_party/glfw/` |
 | GLM | Math (vec2/vec4/mat4/quat) | `third_party/glm_extracted/` |
 | glslc (Vulkan SDK) | GLSL → SPIR-V | system PATH |
+
+## GifPlayer made platform-portable (2026-05-03)
+
+`engine/src/ui/GifPlayer` had one tie to the editor: its `load()` method took an `ImGuiLayer&` and called `imgui.addTexture(view, sampler)` per frame to register each decoded GIF frame with ImGui's descriptor pool. That blocked it from being usable in the Android player binary (no `ImGuiLayer`).
+
+The fix replaces the `ImGuiLayer&` parameter with a direct `ImGui_ImplVulkan_AddTexture(sampler, view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)` call — exactly what `ImGuiLayer::addTexture` was wrapping. Both desktop and Android link `imgui_impl_vulkan.cpp`, so the call is portable. Header-side: dropped `#include "ui/ImGuiLayer.h"`. `GifPlayer.cpp` adds `<imgui.h>` + `<backends/imgui_impl_vulkan.h>`.
+
+`StartScreenView` (the new shared start-screen view at `engine/src/game/screens/StartScreenView.cpp`) now uses GifPlayer for `BgType::Gif` backgrounds and works on both desktop (where `StartScreenEditor` inherits the view) and Android (where `AndroidEngine::m_startView` drives it). All other GifPlayer callers got the matching one-arg-removed update.
+
+Same pattern applies to any future "shared widget that touches Vulkan textures": call `ImGui_ImplVulkan_AddTexture` directly instead of going through ImGuiLayer. The latter is desktop-only and shouldn't appear in the player binary.
+
+## Player views (game-side) — overview pointer (2026-05-03)
+
+Player-facing rendering for the four player screens (start, music selection, gameplay HUD, results) lives at `engine/src/game/screens/` as game-side classes. Each view is a pure renderer with the player-facing state owned in the class; no editor coupling. Both desktop (where editors inherit the views) and Android (where `AndroidEngine` drives them via `AndroidEngineAdapter`) consume the same source files. Detail in `sys8_android.md` Round 7 + `sys3_core_engine.md` "Player-game / editor split (2026-05-03)".
+
+The relevant rendering primitives (`ImDrawList::AddImage`, `AddRectFilled`, `AddRectFilledMultiColor`, `AddImageQuad`, `AddImageRounded`, `AddText`, `AddQuadFilled`, `AddTriangleFilled`, `PushClipRect`) all already worked on Android since Round 6 — Round 7 just stops duplicating the call sites between desktop and Android.
+
+## ArcaeaRenderer — `NoteType::Hold` rendering (2026-05-03)
+
+`ArcaeaRenderer` (3D drop) initially handled only `Tap`/`Flick`/`ArcTap`/`Arc`; `NoteType::Hold` was silently dropped during `onInit`. Charts authored for 3D drop with hold notes (`Aa_drop3d_hard.json` has one) rendered without those holds.
+
+Implementation:
+- New `m_holdNotes` (vector of `NoteEvent`) collected in `onInit` alongside taps/arcs.
+- Lane auto-expand pass walks `m_holdNotes` so a chart with a lane-N-only hold still expands the playfield.
+- Render loop uses the existing `m_tapMesh` (a flat XZ quad at `y = GROUND_Y + hh`, depth `2 × hd ≈ 0.8`). Per hold:
+  - `zHead = (note.time - songTime) × SCROLL_SPEED × m_noteSpeedMul`
+  - `zTail = zHead + hold.duration × SCROLL_SPEED × m_noteSpeedMul`
+  - Cull: `if (zTail < 0 || zHead > 30) continue`.
+  - `model = translate({wx, 0, JUDGMENT_Z - 0.5×(zHead+zTail)}) × scale({1, 1, (zTail - zHead) / (2 × kTapHd)})` where `kTapHd = 0.4`. Y stays at the tap mesh's baked `GROUND_Y + hh` because scale Y = 1.
+  - Default material: `MaterialKind::Glow` with tint `{0.3, 0.8, 1.0, 0.95}` — visually matches Bandori's inactive hold body so 2D/3D drop hold appearance stays consistent.
+- `onShutdown` clears `m_holdNotes` along with the other per-mode collections.
+
+No Arcaea slot was added — chart hold-material overrides for 3D drop are deferred until requested. If/when added, slot 12 is the next free index in the file-local `ArcaeaSlot` enum.
+
+## Combo HUD — offset glow + bold removed (2026-05-03)
+
+`game/screens/GameplayHudView::drawHud` previously rendered an 8-direction offset halo when `HudTextConfig::glow=true` and a +1 px shadow when `bold=true`. The default `comboHud` had `glow=true`. On a high-DPI phone (`dpiScale ≈ 3.5×`) the offsets blurred glyphs into a single saturated blob — the unreadable gold smear over the combo number reported on Android.
+
+Both branches were removed from `drawHud`. The `glow`/`bold` fields stay on `HudTextConfig` (chart JSON round-trip preserved) but are now no-ops. Any future glow effect should go through the post-process bloom path, not multi-pass `AddText` offsets.

@@ -63,6 +63,8 @@ void ArcaeaRenderer::onInit(Renderer& renderer, const ChartData& chart,
             m_arcs.push_back(std::move(am));
         } else if (note.type == NoteType::Tap || note.type == NoteType::Flick) {
             m_tapNotes.push_back(note);
+        } else if (note.type == NoteType::Hold) {
+            m_holdNotes.push_back(note);
         } else if (note.type == NoteType::ArcTap) {
             m_arcTaps.push_back(note);
         }
@@ -76,6 +78,12 @@ void ArcaeaRenderer::onInit(Renderer& renderer, const ChartData& chart,
         if (auto* tap = std::get_if<TapData>(&n.data))         lane = static_cast<int>(std::lround(tap->laneX));
         else if (auto* fl = std::get_if<FlickData>(&n.data))   lane = static_cast<int>(std::lround(fl->laneX));
         if (lane >= m_laneCount) m_laneCount = lane + 1;
+    }
+    for (auto& n : m_holdNotes) {
+        if (auto* hd = std::get_if<HoldData>(&n.data)) {
+            int lane = static_cast<int>(std::lround(hd->laneX));
+            if (lane >= m_laneCount) m_laneCount = lane + 1;
+        }
     }
 
     // Build ground plane mesh
@@ -492,6 +500,31 @@ void ArcaeaRenderer::onRender(Renderer& renderer) {
         renderer.meshes().drawMesh(m_tapMesh, model, mat, ctx, desc);
     }
 
+    // Hold notes — Z-stretched tap mesh spanning [head, head+duration]. The
+    // tap mesh is centered at z=0 with depth 2*hd (hd ≈ 0.4); we scale Z
+    // by len/(2*hd) and translate so the mesh spans [-zTail, -zHead] in
+    // world space (head closer to the player = less negative).
+    Material holdDefault;
+    holdDefault.kind = MaterialKind::Glow;
+    holdDefault.tint = {0.3f, 0.8f, 1.f, 0.95f};
+    Material holdMat = withWhite(holdDefault);
+    constexpr float kTapHd = 0.4f;  // matches buildTapMesh()'s hd cap
+    for (auto& note : m_holdNotes) {
+        auto* hd = std::get_if<HoldData>(&note.data);
+        if (!hd || hd->duration <= 0.f) continue;
+        float zHead = static_cast<float>(note.time - m_songTime) * (SCROLL_SPEED * m_noteSpeedMul);
+        float zTail = zHead + hd->duration * (SCROLL_SPEED * m_noteSpeedMul);
+        if (zTail < 0.f || zHead > 30.f) continue;
+        float laneSpacing = (2.f * LANE_HALF_WIDTH) / static_cast<float>(std::max(1, m_laneCount));
+        float wx = (hd->laneX - (m_laneCount - 1) * 0.5f) * laneSpacing;
+        float midZ = JUDGMENT_Z - 0.5f * (zHead + zTail);
+        float lenZ = zTail - zHead;
+        float sz   = lenZ / (2.f * kTapHd);
+        glm::mat4 model = glm::translate(glm::mat4(1.f), {wx, 0.f, midZ})
+                        * glm::scale(glm::mat4(1.f), {1.f, 1.f, sz});
+        renderer.meshes().drawMesh(m_tapMesh, model, holdMat, ctx, desc);
+    }
+
     // ArcTaps — flat rectangular prisms floating in the sky at (arcX, arcY)
     // in normalized [0,1] space. Shadow drops directly below on the ground.
     Material arcTapTileDefault;
@@ -567,6 +600,7 @@ void ArcaeaRenderer::onShutdown(Renderer& renderer) {
     }
     m_arcs.clear();
     m_tapNotes.clear();
+    m_holdNotes.clear();
     m_arcTaps.clear();
     m_hitEvents.clear();
     m_renderer = nullptr;

@@ -564,10 +564,13 @@ void Engine::render() {
 
     // Copilot overlay on Start Screen / Music Selection / Settings. Song
     // Editor hosts Copilot inline in its right sidebar; Project Hub and
-    // GamePlay deliberately skip it.
+    // GamePlay deliberately skip it. Also skip while the editor is in
+    // "test game" mode (StartScreen / MusicSelection rendering the live
+    // game preview) — the player view shouldn't carry editor chrome.
     if (renderedLayer != EditorLayer::SongEditor &&
         renderedLayer != EditorLayer::GamePlay &&
-        renderedLayer != EditorLayer::ProjectHub) {
+        renderedLayer != EditorLayer::ProjectHub &&
+        !isTestMode()) {
         m_songEditor.renderCopilotOverlay(this);
     }
 
@@ -930,6 +933,15 @@ void Engine::testTransitionTo(EditorLayer target) {
     m_testTransProgress = 0.f;
 }
 
+void Engine::requestStop() {
+    // Mirrors the Esc-key handler: from the results overlay we exit, from
+    // active gameplay we toggle pause. The on-screen Stop button calls this
+    // so phones (no Esc) get the same behaviour as desktop.
+    if (m_currentLayer != EditorLayer::GamePlay) return;
+    if (m_showResults) exitGameplay();
+    else               togglePause();
+}
+
 void Engine::togglePause() {
     m_gameplayPaused = !m_gameplayPaused;
     if (m_gameplayPaused) {
@@ -948,7 +960,8 @@ void Engine::togglePause() {
 void Engine::renderGameplayHUD() {
     ImVec2 displaySz = ImGui::GetIO().DisplaySize;
 
-    // Full-screen scene texture (rendered offscreen by Vulkan, composited here)
+    // Full-screen scene texture (rendered offscreen by Vulkan, composited here).
+    // Desktop-only — Android renders directly to the swapchain.
     ImGui::SetNextWindowPos(ImVec2(0, 0));
     ImGui::SetNextWindowSize(displaySz);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
@@ -961,92 +974,8 @@ void Engine::renderGameplayHUD() {
     ImGui::End();
     ImGui::PopStyleVar();
 
-    // HUD overlay — use foreground draw list so it's always on top
-    ImDrawList* dl = ImGui::GetForegroundDrawList();
-    float sw = displaySz.x, sh = displaySz.y;
+    m_hudView.render(displaySz, *this);
 
-    // HUD text rendering helper (uses HudTextConfig)
-    auto drawHud = [&](const HudTextConfig& h, const char* text) {
-        if (!text || text[0] == '\0') return;
-        float fx = sw * h.pos[0];
-        float fy = sh * h.pos[1];
-        float fs = h.fontSize * h.scale;
-        ImU32 col = IM_COL32((int)(h.color[0]*255), (int)(h.color[1]*255),
-                             (int)(h.color[2]*255), (int)(h.color[3]*255));
-        ImFont* font = ImGui::GetFont();
-        ImVec2 textSz = font->CalcTextSizeA(fs, FLT_MAX, 0.f, text);
-        ImVec2 textPos(fx - textSz.x * 0.5f, fy - textSz.y * 0.5f);
-
-        if (h.glow) {
-            ImU32 gc = IM_COL32((int)(h.glowColor[0]*255), (int)(h.glowColor[1]*255),
-                                (int)(h.glowColor[2]*255), (int)(h.glowColor[3]*255));
-            float r = h.glowRadius;
-            float offsets[][2] = {{-r,0},{r,0},{0,-r},{0,r},{-r*0.7f,-r*0.7f},
-                                  {r*0.7f,-r*0.7f},{-r*0.7f,r*0.7f},{r*0.7f,r*0.7f}};
-            for (auto& o : offsets)
-                dl->AddText(font, fs, ImVec2(textPos.x+o[0], textPos.y+o[1]), gc, text);
-        }
-        if (h.bold)
-            dl->AddText(font, fs, ImVec2(textPos.x + 1.f, textPos.y), col, text);
-        dl->AddText(font, fs, textPos, col, text);
-    };
-
-    // Score — always visible with background panel
-    {
-        char scoreBuf[32];
-        snprintf(scoreBuf, sizeof(scoreBuf), "%d", m_score.getScore());
-
-        // Draw background panel behind score
-        const HudTextConfig& sh_ = m_gameplayConfig.scoreHud;
-        float fs = sh_.fontSize * sh_.scale;
-        ImFont* font = ImGui::GetFont();
-        ImVec2 textSz = font->CalcTextSizeA(fs, FLT_MAX, 0.f, scoreBuf);
-        float fx = sw * sh_.pos[0], fy = sh * sh_.pos[1];
-        float pad = 8.f;
-        dl->AddRectFilled(
-            ImVec2(fx - textSz.x / 2 - pad, fy - textSz.y / 2 - pad / 2),
-            ImVec2(fx + textSz.x / 2 + pad, fy + textSz.y / 2 + pad / 2),
-            IM_COL32(0, 0, 0, 140), 6.f);
-
-        drawHud(m_gameplayConfig.scoreHud, scoreBuf);
-
-        // "SCORE" label above
-        HudTextConfig scoreLabel = m_gameplayConfig.scoreHud;
-        scoreLabel.pos[1] -= scoreLabel.fontSize * scoreLabel.scale / sh * 1.1f;
-        scoreLabel.fontSize *= 0.4f;
-        scoreLabel.glow = false;
-        drawHud(scoreLabel, "SCORE");
-    }
-
-    // Combo — always visible with background panel
-    {
-        int combo = m_score.getCombo();
-        char comboBuf[32];
-        snprintf(comboBuf, sizeof(comboBuf), "%d", combo);
-
-        // Draw background panel behind combo
-        const HudTextConfig& ch = m_gameplayConfig.comboHud;
-        float fs = ch.fontSize * ch.scale;
-        ImFont* font = ImGui::GetFont();
-        ImVec2 textSz = font->CalcTextSizeA(fs, FLT_MAX, 0.f, comboBuf);
-        float fx = sw * ch.pos[0], fy = sh * ch.pos[1];
-        float pad = 10.f;
-        float panelH = textSz.y + ch.fontSize * ch.scale * 0.5f + pad * 2;
-        dl->AddRectFilled(
-            ImVec2(fx - textSz.x / 2 - pad * 2, fy - textSz.y / 2 - pad),
-            ImVec2(fx + textSz.x / 2 + pad * 2, fy + panelH - pad),
-            IM_COL32(0, 0, 0, 120), 8.f);
-
-        drawHud(m_gameplayConfig.comboHud, comboBuf);
-
-        // "COMBO" label below
-        HudTextConfig comboLabel = m_gameplayConfig.comboHud;
-        comboLabel.pos[1] += comboLabel.fontSize * comboLabel.scale / sh * 1.2f;
-        comboLabel.fontSize *= 0.45f;
-        drawHud(comboLabel, "COMBO");
-    }
-
-    // Pause or results overlay
     if (m_showResults) {
         renderResultsOverlay();
     } else if (m_gameplayPaused) {
@@ -1092,46 +1021,7 @@ void Engine::renderPauseOverlay() {
 }
 
 void Engine::renderResultsOverlay() {
-    ImVec2 displaySz = ImGui::GetIO().DisplaySize;
-
-    // Semi-transparent background
-    ImGui::SetNextWindowPos(ImVec2(0, 0));
-    ImGui::SetNextWindowSize(displaySz);
-    ImGui::Begin("##results_bg", nullptr,
-        ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoBackground |
-        ImGuiWindowFlags_NoBringToFrontOnFocus);
-    ImGui::GetWindowDrawList()->AddRectFilled(
-        ImVec2(0, 0), displaySz, IM_COL32(0, 0, 0, 180));
-    ImGui::End();
-
-    // Centered results panel
-    ImVec2 panelSz(280, 300);
-    ImGui::SetNextWindowPos(ImVec2((displaySz.x - panelSz.x) * 0.5f,
-                                    (displaySz.y - panelSz.y) * 0.5f));
-    ImGui::SetNextWindowSize(panelSz);
-    ImGui::Begin("Results", nullptr,
-        ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
-        ImGuiWindowFlags_NoCollapse);
-
-    ImGui::Text("Score:     %07d", m_score.getScore());
-    ImGui::Text("Max Combo: %d", m_score.getMaxCombo());
-    ImGui::Separator();
-
-    const auto& stats = m_judgment.getStats();
-    ImGui::TextColored(ImVec4(1.f, 0.95f, 0.2f, 1.f), "Perfect: %d", stats.perfect);
-    ImGui::TextColored(ImVec4(0.2f, 1.f, 0.4f, 1.f),  "Good:    %d", stats.good);
-    ImGui::TextColored(ImVec4(0.6f, 0.6f, 1.f, 1.f),  "Bad:     %d", stats.bad);
-    ImGui::TextColored(ImVec4(1.f, 0.3f, 0.3f, 1.f),  "Miss:    %d", stats.miss);
-
-    ImGui::Spacing();
-    ImGui::Separator();
-    ImGui::Spacing();
-
-    if (ImGui::Button("Back", ImVec2(-1, 40))) {
-        exitGameplay();
-    }
-
-    ImGui::End();
+    m_resultsView.render(ImGui::GetIO().DisplaySize, *this);
 }
 
 // ── Gesture handlers ─────────────────────────────────────────────────────────

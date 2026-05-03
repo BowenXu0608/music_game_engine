@@ -16,9 +16,41 @@
   #define WIN32_LEAN_AND_MEAN
   #include <windows.h>
   #include <shellapi.h>
+  #include <commdlg.h>
 #endif
 
 namespace fs = std::filesystem;
+
+#ifdef _WIN32
+// Open a "Save As" dialog and return the user's chosen .apk path, or an
+// empty string if they cancel. defaultDir + defaultName seed the dialog.
+static std::string pickApkSavePath(const fs::path& defaultDir,
+                                   const std::string& defaultName) {
+    wchar_t fileBuf[MAX_PATH] = {};
+    std::wstring wname(defaultName.begin(), defaultName.end());
+    wcsncpy_s(fileBuf, MAX_PATH, wname.c_str(), _TRUNCATE);
+
+    std::wstring wdir = defaultDir.wstring();
+
+    OPENFILENAMEW ofn{};
+    ofn.lStructSize  = sizeof(ofn);
+    ofn.lpstrFilter  = L"Android Package (*.apk)\0*.apk\0All Files\0*.*\0";
+    ofn.lpstrFile    = fileBuf;
+    ofn.nMaxFile     = MAX_PATH;
+    ofn.lpstrInitialDir = wdir.empty() ? nullptr : wdir.c_str();
+    ofn.lpstrTitle   = L"Save APK As";
+    ofn.lpstrDefExt  = L"apk";
+    ofn.Flags        = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
+
+    if (!GetSaveFileNameW(&ofn)) return {};
+
+    int n = WideCharToMultiByte(CP_UTF8, 0, fileBuf, -1, nullptr, 0, nullptr, nullptr);
+    std::string out(n > 0 ? n - 1 : 0, '\0');
+    if (n > 0)
+        WideCharToMultiByte(CP_UTF8, 0, fileBuf, -1, out.data(), n, nullptr, nullptr);
+    return out;
+}
+#endif
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -641,7 +673,8 @@ void ProjectHub::renderAddFileDialog() {
 void ProjectHub::startApkBuild(const ProjectInfo& proj) {
     if (m_apkRunning) return;
 
-    // Default output: <Desktop>/<ProjectName>.apk
+    // Seed the Save-As dialog with <Desktop>/<ProjectName>.apk; the user
+    // picks the actual save location.
     fs::path desktop;
 #ifdef _WIN32
     if (const char* up = std::getenv("USERPROFILE"))
@@ -652,7 +685,15 @@ void ProjectHub::startApkBuild(const ProjectInfo& proj) {
 
     std::string safeName = sanitizeName(proj.name.c_str());
     if (safeName.empty()) safeName = "game";
-    fs::path outputApk = desktop / (safeName + ".apk");
+
+    fs::path outputApk;
+#ifdef _WIN32
+    std::string picked = pickApkSavePath(desktop, safeName + ".apk");
+    if (picked.empty()) return;  // user cancelled
+    outputApk = fs::u8path(picked);
+#else
+    outputApk = desktop / (safeName + ".apk");
+#endif
     fs::path logPath   = fs::temp_directory_path() / (safeName + "_apk_build.log");
 
     // Resolve script path relative to CWD (build/Release or similar)

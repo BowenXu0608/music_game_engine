@@ -6,6 +6,7 @@
 #include "ui/SettingsPageUI.h"
 #include <android/log.h>
 #include <android/input.h>
+#include <android/configuration.h>
 #include <imgui.h>
 #include <algorithm>
 #include <chrono>
@@ -52,6 +53,54 @@ void AndroidEngine::init(android_app* app, const std::string& shaderDir) {
     loadProject();
     loadPlayerSettingsFile();
     applyPlayerSettings();
+
+    // Eager-unpack: extract music_selection.json + start_screen.json and
+    // every file path they reference so the shared View classes can fopen
+    // them via standard filesystem calls. Vulkan can't read directly from
+    // inside the APK; everything the player views render must live on disk.
+    {
+        AndroidFileIO::extractToInternal("music_selection.json");
+        AndroidFileIO::extractToInternal("start_screen.json");
+
+        auto extractRefsIn = [](const std::string& json) {
+            // Walk every quoted "...":" ..." pair; if the right-hand value
+            // looks like a relative file path with an extension and the file
+            // exists in the APK, materialize it to internal storage.
+            size_t pos = 0;
+            while (pos < json.size()) {
+                size_t colon = json.find(':', pos);
+                if (colon == std::string::npos) break;
+                size_t q1 = json.find('"', colon + 1);
+                if (q1 == std::string::npos) break;
+                // Make sure no '\n' between ':' and the opening quote (we want
+                // a string-valued field, not a key on the next line).
+                size_t nl = json.find('\n', colon);
+                if (nl != std::string::npos && nl < q1) { pos = q1; continue; }
+                size_t q2 = json.find('"', q1 + 1);
+                if (q2 == std::string::npos) break;
+                std::string v = json.substr(q1 + 1, q2 - q1 - 1);
+                if (!v.empty() &&
+                    v.find('/') != std::string::npos &&
+                    v.find('.') != std::string::npos &&
+                    v.find('\\') == std::string::npos &&
+                    AndroidFileIO::exists(v)) {
+                    AndroidFileIO::extractToInternal(v);
+                }
+                pos = q2 + 1;
+            }
+        };
+
+        std::string ms = AndroidFileIO::readString("music_selection.json");
+        if (!ms.empty()) extractRefsIn(ms);
+        std::string ss = AndroidFileIO::readString("start_screen.json");
+        if (!ss.empty()) extractRefsIn(ss);
+
+        m_assetsPath = AndroidFileIO::internalPath();
+        if (!m_assetsPath.empty() && m_assetsPath.back() == '/')
+            m_assetsPath.pop_back();
+        LOGI("Eager unpack done; assets root = %s", m_assetsPath.c_str());
+    }
+
     LOGI("AndroidEngine initialized");
 }
 
@@ -110,6 +159,33 @@ void AndroidEngine::onWindowInit(ANativeWindow* window) {
     ImGui::StyleColorsDark();
     applyTheme();
 
+    // DPI scaling: query device density and rebuild the font atlas at the
+    // matching pixel size so glyphs are crisp on high-DPI phones, and scale
+    // ImGui's padding/rounding so widgets aren't physically tiny.
+    float dpiScale = 1.0f;
+    if (m_app && m_app->config) {
+        int32_t density = AConfiguration_getDensity(m_app->config);
+        if (density > 0) {
+            dpiScale = (float)density / 160.0f;
+            if (dpiScale < 1.0f) dpiScale = 1.0f;  // floor at mdpi
+            if (dpiScale > 4.0f) dpiScale = 4.0f;  // sanity cap
+        }
+    }
+    ImGuiIO& io = ImGui::GetIO();
+    io.Fonts->Clear();
+    {
+        ImFontConfig cfg;
+        cfg.SizePixels = 13.0f * dpiScale;
+        io.Fonts->AddFontDefault(&cfg);
+    }
+    ImGui::GetStyle().ScaleAllSizes(dpiScale);
+    TouchThresholds::scaleByDpi(dpiScale);
+    m_hudView.setUiScale(dpiScale);
+    m_dpiScale = dpiScale;
+    LOGI("DPI scale = %.2f (density bucket = %d)",
+         dpiScale,
+         (m_app && m_app->config) ? AConfiguration_getDensity(m_app->config) : -1);
+
     // ImGui Vulkan init
     ImGui_ImplVulkan_InitInfo initInfo{};
     memset(&initInfo, 0, sizeof(initInfo));
@@ -144,6 +220,16 @@ void AndroidEngine::onWindowInit(ANativeWindow* window) {
     // Upload fonts
     ImGui_ImplVulkan_CreateFontsTexture();
 
+    // Wrap the offscreen scene image as an ImGui texture so we can blit it
+    // full-screen during gameplay. The renderer never composites the scene
+    // to the swapchain itself — desktop draws it via ImGui::Image, and we
+    // do the same here. Without this, gameplay renders to an unseen
+    // framebuffer and only HUD overlays appear.
+    m_sceneTexSet = ImGui_ImplVulkan_AddTexture(
+        m_renderer.postProcess().bloomSampler(),
+        m_renderer.sceneImageView(),
+        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+
     m_vulkanReady = true;
     LOGI("Vulkan renderer ready: %dx%d", m_renderer.width(), m_renderer.height());
 }
@@ -157,6 +243,20 @@ void AndroidEngine::onWindowResize() {
     } catch (const std::exception& e) {
         LOGE("onResize failed: %s", e.what());
     }
+
+    // PostProcess::resize destroys + recreates the scene image and view.
+    // Our cached ImGui descriptor still points at the freed handle, which
+    // shows up as a black/garbage gameplay scene (or a GPU fault on stricter
+    // drivers) the first time renderGameplayHUD blits it. Rebind to the
+    // current sceneImageView so gameplay actually appears.
+    if (m_sceneTexSet != VK_NULL_HANDLE) {
+        ImGui_ImplVulkan_RemoveTexture(m_sceneTexSet);
+        m_sceneTexSet = VK_NULL_HANDLE;
+    }
+    m_sceneTexSet = ImGui_ImplVulkan_AddTexture(
+        m_renderer.postProcess().bloomSampler(),
+        m_renderer.sceneImageView(),
+        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 }
 
 void AndroidEngine::onWindowTerm() {
@@ -266,6 +366,20 @@ void AndroidEngine::update(float dt) {
     // Gameplay update
     if (m_activeMode && m_screen == GameScreen::Gameplay && !m_gameplayPaused) {
         double songT = m_clock.songTime();
+
+        // Auto play: consume every note whose time has arrived and dispatch
+        // Perfect hits. Runs before the miss sweep so nothing decays to Miss.
+        // Mirrors Engine::update on desktop.
+        if (m_autoPlay) {
+            auto autoHits = m_hitDetector.autoPlayTick(songT);
+            for (auto& ah : autoHits) {
+                m_judgment.recordJudgment(Judgment::Perfect);
+                m_score.onJudgment(Judgment::Perfect);
+                if (ah.lane >= 0)
+                    m_activeMode->showJudgment(ah.lane, Judgment::Perfect);
+            }
+        }
+
         auto missed = m_hitDetector.update(songT);
         for (auto& m : missed) {
             m_judgment.recordJudgment(Judgment::Miss);
@@ -280,6 +394,12 @@ void AndroidEngine::update(float dt) {
         }
         auto broken = m_hitDetector.consumeBrokenHolds();
         (void)broken;
+        // Sync active-hold ids so BandoriRenderer keeps drawing the hold body
+        // (and lights up the active glow). Without this, holds disappear the
+        // instant their head crosses the judgement line — even with autoplay,
+        // because the renderer's m_activeHoldIds stays empty and the stale-hold
+        // cull (note.time + kBadWindow) trips at 0.15s past head.
+        m_activeMode->setActiveHoldIds(m_hitDetector.activeHoldIds());
         m_activeMode->onUpdate(dt, songT);
     }
 
@@ -349,18 +469,34 @@ void AndroidEngine::render() {
 void AndroidEngine::renderGameplayHUD() {
     ImVec2 displaySz = ImGui::GetIO().DisplaySize;
 
+    // Blit the offscreen scene image full-screen. Renderer::endFrame leaves
+    // the swapchain pass open and never composites — desktop pulls the scene
+    // texture in via ImGui::Image too. Without this the entire playfield
+    // (lanes, judgment line, notes, bg) is invisible and only HUD shows.
+    if (m_sceneTexSet != VK_NULL_HANDLE) {
+        ImGui::SetNextWindowPos(ImVec2(0, 0));
+        ImGui::SetNextWindowSize(displaySz);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
+        ImGui::Begin("##gameplay_scene", nullptr,
+            ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoBackground |
+            ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoInputs);
+        ImGui::Image((ImTextureID)m_sceneTexSet, displaySz);
+        ImGui::End();
+        ImGui::PopStyleVar();
+    }
+
     // Background dim overlay (under the HUD, over the rendered scene).
     if (m_playerSettings.backgroundDim > 0.f) {
         const float a = std::min(m_playerSettings.backgroundDim, 1.f) * 0.75f;
         ImU32 dim = IM_COL32(0, 0, 0, (int)(a * 255.f));
-        ImGui::GetBackgroundDrawList()->AddRectFilled(
+        ImGui::GetForegroundDrawList()->AddRectFilled(
             ImVec2(0, 0), displaySz, dim);
     }
 
-    // FPS counter (top-left corner).
+    // FPS counter (Android-only; not part of the shared HUD view).
     if (m_playerSettings.fpsCounter) {
-        ImGui::SetNextWindowPos(ImVec2(10, 10));
-        ImGui::SetNextWindowSize(ImVec2(80, 28));
+        ImGui::SetNextWindowPos(ImVec2(10 * m_dpiScale, 10 * m_dpiScale));
+        ImGui::SetNextWindowSize(ImVec2(80 * m_dpiScale, 28 * m_dpiScale));
         ImGui::Begin("##fps", nullptr,
             ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoBackground |
             ImGuiWindowFlags_NoInputs);
@@ -369,64 +505,15 @@ void AndroidEngine::renderGameplayHUD() {
         ImGui::End();
     }
 
-    // Combo display
-    ImGui::SetNextWindowPos(ImVec2(displaySz.x * 0.5f - 50, 20));
-    ImGui::SetNextWindowSize(ImVec2(100, 60));
-    ImGui::Begin("##combo", nullptr,
-        ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoBackground);
-    ImGui::SetWindowFontScale(2.0f);
-    int combo = m_score.getCombo();
-    if (combo > 0) {
-        char buf[16];
-        snprintf(buf, sizeof(buf), "%d", combo);
-        ImVec2 tsz = ImGui::CalcTextSize(buf);
-        ImGui::SetCursorPosX((100 - tsz.x) * 0.5f);
-        ImGui::TextColored(ImVec4(1.f, 0.9f, 0.3f, 1.f), "%s", buf);
-    }
-    ImGui::End();
+    m_hudView.render(displaySz, m_adapter);
 
-    // Score display
-    ImGui::SetNextWindowPos(ImVec2(displaySz.x - 160, 10));
-    ImGui::SetNextWindowSize(ImVec2(150, 40));
-    ImGui::Begin("##score", nullptr,
-        ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoBackground);
-    ImGui::Text("SCORE: %07d", m_score.getScore());
-    ImGui::End();
+    if (m_gameplayPaused) {
+        renderPauseOverlay();
+    }
 }
 
 void AndroidEngine::renderResultsHUD() {
-    ImVec2 displaySz = ImGui::GetIO().DisplaySize;
-
-    ImVec2 panelSz(300, 350);
-    ImGui::SetNextWindowPos(ImVec2((displaySz.x - panelSz.x) * 0.5f,
-                                    (displaySz.y - panelSz.y) * 0.5f));
-    ImGui::SetNextWindowSize(panelSz);
-    ImGui::Begin("Results", nullptr,
-        ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
-        ImGuiWindowFlags_NoCollapse);
-
-    ImGui::Text("Score:     %07d", m_score.getScore());
-    ImGui::Text("Max Combo: %d", m_score.getMaxCombo());
-    ImGui::Separator();
-
-    const auto& stats = m_judgment.getStats();
-    ImGui::TextColored(ImVec4(1.f, 0.95f, 0.2f, 1.f), "Perfect: %d", stats.perfect);
-    ImGui::TextColored(ImVec4(0.2f, 1.f, 0.4f, 1.f),  "Good:    %d", stats.good);
-    ImGui::TextColored(ImVec4(0.6f, 0.6f, 1.f, 1.f),  "Bad:     %d", stats.bad);
-    ImGui::TextColored(ImVec4(1.f, 0.3f, 0.3f, 1.f),  "Miss:    %d", stats.miss);
-
-    ImGui::Spacing();
-    ImGui::Separator();
-    ImGui::Spacing();
-
-    if (ImGui::Button("Retry", ImVec2(-1, 50))) {
-        startGameplay(m_selectedSong);
-    }
-    if (ImGui::Button("Back", ImVec2(-1, 50))) {
-        exitGameplay();
-    }
-
-    ImGui::End();
+    m_resultsView.render(ImGui::GetIO().DisplaySize, m_adapter);
 }
 
 // Aspect-fill the source rect onto dest; returns the [uv0, uv1] crop region.
@@ -451,190 +538,61 @@ static void aspectFillUV(float srcW, float srcH, float dstW, float dstH,
 }
 
 void AndroidEngine::renderStartScreen() {
-    ImVec2 displaySz = ImGui::GetIO().DisplaySize;
-    ImDrawList* bg = ImGui::GetBackgroundDrawList();
-
-    // ── Background image (aspect-filled to fully cover the screen) ──────────
-    ImTextureID bgTex = loadAssetTexture(m_startBgPath);
-    if (bgTex) {
-        ImVec2 uv0, uv1;
-        // Approximate: assume the source is at least roughly 16:9; the texture
-        // manager doesn't expose width/height through ImTextureID, but the cover
-        // pass is forgiving for portrait/landscape mismatches.
-        aspectFillUV(16.f, 9.f, displaySz.x, displaySz.y, uv0, uv1);
-        bg->AddImage(bgTex, ImVec2(0, 0), displaySz, uv0, uv1);
-        // Slight darken so text reads cleanly.
-        bg->AddRectFilled(ImVec2(0, 0), displaySz, IM_COL32(8, 10, 14, 90));
-    } else {
-        // No bg → solid dark.
-        bg->AddRectFilled(ImVec2(0, 0), displaySz, IM_COL32(14, 18, 24, 255));
+    if (!m_viewsReady && !m_assetsPath.empty()) {
+        m_startView.initVulkan(m_renderer.context(), m_renderer.buffers(), nullptr);
+        m_musicView.initVulkan(m_renderer.context(), m_renderer.buffers(), nullptr);
+        m_startView.load(m_assetsPath);
+        m_musicView.load(m_assetsPath);
+        m_viewsReady = true;
     }
 
-    // ── Title ───────────────────────────────────────────────────────────────
-    const char* title = m_startTitleText.empty() ? "Music Game" : m_startTitleText.c_str();
-    // ImGui's default font is 13 px; fontScale = pixelSize / 13.
-    float titleScale = m_startTitleFontPx / 13.f;
-    ImFont* font = ImGui::GetFont();
-    float titlePx  = font->FontSize * titleScale;
-    ImVec2 titleSz = font->CalcTextSizeA(titlePx, FLT_MAX, 0.0f, title);
-    ImVec2 titlePos(displaySz.x * m_startTitlePos.x - titleSz.x * 0.5f,
-                    displaySz.y * m_startTitlePos.y - titleSz.y * 0.5f);
-    ImU32 titleCol = ImGui::ColorConvertFloat4ToU32(m_startTitleColor);
-    bg->AddText(font, titlePx, titlePos, titleCol, title);
+    ImVec2 displaySz = ImGui::GetIO().DisplaySize;
 
-    // ── Tap prompt ──────────────────────────────────────────────────────────
-    const char* tap = m_startTapText.empty() ? "Tap to Start" : m_startTapText.c_str();
-    float tapScale = m_startTapFontPx / 13.f;
-    float tapPx    = font->FontSize * tapScale;
-    ImVec2 tapSz   = font->CalcTextSizeA(tapPx, FLT_MAX, 0.0f, tap);
-    // Pulse the tap prompt
-    float pulse = 0.6f + 0.4f * (0.5f + 0.5f * std::sin((float)ImGui::GetTime() * 2.5f));
-    ImVec2 tapPos(displaySz.x * m_startTapPos.x - tapSz.x * 0.5f,
-                  displaySz.y * m_startTapPos.y - tapSz.y * 0.5f);
-    ImU32 tapCol = IM_COL32(255, 255, 255, (int)(255 * pulse));
-    bg->AddText(font, tapPx, tapPos, tapCol, tap);
-
-    // ── Full-window tap capture ─────────────────────────────────────────────
     ImGui::SetNextWindowPos(ImVec2(0, 0));
     ImGui::SetNextWindowSize(displaySz);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
     ImGui::Begin("##startscreen", nullptr,
         ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
         ImGuiWindowFlags_NoBackground |
         ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoNavFocus);
+
+    ImVec2 origin = ImGui::GetCursorScreenPos();
+    m_startView.renderGamePreview(origin, displaySz);
+
     if (ImGui::InvisibleButton("##startTap", displaySz)) {
         m_screen = GameScreen::MusicSelection;
         LOGI("StartScreen tapped -> MusicSelection");
     }
     ImGui::End();
+    ImGui::PopStyleVar();
 }
 
 void AndroidEngine::renderMusicSelection() {
+    if (!m_viewsReady && !m_assetsPath.empty()) {
+        m_startView.initVulkan(m_renderer.context(), m_renderer.buffers(), nullptr);
+        m_musicView.initVulkan(m_renderer.context(), m_renderer.buffers(), nullptr);
+        m_startView.load(m_assetsPath);
+        m_musicView.load(m_assetsPath);
+        m_viewsReady = true;
+    }
+
     ImVec2 displaySz = ImGui::GetIO().DisplaySize;
-    ImDrawList* bg = ImGui::GetBackgroundDrawList();
+    float dt = ImGui::GetIO().DeltaTime;
+    m_musicView.update(dt, &m_adapter);
 
-    // ── Background image + frosted overlay ──────────────────────────────────
-    ImTextureID bgTex = loadAssetTexture(m_musicBgPath);
-    if (bgTex) {
-        ImVec2 uv0, uv1;
-        aspectFillUV(16.f, 9.f, displaySz.x, displaySz.y, uv0, uv1);
-        bg->AddImage(bgTex, ImVec2(0, 0), displaySz, uv0, uv1);
-        bg->AddRectFilled(ImVec2(0, 0), displaySz, IM_COL32(6, 8, 12, 170));
-    } else {
-        bg->AddRectFilled(ImVec2(0, 0), displaySz, IM_COL32(14, 18, 24, 255));
-    }
+    ImGui::SetNextWindowPos(ImVec2(0, 0));
+    ImGui::SetNextWindowSize(displaySz);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
+    ImGui::Begin("##musicsel", nullptr,
+        ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
+        ImGuiWindowFlags_NoBackground |
+        ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoNavFocus);
 
-    // ── Header bar ──────────────────────────────────────────────────────────
-    float headerH = displaySz.y * 0.10f;
-    bg->AddRectFilled(ImVec2(0, 0), ImVec2(displaySz.x, headerH),
-                      IM_COL32(0, 0, 0, 130));
-    ImFont* font = ImGui::GetFont();
-    float titlePx = font->FontSize * 2.4f;
-    bg->AddText(font, titlePx, ImVec2(displaySz.x * 0.04f, headerH * 0.30f),
-                IM_COL32(255, 255, 255, 240), "Select a Song");
+    ImVec2 origin = ImGui::GetCursorScreenPos();
+    m_musicView.renderGamePreview(origin, displaySz, &m_adapter);
 
-    // ── Song cards (rectangle grid; one row, scrolls horizontally if needed) ─
-    ImTextureID fcTex = loadAssetTexture(m_fcImagePath);
-    ImTextureID apTex = loadAssetTexture(m_apImagePath);
-
-    float cardsAreaY = headerH + 24.f;
-    float cardsAreaH = displaySz.y * 0.55f;
-    int   nSongs     = (int)m_songs.size();
-    if (nSongs > 0) {
-        // Card sizing — fit up to 4 across, with 16-px gaps and 24-px side margins
-        int  cols = std::min(nSongs, 4);
-        float gap  = 16.f;
-        float side = 24.f;
-        float cardW = (displaySz.x - 2 * side - (cols - 1) * gap) / cols;
-        float cardH = cardsAreaH * 0.85f;
-        float startX = side;
-        float startY = cardsAreaY + (cardsAreaH - cardH) * 0.5f;
-
-        for (int i = 0; i < nSongs; ++i) {
-            int col = i % cols;
-            int row = i / cols;
-            float x = startX + col * (cardW + gap);
-            float y = startY + row * (cardH + gap);
-            ImVec2 p0(x, y), p1(x + cardW, y + cardH);
-            bool selected = (i == m_selectedSong);
-
-            // Cover image
-            ImTextureID coverTex = loadAssetTexture(m_songs[i].coverImage);
-            if (coverTex) {
-                ImVec2 uv0, uv1;
-                aspectFillUV(1.f, 1.f, cardW, cardH, uv0, uv1);
-                bg->AddImage(coverTex, p0, p1, uv0, uv1);
-            } else {
-                bg->AddRectFilled(p0, p1, IM_COL32(20, 24, 30, 230));
-            }
-            // Card border + selected ring
-            bg->AddRect(p0, p1,
-                        selected ? IM_COL32(80, 220, 240, 255) : IM_COL32(70, 90, 110, 180),
-                        8.f, 0, selected ? 4.f : 1.5f);
-
-            // Bottom gradient strip for the title to sit on
-            float stripH = cardH * 0.30f;
-            bg->AddRectFilledMultiColor(
-                ImVec2(p0.x, p1.y - stripH), p1,
-                IM_COL32(0, 0, 0, 0), IM_COL32(0, 0, 0, 0),
-                IM_COL32(0, 0, 0, 220), IM_COL32(0, 0, 0, 220));
-
-            // Title + artist
-            float namePx = font->FontSize * 1.4f;
-            float artPx  = font->FontSize * 1.0f;
-            bg->AddText(font, namePx,
-                        ImVec2(p0.x + 12, p1.y - stripH + 12),
-                        IM_COL32(255, 255, 255, 245),
-                        m_songs[i].name.c_str());
-            bg->AddText(font, artPx,
-                        ImVec2(p0.x + 12, p1.y - stripH + 12 + namePx + 4),
-                        IM_COL32(220, 220, 230, 200),
-                        m_songs[i].artist.c_str());
-
-            // Best score (top-right)
-            char scoreBuf[32];
-            snprintf(scoreBuf, sizeof(scoreBuf), "%d", m_songs[i].score);
-            ImVec2 ssz = font->CalcTextSizeA(font->FontSize * 1.0f, FLT_MAX, 0.f, scoreBuf);
-            bg->AddText(font, font->FontSize * 1.0f,
-                        ImVec2(p1.x - ssz.x - 10, p0.y + 8),
-                        IM_COL32(255, 230, 100, 235), scoreBuf);
-
-            // Achievement badge (top-left)
-            ImTextureID badge = (m_songs[i].achievement == "AP") ? apTex
-                              : (m_songs[i].achievement == "FC") ? fcTex
-                              : (ImTextureID)0;
-            if (badge) {
-                float bsz = std::min(48.f, cardW * 0.20f);
-                bg->AddImage(badge,
-                             ImVec2(p0.x + 8, p0.y + 8),
-                             ImVec2(p0.x + 8 + bsz, p0.y + 8 + bsz));
-            }
-
-            // Tap to select
-            ImGui::SetCursorScreenPos(p0);
-            char id[16]; snprintf(id, sizeof(id), "##song%d", i);
-            if (ImGui::InvisibleButton(id, ImVec2(cardW, cardH))) {
-                m_selectedSong = i;
-            }
-        }
-    }
-
-    // ── Footer buttons ──────────────────────────────────────────────────────
-    float btnH    = 64.f;
-    float btnPad  = 24.f;
-    float btnRowY = displaySz.y - btnH - btnPad;
-    float btnGap  = 16.f;
-    float btnW    = (displaySz.x - 2 * btnPad - btnGap) * 0.5f;
-
-    ImGui::SetCursorScreenPos(ImVec2(btnPad, btnRowY));
-    if (ImGui::Button("SETTINGS", ImVec2(btnW, btnH))) {
-        m_screen = GameScreen::Settings;
-    }
-    ImGui::SetCursorScreenPos(ImVec2(btnPad + btnW + btnGap, btnRowY));
-    if (!m_songs.empty()) {
-        if (ImGui::Button("PLAY", ImVec2(btnW, btnH))) {
-            startGameplay(m_selectedSong);
-        }
-    }
+    ImGui::End();
+    ImGui::PopStyleVar();
 }
 
 void AndroidEngine::renderSettings() {
@@ -922,8 +880,10 @@ void AndroidEngine::applyTheme() {
     c[ImGuiCol_Separator]       = ImVec4(0.20f, 0.55f, 0.65f, 0.40f);
 }
 
-void AndroidEngine::startGameplay(int songIndex) {
+void AndroidEngine::startGameplay(int songIndex, bool autoPlay) {
     if (songIndex < 0 || songIndex >= (int)m_songs.size()) return;
+    m_lastSongIndex = songIndex;
+    m_autoPlay = autoPlay;
     auto& song = m_songs[songIndex];
 
     // Load chart
@@ -938,6 +898,12 @@ void AndroidEngine::startGameplay(int songIndex) {
     m_score.reset();
     m_activeTouches.clear();
 
+    // Cache the launched mode so engine.gameplayConfig() returns this song's
+    // HUD layout. Without this, scoreHud and comboHud read default-constructed
+    // {0.5, 0.5} positions and stack their numbers on top of each other in
+    // the centre of the screen — the "bloom on combo" the user sees.
+    m_gameplayConfig = song.gameMode;
+
     // Lead-in
     float leadIn = 2.0f;
     m_clock.setSongTime(-leadIn - song.gameMode.audioOffset);
@@ -946,6 +912,12 @@ void AndroidEngine::startGameplay(int songIndex) {
     m_pendingAudioPath = song.audioFile;
     m_showResults = false;
     m_gameplayPaused = false;
+
+    // togglePause()→exitGameplay leaves the clock paused. Without resuming
+    // here, the next startGameplay call sets songTime=-leadIn but tick()
+    // returns 0 forever, so audio never starts and the screen looks frozen on
+    // the music-selection page. Matches Engine::launchGameplay on desktop.
+    m_clock.resume();
 
     // Apply player settings to the freshly-created renderer / hit detector.
     applyPlayerSettings();
@@ -964,6 +936,61 @@ void AndroidEngine::exitGameplay() {
     m_showResults = false;
     m_gameplayPaused = false;
     m_screen = GameScreen::MusicSelection;
+}
+
+void AndroidEngine::togglePause() {
+    m_gameplayPaused = !m_gameplayPaused;
+    if (m_gameplayPaused) {
+        m_audio.pause();
+        m_clock.pause();
+    } else {
+        m_audio.resume();
+        m_clock.resume();
+    }
+}
+
+void AndroidEngine::requestStop() {
+    // Esc-equivalent for the on-screen Stop button: from results we exit,
+    // from active gameplay we toggle pause. Matches Engine::requestStop on
+    // desktop so the shared HUD has identical semantics on both targets.
+    if (m_screen != GameScreen::Gameplay && m_screen != GameScreen::Results) return;
+    if (m_showResults) exitGameplay();
+    else               togglePause();
+}
+
+void AndroidEngine::restartGameplay() {
+    if (m_lastSongIndex < 0) return;
+    int idx = m_lastSongIndex;
+    bool ap = m_autoPlay;
+    exitGameplay();
+    startGameplay(idx, ap);
+}
+
+void AndroidEngine::renderPauseOverlay() {
+    ImVec2 displaySz = ImGui::GetIO().DisplaySize;
+
+    // Dim layer
+    ImGui::GetForegroundDrawList()->AddRectFilled(
+        ImVec2(0, 0), displaySz, IM_COL32(0, 0, 0, 160));
+
+    // Centered pause menu, DPI-scaled
+    const float ui = m_dpiScale;
+    ImVec2 menuSize(260.f * ui, 220.f * ui);
+    ImGui::SetNextWindowPos(ImVec2((displaySz.x - menuSize.x) * 0.5f,
+                                    (displaySz.y - menuSize.y) * 0.5f));
+    ImGui::SetNextWindowSize(menuSize);
+    ImGui::Begin("Paused", nullptr,
+        ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
+        ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoSavedSettings);
+
+    float btnH = 48.f * ui;
+    if (ImGui::Button("Resume",  ImVec2(-1, btnH))) togglePause();
+    ImGui::Spacing();
+    if (ImGui::Button("Restart", ImVec2(-1, btnH))) restartGameplay();
+    ImGui::Spacing();
+    if (ImGui::Button("Exit",    ImVec2(-1, btnH))) exitGameplay();
+
+    ImGui::End();
 }
 
 void AndroidEngine::loadPlayerSettingsFile() {

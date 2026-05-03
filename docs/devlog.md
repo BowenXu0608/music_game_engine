@@ -1662,3 +1662,227 @@ Resume point: start with the `AndroidEngineAdapter` shim. The texture cache + th
 2. **Explicit whitelist > glob, but only if you remember to update it.** The Android CMake's explicit source list is *deliberate* (per the project's "Android build is completely isolated" rule), but it has no automatic check that catches new desktop files. Possible future fix: a CI step that does the link from CMake's perspective.
 3. **`ImGui_ImplVulkan_AddTexture` is the bridge.** Three lines wraps a `Texture { view, sampler }` into an `ImTextureID` that draw lists / `ImGui::Image` accept. The whole "show real textures on Android" feature was unblocked by this one call.
 4. **Drift is the real cost over months.** This is *why* Path A (share the editor source) is the right answer over Path B (replicate). Today's regressions were three drifts that all happened during a non-Android sprint. Path A converts those into a single shared dependency.
+
+---
+
+## 2026-05-03 — Player-game / editor structural split (Path A migration shipped)
+
+The Round 6 (2026-05-02) note left an open mission: stop replicating the editor's render code in `AndroidEngine.cpp` and instead share it. Today that landed end-to-end across nine sub-phases. The user reframed the goal during planning: "we hope to create a game so that people can download on their phone to play" → the Android binary is the **shippable product**, not a port of the editor. Two firm rules followed: (1) strip everything engine-developer-only from the player binary; (2) everything the game needs ships inside the APK. A third correction came mid-plan: the split has to be **structural**, not `#ifdef`-deep — class names like `StartScreenEditor` declare the file as editor code, so even gating the body wouldn't be clean. Player-facing rendering must live in **game-side classes**; editors compose them.
+
+### Architecture: from editor-monolith to game/editor stack
+
+Before today, the player-facing scenes (start screen, music selection, gameplay HUD, results) lived inside editor classes (`StartScreenEditor`, `MusicSelectionEditor`) or inline in `Engine.cpp` (`renderGameplayHUD`, `renderResultsOverlay`). Desktop's "test mode" rendered the editor's preview as the full game; Android replicated the visuals from scratch.
+
+After today the layering is:
+
+```
++-----------------------------------+
+|  Editor wrappers (desktop only)   |
+|  StartScreenEditor  (sidebar)     |
+|  MusicSelectionEditor (sidebar)   |
+|  + thumbnails / asset browser /   |
+|    AI agents / file dialogs       |
++-----------------+-----------------+
+                  | inherits
+                  v
++-----------------------------------+
+|  Game-side player views           |
+|  StartScreenView                  |
+|  MusicSelectionView               |
+|  GameplayHudView                  |
+|  ResultsView                      |
+|  (engine/src/game/screens/)       |
++-----------------+-----------------+
+                  | drives via
+                  v
++-----------------------------------+
+|  IPlayerEngine (pure virtual)     |
+|  audio / renderer / clock /       |
+|  textureManager / score / judge / |
+|  hitDetector / activeMode /       |
+|  gameplayConfig / launchGameplay /|
+|  exitGameplay / transitions       |
++--+----------------------------+---+
+   |                            |
+   v                            v
++--------+              +-----------------+
+| Engine |              | AndroidEngine + |
+| (desk) |              | AndroidEngine-  |
+|        |              | Adapter (final) |
++--------+              +-----------------+
+```
+
+The view classes are pure rendering — they hold no Engine reference, no editor state, no platform-specific I/O. They take `IPlayerEngine&` parameters where they need engine services (audio for previews, score/judgment data for HUD, `launchGameplay` for the play button). Editor classes inherit the views; sidebars mutate inherited fields directly. Android compiles only the views.
+
+### Phase A — IPlayerEngine + Engine inheritance
+
+New `engine/src/engine/IPlayerEngine.h` defines the minimal player-facing surface. Forward-declared types: `AudioEngine`, `Renderer`, `GameClock`, `PlayerSettings`, `MaterialAssetLibrary`, `InputManager`, `ImGuiLayer`, `ScoreTracker`, `JudgmentSystem`, `HitDetector`, `GameModeRenderer`, `GameModeConfig`, `SongInfo`, `Difficulty`. Pure-virtual accessors: `audio()`, `renderer()`, `clock()`, `playerSettings()`, `materialLibrary()`, `inputManager()`, `imguiLayer()` (nullable — Android returns `nullptr`), `score()`, `judgment()`, `hitDetector()`, `activeMode()`, `gameplayConfig() const`. State queries: `isTestMode() const`, `isTestTransitioning() const`, `testTransProgress() const`. Player flow: `launchGameplay(SongInfo, Difficulty, projectPath, autoPlay)`, `exitGameplay()`. `Engine` declares `: public IPlayerEngine`, marks every existing accessor `override`, and adds new public accessors for `score()`/`judgment()`/`hitDetector()`/`activeMode()`/`gameplayConfig()`/`imguiLayer()` (latter returns `&m_imgui`). Desktop builds clean; runtime unchanged.
+
+### Phase B — StartScreenView extraction
+
+New `engine/src/game/screens/StartScreenView.{h,cpp}`. Owns: `BgType`/`LogoType`/`TransitionEffect` enums, `m_bgType`/`m_bgFile`/`m_bgTexture`/`m_bgDesc`/`m_gifPlayer`, all logo state (`m_logoType` text/image branches with color, font size, bold/italic, image file, glow color/radius, position, scale), tap-prompt state, audio config, transition state. Public API: `initVulkan(ctx, bufMgr, ImGuiLayer*)` (nullable for Android), `shutdownVulkan`, `load(projectRoot)` (virtual — editor overrides to clear thumbnails first), `save()`, `renderGamePreview(origin, size)`, `reloadBackground()`, `reloadLogoImage()`, `unloadBackground/Logo`. Texture upload uses `ImGui_ImplVulkan_AddTexture(sampler, view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)` directly so it doesn't need `ImGuiLayer`. `GifPlayer` had its `load()` signature changed to drop the `ImGuiLayer&` parameter and call `ImGui_ImplVulkan_AddTexture` directly — same reason. `StartScreenEditor` now `: public StartScreenView`; data members removed from the editor header (inherited as protected); editor's `load()` becomes a delegate that clears thumbnails then calls `StartScreenView::load`; editor's `renderGamePreview` is gone (inherited). `loadBackground/loadLogoImage` calls inside the editor renamed to `reloadBackground/reloadLogoImage` (no-arg form using stored ctx/bufMgr).
+
+### Phase C — MusicSelectionView extraction
+
+The biggest single phase. New `engine/src/game/screens/MusicSelectionView.{h,cpp}`. The `SongInfo`, `MusicSetInfo` structs and `Difficulty` enum moved here from `MusicSelectionEditor.h` since they're game-side data; `MusicSelectionEditor.h` includes the view header for the types. Owns: `m_sets` (vector of `MusicSetInfo`, each holding songs), selection indices, smooth-scroll state (`m_setScrollTarget/Current`, `m_songScrollTarget/Current`), cover descriptor cache (`m_coverCache`), page background path, FC/AP image paths, audio-preview dwell timer. Public API: `initVulkan`, `shutdownVulkan`, `load` (virtual), `save`, `update(dt, IPlayerEngine*)` (drives smooth-scroll lerp + default-selection + audio preview), `renderGamePreview(origin, size, IPlayerEngine*)`, `getSelectedSong()`, `sets()`. Helper render methods are `protected` so the editor's editor-side preview (`renderPreview`) can reuse them: `renderSetWheel`, `renderSongWheel`, `renderCoverPhoto`, `renderDifficultyButtons`, `renderPlayButton(origin, width, IPlayerEngine*)`. The play button calls `engine->launchGameplay(...)` if `engine->isTestMode()`. The double-click-to-open-SongEditor path was decoupled from the view via a `virtual void onSongCardDoubleClick(int)` hook; `MusicSelectionEditor` overrides it to open SongEditor; the view's default is a no-op so phone players don't carry SongEditor symbols. Editor `load` becomes `clearThumbnails(); MusicSelectionView::load(projectPath);`. Editor's `render(Engine*)` calls `update(dt, engine)` (which drives audio preview) instead of inline `updateAudioPreview(dt) + smooth-scroll`. The editor's full-screen `renderGamePreview(origin, displaySz)` call became `renderGamePreview(origin, displaySz, engine)`. `GameFlowPreview.cpp` got the matching arg-update at its `engine->musicSelectionEditor().renderGamePreview(...)` site. Editor cpp shrunk from 2240 → 1175 lines after the bulk strip (~1065 lines moved into the view; some were duplicated `update*Preview`/`getSelectedSong`/`getCoverDesc`/`clearCovers`/`load`/`save` bodies).
+
+The migration also unified the texture cache — view has one `m_coverCache` used for covers, page background, and FC/AP badges (the editor's old `getThumb` calls inside the helpers were renamed to `getCoverDesc`). The editor keeps its own `m_thumbCache` for the asset browser. `IPlayerEngine::launchGameplay` was added in this phase (the play button needed it); `Engine::launchGameplay` got `override`.
+
+### Phase D — GameplayHudView + ResultsView extraction
+
+New `engine/src/game/screens/GameplayHudView.{h,cpp}` and `ResultsView.{h,cpp}`. `GameplayHudView::render(displaySize, IPlayerEngine&)` is stateless — pulls `score()`, `gameplayConfig().scoreHud/comboHud` from the engine, draws the score panel (with rounded background), the "SCORE" label, the combo panel, and the "COMBO" label. The legacy `Engine::renderGameplayHUD` (~110 lines) became a thin wrapper that still composites the `m_sceneViewer.sceneTexture()` (desktop-specific offscreen scene compositing — Android renders directly to swapchain) and then calls `m_hudView.render(displaySz, *this)`, plus pause/results dispatch. `ResultsView::render(displaySize, IPlayerEngine&)` reads `score()`/`judgment()`, draws the score / max combo / Perfect/Good/Bad/Miss breakdown, and the Back button calls `engine.exitGameplay()`. `Engine::renderResultsOverlay` body became a one-liner: `m_resultsView.render(ImGui::GetIO().DisplaySize, *this)`. `Engine::renderPauseOverlay` stays in Engine — pause is desktop-keyboard-only, not part of the phone player loop. `IPlayerEngine::exitGameplay` was added in this phase. `Engine.h` gained `GameplayHudView m_hudView; ResultsView m_resultsView;` members and includes both view headers.
+
+### Phase E — GameplayLauncher (descoped, deliberately)
+
+The plan called for a shared `launchGameplay(IPlayerEngine&, SongLaunchRef)` free function. Closer reading killed it: `Engine::launchGameplay` (~65 lines) and `AndroidEngine::startGameplay` (~30 lines) only *look* duplicate — they actually diverge for platform-correct reasons. Engine does `openProject(projectPath)`, `m_sceneViewer.setPlaying(true)`, `loadBackgroundTexture(projectPath, song.gameMode.backgroundImage)`, `switchLayer(EditorLayer::GamePlay)` — all desktop-only. AndroidEngine does `AndroidFileIO::extractToInternal` and `m_screen = GameScreen::Gameplay` — Android-only. The truly shared sequence (chart load, material migration, renderer create, hit-detector/judgment/score reset, clock reset with lead-in, `applyPlayerSettings`) is small and would need ~10 currently-private methods plumbed through `IPlayerEngine` to lift it. **Decision: keep both implementations; `IPlayerEngine::launchGameplay` is the abstraction point.** Memory note: `project_gameplay_launcher_deferred.md`.
+
+### Phase F — AndroidEngineAdapter
+
+New `engine/src/android/AndroidEngineAdapter.{h,cpp}`. `final` implementer of `IPlayerEngine` wrapping `AndroidEngine&`. Accessors delegate (`m_engine.m_audio`, `m_engine.m_renderer`, `m_engine.m_score`, `m_engine.m_judgment`, `m_engine.m_hitDetector`, `m_engine.m_clock`, `m_engine.m_input`, `m_engine.m_playerSettings`, `m_engine.m_materialLibrary`, `m_engine.m_activeMode.get()`, `m_engine.m_gameplayConfig`). `imguiLayer()` returns `nullptr`. `isTestMode() const` returns `false` (phone players are not in test mode — overrides the resume doc which originally said `true`; the user clarified phone is the actual game, not a test build). Transition state stored locally on the adapter. `launchGameplay(SongInfo, Difficulty, projectPath, autoPlay)` matches the song against `AndroidEngine::m_songs` by name + audio file (acceptable interim — `m_songs` is still populated by `loadProject` and used by the existing index-based `startGameplay`); future work can refactor to dispatch directly through `MusicSelectionView::sets()`. `exitGameplay()` delegates to `AndroidEngine::exitGameplay`. AndroidEngine gained `friend class AndroidEngineAdapter` and a new member `MaterialAssetLibrary m_materialLibrary` (default-constructed; populated later by Phase G eager-unpack work). The adapter `.cpp` is added to `engine/src/android/CMakeLists.txt::ANDROID_SOURCES`.
+
+### Phase G — Wire AndroidEngine to the views
+
+`AndroidEngine.h` includes the four view headers + `AndroidEngineAdapter.h`. New members: `StartScreenView m_startView; MusicSelectionView m_musicView; GameplayHudView m_hudView; ResultsView m_resultsView; AndroidEngineAdapter m_adapter{*this}; bool m_viewsReady = false;`. The four `render*Screen`/`render*HUD` bodies were rewritten:
+
+- `renderStartScreen()` — lazy first-call init (`m_startView.initVulkan(m_renderer.context(), m_renderer.buffers(), nullptr)` + `m_startView.load(m_assetsPath)`), then `m_startView.renderGamePreview(origin, displaySz)` inside an `##startscreen` no-decoration window, plus a full-window `InvisibleButton("##startTap", ...)` that flips `m_screen = GameScreen::MusicSelection`. The old ~55-line replica (background texture aspect-fill + manual title/tap-prompt drawing) is gone.
+- `renderMusicSelection()` — same lazy-init pattern, then `m_musicView.update(dt, &m_adapter)` followed by `m_musicView.renderGamePreview(origin, displaySz, &m_adapter)`. The old ~125-line flat-grid replica with header bar / 4-across cards / SETTINGS|PLAY footer is gone — the rhombus carousel + set/song wheels + 30 s preview now come from the shared view.
+- `renderGameplayHUD()` — keeps the Android-only background-dim overlay + FPS counter (gated by `m_playerSettings.fpsCounter`), then `m_hudView.render(displaySz, m_adapter)`. The duplicated combo/score panels are gone.
+- `renderResultsHUD()` — reduced to `m_resultsView.render(ImGui::GetIO().DisplaySize, m_adapter)`. The Retry button got dropped in this pass — a follow-up can re-add it once the adapter exposes `requestRetry()`.
+
+**Eager unpack** landed at the end of `AndroidEngine::init` (after `loadStartScreen` / `loadProject` / `loadPlayerSettingsFile`): explicit `extractToInternal("music_selection.json")` and `extractToInternal("start_screen.json")`, then a small string-walking lambda scans every `"key": "value"` pair in both JSONs, treats values that look like relative file paths (contain `/`, contain `.`, no `\`, exist in APK assets) as assets to extract, and calls `extractToInternal` on each. `m_assetsPath` is set to `AndroidFileIO::internalPath()` (with trailing slash trimmed) so the views' `load(m_assetsPath)` lazy init finds the JSONs. The crude string scan is intentional — the same `loadProject` path uses similar patterns and `extractToInternal` is idempotent, so re-extraction on subsequent launches is a stat-and-skip.
+
+`engine/src/android/CMakeLists.txt` got `AndroidEngineAdapter.cpp` added to `ANDROID_SOURCES`. The shared view `.cpp` files (`StartScreenView.cpp`, `MusicSelectionView.cpp`, `GameplayHudView.cpp`, `ResultsView.cpp`) live under `engine/src/game/screens/` — root `CMakeLists.txt` got `engine/src/game/screens/*.cpp` added to its `GLOB_RECURSE`. The Android CMake's `SHARED_GAME_SOURCES` and `SHARED_RENDERER_SOURCES` already cover the dependencies the views need (`MaterialAssetLibrary.cpp` was added in Round 6). For Phase G the Android target picks up the views via the shared-source pattern when its CMake is regenerated; on-device verification is the remaining test.
+
+The legacy AndroidEngine state — `m_songs`, `m_startBgPath`, `m_startTitleText`, `m_startTapText`, `m_startTitlePos`, `m_startTapPos`, `m_startTitleFontPx`, `m_startTapFontPx`, `m_startTitleColor`, `m_startLogoIsImage`, `m_startLogoImagePath`, `m_musicBgPath`, `m_fcImagePath`, `m_apImagePath` plus the `loadStartScreen` / `loadProject` parsers and the index-based `startGameplay(int)` — was **kept** as fallback. Reasons: (1) Android can't be compile-tested from this Windows shell without NDK + gradle so dropping the legacy state risks a double regression; (2) the adapter's `launchGameplay` still uses `m_songs` to look up the chart by name. Cleanup pass to retire those fields lives in a Phase G+ ticket once on-device verification confirms the views fully drive the screens.
+
+### Phase H.1 — DPI-aware UI scaling on Android
+
+`AndroidEngine::onWindowInit`, after `applyTheme()`: queries `AConfiguration_getDensity(m_app->config)` (added `<android/configuration.h>`), computes `dpiScale = density / 160.0f` (clamped to `[1.0, 4.0]` — floor at mdpi, sanity cap at xxxhdpi+). Rebuilds the ImGui font atlas with `cfg.SizePixels = 13.0f * dpiScale` (was 13 px hard-coded → unreadable on 458 dpi tablets). `ImGui::GetStyle().ScaleAllSizes(dpiScale)` scales padding/rounding/scrollbar/grab sizes. Logs the resolved scale + density bucket so post-launch device behaviour can be diagnosed from `adb logcat`.
+
+### Phase H.2 — Touch slop scales with DPI
+
+`engine/src/input/TouchTypes.h`: `TAP_SLOP_PX` and `SLIDE_SLOP_PX` converted from `inline constexpr float = 20/25` to `inline float = 20/25` so they're runtime-mutable; `inline void scaleByDpi(float)` multiplies them in-place (clamping the input to `>= 1.0f`). `AndroidEngine::onWindowInit` calls `TouchThresholds::scaleByDpi(dpiScale)` after the DPI is known. Without this, a 20 px tap slop on 458 dpi (~2.86 px/dp) reads as 7 dp — below the 44 dp accessibility minimum and a hair-trigger for drag detection.
+
+The `*_S` and `_VELOCITY` constants stayed `constexpr` — they're seconds and pixels-per-second, dimensionally independent of pixel density.
+
+### Phase I — Symbol audit + on-device verification (handed off)
+
+The Android source list was confirmed clean by inspection: `engine/src/android/CMakeLists.txt::SHARED_UI_SOURCES` only contains `SettingsPageUI.cpp` (the already-shared screen — pattern reference). No editor `.cpp` is in any of the Android-target source variables (`SHARED_RENDERER_SOURCES`, `SHARED_VULKAN_SOURCES`, `SHARED_GAME_SOURCES`, `SHARED_UI_SOURCES`, `SHARED_GAMEPLAY_SOURCES`, `SHARED_CORE_SOURCES`, `SHARED_ENGINE_SOURCES`, `SHARED_INPUT_SOURCES`, `ANDROID_SOURCES`). Transitive include check on `MusicSelectionView.h` — it pulls `ui/ProjectHub.h` for `GameModeConfig`, but `ProjectHub.h` only includes std headers (no editor `.cpp` source dragged in).
+
+What still needs the user's hands:
+
+1. `cd android && ./gradlew assembleRelease` (or `assembleDebug` first).
+2. `nm -D app/build/intermediates/.../libmusicgame.so | grep -E '(StartScreenEditor|MusicSelectionEditor|SongEditor|SettingsEditor|ProjectHub|browseFile|httplib|ShaderGen|AIEditor|glslc|_popen)'` — must be empty. Any match = an editor symbol leaked.
+3. `adb install -r app/build/outputs/apk/release/app-release.apk` and walk the player loop: start → tap → music selection → wheels scroll → 30 s preview on dwell → difficulty cycles → play → HUD shows score+combo → results → back returns to selection.
+
+### Files touched
+
+**New (this session)**
+- `engine/src/engine/IPlayerEngine.h`
+- `engine/src/game/screens/StartScreenView.{h,cpp}`
+- `engine/src/game/screens/MusicSelectionView.{h,cpp}`
+- `engine/src/game/screens/GameplayHudView.{h,cpp}`
+- `engine/src/game/screens/ResultsView.{h,cpp}`
+- `engine/src/android/AndroidEngineAdapter.{h,cpp}`
+
+**Modified**
+- `CMakeLists.txt` — root: `engine/src/game/screens/*.cpp` added to the `GLOB_RECURSE` list.
+- `engine/src/engine/Engine.{h,cpp}` — inherits `IPlayerEngine`; new accessors (`score`/`judgment`/`hitDetector`/`activeMode`/`gameplayConfig`/`imguiLayer`); `renderGameplayHUD` and `renderResultsOverlay` reduced to delegations; `m_hudView` + `m_resultsView` members added; `launchGameplay` and `exitGameplay` marked `override`.
+- `engine/src/ui/StartScreenEditor.{h,cpp}` — class declares `: public StartScreenView`; data members + JSON load/save + texture loaders + `renderGamePreview` body removed; editor's `load()` becomes a delegate; `loadBackground/loadLogoImage` call sites renamed to `reloadBackground/reloadLogoImage`; legacy unload method calls already match the inherited signatures.
+- `engine/src/ui/MusicSelectionEditor.{h,cpp}` — class declares `: public MusicSelectionView`; data members + helper render methods + JSON load/save + audio preview + `getSelectedSong` removed (~1065 lines); editor's `load()` becomes a delegate; `render(Engine*)` calls `update(dt, engine)`; full-screen test-mode `renderGamePreview` call gets `engine` arg; `onSongCardDoubleClick(int)` override opens SongEditor.
+- `engine/src/ui/GameFlowPreview.cpp` — `engine->musicSelectionEditor().renderGamePreview(origin, size)` → `renderGamePreview(origin, size, engine)`.
+- `engine/src/ui/GifPlayer.{h,cpp}` — `load()` signature drops `ImGuiLayer&`; texture descriptor registration uses `ImGui_ImplVulkan_AddTexture` directly; header drops `#include "ui/ImGuiLayer.h"`; cpp adds `<imgui.h>` + `<backends/imgui_impl_vulkan.h>`.
+- `engine/src/input/TouchTypes.h` — `TAP_SLOP_PX` / `SLIDE_SLOP_PX` made non-const + DPI-scalable via `scaleByDpi(float)`.
+- `engine/src/android/AndroidEngine.{h,cpp}` — includes view headers + adapter; new view + adapter members; legacy `m_songs` etc. kept as fallback; `init()` got an eager-unpack block after `loadProject`; `onWindowInit` got DPI scaling + `TouchThresholds::scaleByDpi`; four `render*` bodies rewritten as view delegations; `MaterialAssetLibrary m_materialLibrary` added; `friend class AndroidEngineAdapter`.
+- `engine/src/android/CMakeLists.txt` — `ANDROID_SOURCES` += `AndroidEngineAdapter.cpp`.
+
+### Memory + doc notes
+
+- `project_android_player_goal.md` — Android target is the shippable phone game; two firm rules.
+- `feedback_game_editor_split.md` — split is structural, not `#ifdef`-deep; rendering lives in game-side classes; never compile editor `.cpp` into the player binary.
+- `feedback_branch_scope_package.md` — this branch is package-system only; ignore UI cosmetic loops.
+- `project_gameplay_launcher_deferred.md` — Phase E's `GameplayLauncher` extraction descoped; divergence is platform-correct.
+
+### Decisions, in passing
+
+1. **Inheritance over composition for views.** Editors `: public View` instead of holding a `View m_view`. The diff was ~10× smaller this way (no field renames in editor methods that already use `m_logoText` etc.) and the IS-A relationship is honest — an editor *is* a view with extra authoring controls bolted on.
+2. **Two virtual hooks in views (`load`, `onSongCardDoubleClick`).** Both have player-side defaults (load parses JSON; double-click no-ops); editors override to add editor behaviour (clear thumbs; open SongEditor). Keeps the player view free of editor symbol references.
+3. **isTestMode → false on Android.** The resume doc said `true`. The user's clarification — "phone player is not testing; they are playing" — flipped it. `MusicSelectionView::renderPlayButton` checks `engine->isTestMode()` before launching gameplay; on Android the gate stays open for play but transitions/test-mode-only branches are skipped.
+4. **Stateless `GameplayHudView` and `ResultsView`.** No data members. They're pure functions over `IPlayerEngine&`. Easier to reason about; trivial to unit-test in isolation.
+5. **Crude string-walk JSON unpacker.** Eager unpack scans every `"key": "value"` pair and extracts values that look like relative paths. Heuristic > full parser for this surface; the wrong files get a single failed `AAssetManager_open` and a log line. Idempotent re-extraction means relaunch is fast.
+6. **GifPlayer now portable.** It used `ImGuiLayer&` for one method call (`addTexture`); we replaced it with `ImGui_ImplVulkan_AddTexture` (the same call ImGuiLayer wraps). GifPlayer compiles cleanly on Android now and could be linked into the Android target if a player feature ever needs animated GIFs.
+
+### Lessons
+
+1. **Reframe before refactoring.** The user redirected the plan twice mid-flight: first toward "phone game, not editor port", then toward "split structurally, not via `#ifdef`". Each redirect required throwing the in-progress plan out and restarting Phase B. Worth paying attention to scope-shifts early — the cost of redoing planning is much smaller than the cost of having to undo half-built editor compilation gates.
+2. **Class names are interface declarations.** `StartScreenEditor.cpp` in the Android source list is wrong even with `#ifndef ANDROID` body gates, because the class name itself is a contract that says "editor". The user caught this immediately. Future shared rendering should be named for the role (`*View`, `*HudView`, `*Panel`), never the consumer.
+3. **Scope a virtual hook before adding 30 lines of `#ifndef`.** Two `virtual` methods (`load`, `onSongCardDoubleClick`) replaced what would have been many lines of platform-gated code in the views. Hooks compose better than gates.
+4. **Eager unpack > virtual filesystem.** The user picked "eager: unpack everything at first launch" over a path-translation hook. The result is simpler renderer code (no FS abstraction) at the cost of one-time disk usage. Unpacking is idempotent so re-launches stay fast. Right call for a fixed asset bundle.
+5. **Phase E was the right call to descope.** Two ~30 line launch sequences with platform-correct divergence is healthier than one ~90 line shared sequence with a thicket of `IPlayerEngine` virtuals just to span the divergence. The cleanest abstractions span ≥3 implementations; for a desktop+phone pair, a single virtual on the interface is enough.
+
+### Files touched count
+
+- 6 new files (`IPlayerEngine.h`, 4 views ×2, `AndroidEngineAdapter` ×2) = 11 source files created.
+- 9 modified files.
+- ~1700 lines moved from editor cpps into game-side view cpps; no behavioral changes on desktop (last smoke test exit code 0).
+
+### Resume point for next session
+
+Once the user confirms the APK builds + smoke tests on device:
+
+1. **Cleanup pass:** delete the dead Android fallback fields (`m_songs`, `m_startBgPath`, `m_startTitleText`, all the legacy parsing), shrink `loadProject` to just the eager-unpack walker. Adapter's `launchGameplay` should dispatch directly through `m_musicView.sets()` lookup once `m_songs` is gone.
+2. **Retry button on results:** `ResultsView` needs a `requestRetry()` virtual on `IPlayerEngine` (Engine can implement via `restartGameplay`; Android via re-running `startGameplay` for the current selection).
+3. **Drag→wheel translation:** `onTouchEvent` should translate vertical drag into `ImGuiIO::AddMouseWheelEvent` so the song wheel scrolls under finger drag. Currently the wheel only scrolls via mouse-wheel events (which Android doesn't generate naturally).
+4. **Transition fades (StartScreen → MusicSelection):** wire `AndroidEngineAdapter::testTransitionTo` + fade-in alpha overlay during state changes.
+5. **Bloom quality flag (Phase H.3 backlog):** add `PlayerSettings::bloomQuality` (Off/Low/High) + corresponding mip-count switch in `PostProcess.cpp`.
+6. **ASTC texture path (Phase H.4 backlog):** detect `.astc` extension in `TextureManager::loadFromFile` + APK build script asset compression.
+
+## 2026-05-03 (later) — Android player loop fixes: combo glow, 3D-drop holds, autoplay + active-hold sync
+
+First on-device pass after the Round 7 split surfaced three issues. The user's screenshot showed an unreadable gold blob where the combo number should be, no hold notes visible during gameplay, and the AUTO PLAY toggle in music selection that did nothing.
+
+### Combo HUD: removed offset glow + bold
+
+`GameplayHudView::render`'s `drawHud` lambda still had two offset-based effects from the desktop-era HUD: an 8-direction halo (when `HudTextConfig::glow=true`, default for `comboHud`) and a +1 px shadow pass (when `bold=true`). Both relied on multi-pass `AddText` at offsets, which on a high-DPI phone (`dpiScale ≈ 3.5×`) blur the glyphs into a single saturated blob — the gold "bloom" the user saw on the combo number.
+
+Fix: drop both branches entirely. Render one crisp pass; honor `glow`/`bold` only as hints (currently no-op). Real bold needs a bold font face; real glow needs the post-process bloom path. The fields stay on `HudTextConfig` so chart JSON round-trip is unaffected.
+
+### 3D-drop hold rendering
+
+`ArcaeaRenderer::onInit` only ingested `Tap`/`Flick`/`ArcTap`/`Arc` notes; `NoteType::Hold` was silently dropped. Charts authored for 3D drop with hold notes (`Aa_drop3d_hard.json` has one) rendered without those holds — and the lane-auto-expand pass missed any lane that only carried holds.
+
+Added a `m_holdNotes` collection, lane auto-expand, and a render loop that draws each hold as the existing `m_tapMesh` (centered at z=0, depth `2 × hd`) translated to the lane center and Z-scaled by `len / (2 × hd)` so it spans `[-zTail, -zHead]`. Cull rule mirrors taps: `if (zTail < 0 || zHead > 30) continue`. Default material is a `MaterialKind::Glow` cyan tint matching Bandori's inactive hold color so visual identity is consistent across 2D/3D drop. Cleanup added to `onShutdown`.
+
+(No new material slot was added — chart material overrides for 3D-drop holds are deferred until the player asks for them.)
+
+### Android autoplay + active-hold sync (the real "holds invisible" bug)
+
+Driving through the actual symptom: `MusicSelectionView` already had an AUTO PLAY toggle, but `AndroidEngineAdapter::launchGameplay` discarded the `autoPlay` parameter (`bool /*autoPlay*/`) and just called `m_engine.startGameplay(idx)`. `AndroidEngine` had no `m_autoPlay` field, no call to `HitDetector::autoPlayTick`, and — critically — no `m_activeMode->setActiveHoldIds(m_hitDetector.activeHoldIds())` sync each frame.
+
+That second omission is what made hold notes appear invisible even with autoplay off: when a hold's head crosses the judgement line and 0.15 s elapse without a `holdActive=true` signal, `BandoriRenderer` inserts the note into `m_hitNotes` and stops drawing the body. With no sync from `HitDetector`, no hold is ever "active", so every single hold disappears 0.15 s past its head. The user saw an empty highway whenever the chart should have shown holds.
+
+Fix in three files:
+
+- `engine/src/android/AndroidEngine.h` — added `bool m_autoPlay = false`; widened `startGameplay(int)` to `startGameplay(int, bool autoPlay = false)`.
+- `engine/src/android/AndroidEngine.cpp` — `startGameplay` sets `m_autoPlay = autoPlay`; `update()` gameplay branch now calls `m_hitDetector.autoPlayTick(songT)` (when `m_autoPlay`), dispatches each `AutoHit` as Perfect (judgment + score + `showJudgment`), and unconditionally syncs `m_activeMode->setActiveHoldIds(m_hitDetector.activeHoldIds())` every tick — mirrors `Engine::update`. `restartGameplay` preserves `m_autoPlay` across the exit/restart.
+- `engine/src/android/AndroidEngineAdapter.cpp` — un-discards the `autoPlay` parameter and threads it into `m_engine.startGameplay(idx, autoPlay)`.
+
+### Verification
+
+- Desktop build clean (`cmake --build build --config Debug --target MusicGameEngineTest`).
+- APK assembled (`./gradlew.bat assembleRelease`), zipalign + apksigner with debug keystore, `adb install -r` succeeded, app launches into start screen on emulator-5554.
+- Symbol audit: `nm -D libmusicgame.so | grep -E '(StartScreenEditor|MusicSelectionEditor|SongEditor|SettingsEditor|ProjectHub|browseFile|httplib|ShaderGen|AIEditor|glslc|_popen)'` returned 0 matches — Round 7 split still holds; no editor/HTTP symbols regressed in.
+- On-device gameplay-loop verification (toggle AUTO PLAY ON, play `Aa_drop2d_hard` which has 8 holds) is the user's next manual step.
+
+### Files touched
+
+- `engine/src/game/screens/GameplayHudView.cpp` — drop glow/bold branches in `drawHud`.
+- `engine/src/game/modes/ArcaeaRenderer.{h,cpp}` — `m_holdNotes` collection + render loop + shutdown cleanup.
+- `engine/src/android/AndroidEngine.{h,cpp}` — `m_autoPlay` field + `startGameplay(int, bool)` + autoplay tick + `setActiveHoldIds` sync + `restartGameplay` preservation.
+- `engine/src/android/AndroidEngineAdapter.cpp` — pass `autoPlay` through to `startGameplay`.
+
+### Lessons
+
+1. **The visible symptom was downstream of the actual bug.** "Holds invisible" sounded like a renderer issue (which it partly was — 3D drop), but the dominant cause for the 2D-drop case the user was actually testing was an engine-loop omission: `setActiveHoldIds` was never called on Android. Look at the cull conditions in the renderer first when "things disappear" — they often imply an upstream contract the host engine forgot to satisfy.
+2. **A dropped parameter is not zero-cost.** `bool /*autoPlay*/` in the adapter is the minimum-effort signature to satisfy the interface, and it propagates a silent-failure mode that's invisible until someone toggles the UI. When stubbing an interface method, pick: implement it, throw, or log — never silently drop.
+3. **Test the chart you think is loaded.** I initially fixed 3D-drop hold rendering assuming the user's screenshot was 3D drop. It was — but the test project's `music_selection.json` only references `Aa_drop2d_*` charts, so the user's reported symptom was 2D-drop holds the whole time. Cross-check the chart selection path before optimizing for the renderer in the screenshot.

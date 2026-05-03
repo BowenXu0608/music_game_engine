@@ -129,7 +129,7 @@ void GameFlowPreview::renderPage(FlowPage page, ImVec2 origin, ImVec2 size, Engi
             engine->startScreenEditor().renderGamePreview(origin, size);
             break;
         case FlowPage::MusicSelection: {
-            engine->musicSelectionEditor().renderGamePreview(origin, size);
+            engine->musicSelectionEditor().renderGamePreview(origin, size, engine);
 
             // Overlay in-game Settings button in the top-right corner.
             // Simulates what the shipped Android game shows on music select.

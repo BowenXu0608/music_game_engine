@@ -5,6 +5,7 @@
 // ============================================================================
 #pragma once
 #include "renderer/Renderer.h"
+#include "renderer/MaterialAssetLibrary.h"
 #include "input/InputManager.h"
 #include "engine/GameClock.h"
 #include "engine/AudioEngine.h"
@@ -14,6 +15,11 @@
 #include "game/chart/ChartLoader.h"
 #include "game/chart/ChartTypes.h"
 #include "game/PlayerSettings.h"
+#include "game/screens/StartScreenView.h"
+#include "game/screens/MusicSelectionView.h"
+#include "game/screens/GameplayHudView.h"
+#include "game/screens/ResultsView.h"
+#include "AndroidEngineAdapter.h"
 #include "ui/ProjectHub.h"  // for GameModeConfig, GameModeType, DropDimension
 #include "game/modes/GameModeRenderer.h"
 #include "game/modes/BandoriRenderer.h"
@@ -66,8 +72,12 @@ private:
     void loadPlayerSettingsFile();   // reads player_settings.json + applies live
     void savePlayerSettingsFile();
     void applyPlayerSettings();      // push values into audio + active renderer
-    void startGameplay(int songIndex);
+    void startGameplay(int songIndex, bool autoPlay = false);
     void exitGameplay();
+    void togglePause();
+    void requestStop();
+    void restartGameplay();
+    void renderPauseOverlay();
 
     std::unique_ptr<GameModeRenderer> createRenderer(const GameModeConfig& config);
 
@@ -105,6 +115,13 @@ private:
     std::unordered_map<std::string, ImTextureID> m_imguiTextures;
     std::vector<Texture> m_loadedTextures;
 
+    // ImGui descriptor wrapping the offscreen scene image, used to blit it
+    // full-screen during gameplay (desktop SceneViewer equivalent).
+    VkDescriptorSet m_sceneTexSet = VK_NULL_HANDLE;
+
+    // Cached device DPI scale for HUD text + FPS counter sizing.
+    float m_dpiScale = 1.f;
+
     // Helpers
     ImTextureID loadAssetTexture(const std::string& assetPath);
     void        releaseTextures();
@@ -127,6 +144,8 @@ private:
     std::string m_pendingAudioPath;
     bool   m_showResults = false;
     bool   m_gameplayPaused = false;
+    bool   m_autoPlay = false;    // honoured by autoPlayTick path in update()
+    int    m_lastSongIndex = -1;  // for Restart from pause overlay
 
     // Music selection state
     struct SongEntry {
@@ -146,4 +165,23 @@ private:
     // app internal storage). See game/PlayerSettings.h.
     PlayerSettings m_playerSettings;
     std::string    m_settingsPath;
+
+    // Per-APK material asset library — populated at init from bundled assets.
+    MaterialAssetLibrary m_materialLibrary;
+
+    // Shared player views (game-side, also used by desktop preview). Each is
+    // driven through m_adapter so they never see AndroidEngine directly.
+    StartScreenView      m_startView;
+    MusicSelectionView   m_musicView;
+    GameplayHudView      m_hudView;
+    ResultsView          m_resultsView;
+
+    // Adapter that exposes AndroidEngine as IPlayerEngine to the views.
+    AndroidEngineAdapter m_adapter{*this};
+
+    // Lazy-init flag: views call initVulkan + load on first render after the
+    // project assets are extracted to internal storage.
+    bool m_viewsReady = false;
+
+    friend class AndroidEngineAdapter;
 };

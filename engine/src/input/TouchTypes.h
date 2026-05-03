@@ -43,11 +43,24 @@ struct GestureEvent {
 };
 
 // ── Tunable thresholds ───────────────────────────────────────────────────────
+//
+// Pixel-based slop values are runtime-mutable (not constexpr) so platform
+// startup code can scale them by display density. AndroidEngine::onWindowInit
+// multiplies the *_PX values by dpiScale so a 7 dp slop on mdpi stays 7 dp on
+// xxxhdpi instead of becoming a hair-trigger.
 
 namespace TouchThresholds {
-    inline constexpr float TAP_SLOP_PX        = 20.0f;   // max movement for a tap
-    inline constexpr float TAP_MAX_DURATION_S = 0.15f;   // max duration before hold fires
-    inline constexpr float FLICK_MIN_VELOCITY = 400.0f;  // px/s to classify as flick
-    inline constexpr float SLIDE_SLOP_PX      = 25.0f;   // min movement to start a slide
-    inline constexpr float VELOCITY_WINDOW_S  = 0.08f;   // window for velocity averaging
+    inline float TAP_SLOP_PX        = 20.0f;   // max movement for a tap
+    inline float SLIDE_SLOP_PX      = 25.0f;   // min movement to start a slide
+    inline constexpr float TAP_MAX_DURATION_S = 0.15f;
+    inline constexpr float FLICK_MIN_VELOCITY = 400.0f;
+    inline constexpr float VELOCITY_WINDOW_S  = 0.08f;
+
+    // Called once at platform init with the device DPI scale (1.0 = mdpi
+    // baseline). Multiplies pixel-based slops; safe to call repeatedly.
+    inline void scaleByDpi(float dpiScale) {
+        if (dpiScale < 1.0f) dpiScale = 1.0f;
+        TAP_SLOP_PX   = 20.0f * dpiScale;
+        SLIDE_SLOP_PX = 25.0f * dpiScale;
+    }
 }

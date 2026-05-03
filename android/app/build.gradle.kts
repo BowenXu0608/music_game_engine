@@ -32,6 +32,14 @@ android {
         }
         debug {
             isDebuggable = true
+            // Compile native code with -O2 even for the debug APK so on-device
+            // gameplay doesn't crawl. Java side stays debuggable; only the C++
+            // optimization level changes.
+            externalNativeBuild {
+                cmake {
+                    arguments += "-DCMAKE_BUILD_TYPE=Release"
+                }
+            }
         }
     }
 

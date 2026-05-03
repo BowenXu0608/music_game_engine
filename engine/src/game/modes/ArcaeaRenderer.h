@@ -63,6 +63,7 @@ private:
     };
 
     std::vector<NoteEvent> m_tapNotes;
+    std::vector<NoteEvent> m_holdNotes;   // long lane notes — drawn as Z-stretched tap mesh
     std::vector<NoteEvent> m_arcTaps;     // sky taps — float in the sky band at (arcX, arcY)
     std::vector<ArcMesh>   m_arcs;
     std::vector<HitEvent>  m_hitEvents;   // sorted by time; used for particle positioning

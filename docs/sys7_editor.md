@@ -405,3 +405,34 @@ Crash-safe + drag-safe persistence of in-flight editor state.
 ### Asset-tile hover tooltips (2026-04-26)
 
 Asset tiles in the Assets strip (SongEditor / MusicSelection / StartScreen) hover-tooltip the **filename** only, never the full relative path. Filenames are then clamped via `shortenForTooltip(s, maxLen=48)` in `engine/src/ui/AssetBrowser.h` — head + `...` + extension — because real-world filenames from WeChat / browser saves can run hundreds of characters and would overflow the screen otherwise. Drag-drop `ASSET_PATH` payloads, deletion targets, and persisted song fields keep using the **full** relative path; only the visible tooltip text changes. Three tooltip families per editor are routed through this helper: image tile, audio tile, and material tile (rich-preview branch + plain-fallback branch).
+
+### Editors compose game-side views (2026-05-03)
+
+`StartScreenEditor` and `MusicSelectionEditor` are no longer the source of truth for player-facing rendering. They each `: public` a game-side `View` class that lives in `engine/src/game/screens/`:
+
+- `class StartScreenEditor : public StartScreenView` — view owns background/logo/tap-prompt state + JSON load/save + `renderGamePreview`. Editor adds asset browser, thumbnail cache, AI shader gen, materials panel, status messages, panel split ratios.
+- `class MusicSelectionEditor : public MusicSelectionView` — view owns sets/songs hierarchy + scroll + cover cache + audio preview + wheel/cover/difficulty/play rendering. Editor adds asset browser, hierarchy panel, dialog state, settings overlay.
+
+The reason for *inheritance* over composition was diff size — the editor methods reference `m_logoText`, `m_sets`, etc. directly; inheritance lets them keep working without field-renames. The editor sidebars mutate inherited `protected` fields directly when authoring controls fire.
+
+**Two virtual hooks** let editors extend view behaviour without polluting the views with editor symbols:
+
+- `virtual void StartScreenView::load(const std::string&)` — editor overrides to clear thumbnails before the JSON parse runs.
+- `virtual void MusicSelectionView::onSongCardDoubleClick(int)` — view default is no-op; editor overrides to open SongEditor for the double-clicked song.
+
+`SongInfo`, `MusicSetInfo`, and `Difficulty` types moved out of `engine/src/ui/MusicSelectionEditor.h` into `engine/src/game/screens/MusicSelectionView.h`. Existing editor code that uses them keeps compiling because the editor header includes the view header.
+
+`renderGamePreview` signatures changed:
+
+- `StartScreenView::renderGamePreview(ImVec2 origin, ImVec2 size)` — same shape as before; inherited by the editor.
+- `MusicSelectionView::renderGamePreview(ImVec2 origin, ImVec2 size, IPlayerEngine* engine)` — extra `engine` arg lets the play button call `engine->launchGameplay(...)` and `engine->isTestMode()`. The editor's full-screen test-mode block in `render()` now passes `engine` through; `GameFlowPreview.cpp` also got the matching arg-update.
+
+Editor-only files that stay desktop-only (and never compile into the Android lib): `ProjectHub.cpp`, `SongEditor.cpp`, `SettingsEditor.cpp`, `GameFlowPreview.cpp`, `AssetBrowser.cpp`, `ImageEditor.cpp`, `SceneViewer.cpp`, `ImGuiLayer.cpp`. The Android target's CMake source list (`engine/src/android/CMakeLists.txt`) only adds `SettingsPageUI.cpp` from `engine/src/ui/` — that's the already-shared player settings page that pre-dates the split.
+
+For future editor screens that want a player-facing twin, the pattern is:
+1. Create `XxxView` in `engine/src/game/screens/` with the player rendering and any data the player needs.
+2. `class XxxEditor : public XxxView` — the editor adds authoring chrome.
+3. Use a `virtual` hook for any editor-only behaviour the view's render path needs to trigger.
+4. Sidebar widgets read/write inherited protected fields directly.
+
+The class-name test: if you'd put `Editor` in the name, that file isn't going into the Android lib.

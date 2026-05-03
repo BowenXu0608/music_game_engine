@@ -27,6 +27,7 @@ file(GLOB_RECURSE ENGINE_SOURCES
     engine/src/game/*.cpp
     engine/src/game/modes/*.cpp
     engine/src/game/chart/*.cpp
+    engine/src/game/screens/*.cpp
     engine/src/gameplay/*.cpp
     engine/src/engine/*.cpp
     engine/src/ui/*.cpp
