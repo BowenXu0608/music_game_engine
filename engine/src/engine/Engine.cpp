@@ -24,7 +24,11 @@
 #endif
 #include <windows.h>
 #include <ole2.h>
+#include <dwmapi.h>
+#define GLFW_EXPOSE_NATIVE_WIN32
+#include <GLFW/glfw3native.h>
 #pragma comment(lib, "ole32.lib")
+#pragma comment(lib, "dwmapi.lib")
 #endif
 
 namespace {
@@ -154,6 +158,19 @@ void Engine::init(uint32_t width, uint32_t height, const std::string& title,
     glfwWindowHint(GLFW_RESIZABLE, GLFW_TRUE);
     m_window = glfwCreateWindow(width, height, title.c_str(), nullptr, nullptr);
     if (!m_window) throw std::runtime_error("Failed to create window");
+
+#ifdef _WIN32
+    // Force the Windows title bar into dark mode so it matches the editor
+    // theme. Win11: attribute 20 (DWMWA_USE_IMMERSIVE_DARK_MODE). Win10
+    // 19H1+: attribute 19. DwmSetWindowAttribute returns E_INVALIDARG for
+    // unknown attributes — both calls are safe to make on every build.
+    {
+        HWND hwnd = glfwGetWin32Window(m_window);
+        BOOL useDark = TRUE;
+        DwmSetWindowAttribute(hwnd, 20, &useDark, sizeof(useDark));
+        DwmSetWindowAttribute(hwnd, 19, &useDark, sizeof(useDark));
+    }
+#endif
 
     // Engine* is the sole owner of the user pointer — InputManager no longer touches it
     glfwSetWindowUserPointer(m_window, this);

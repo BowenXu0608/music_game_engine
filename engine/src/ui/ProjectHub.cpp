@@ -644,6 +644,18 @@ void drawDownArrow(ImDrawList* dl, ImVec2 c, ImU32 color) {
     dl->AddRectFilled({c.x - 1.f, c.y - 5.f}, {c.x + 1.f, c.y + 1.f}, color);
 }
 
+// Magnifying glass — circle ring + diagonal handle.
+void drawMagnifier(ImDrawList* dl, ImVec2 c, ImU32 color) {
+    dl->AddCircle({c.x - 1.f, c.y - 1.f}, 4.5f, color, 18, 1.5f);
+    dl->AddLine({c.x + 2.2f, c.y + 2.2f}, {c.x + 5.5f, c.y + 5.5f}, color, 1.5f);
+}
+
+// Right-pointing chevron (used in Modified column / Open project arrow).
+void drawChevronRight(ImDrawList* dl, ImVec2 c, ImU32 color) {
+    dl->AddLine({c.x - 2.5f, c.y - 4.f}, {c.x + 2.5f, c.y},      color, 1.5f);
+    dl->AddLine({c.x + 2.5f, c.y},       {c.x - 2.5f, c.y + 4.f}, color, 1.5f);
+}
+
 // Frameless icon + text clickable. Returns true on click.
 bool textActionRow(const char* id,
                    const char* label,
@@ -660,7 +672,11 @@ bool textActionRow(const char* id,
     ImDrawList* dl = ImGui::GetWindowDrawList();
     (void)hovered;
     icon(dl, {cur.x + 12.f, cur.y + height * 0.5f}, IM_COL32(255, 255, 255, 255));
-    dl->AddText({cur.x + 26.f, cur.y + (height - ImGui::GetFontSize()) * 0.5f},
+    // Use the scaled font (`GetFontSize()` is post-scale) so the label tracks
+    // the panel's `SetWindowFontScale` instead of staying at base 17 px.
+    const float fs = ImGui::GetFontSize();
+    dl->AddText(ImGui::GetFont(), fs,
+                {cur.x + 26.f, cur.y + (height - fs) * 0.5f},
                 IM_COL32(255, 255, 255, 255), label);
     return clicked;
 }
@@ -692,40 +708,36 @@ void ProjectHub::render(Engine* engine) {
                  ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse |
                  ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize);
 
-    // ── Top bar: gradient M tile + crumb + gear ────────────────────────
-    ui::TopBar({"Project Hub"}, [&]{
-        ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0, 0, 0, 0));
-        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, Cyan);
-        ImGui::PushStyleColor(ImGuiCol_ButtonActive,  Cyan);
-        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding,  {6.f, 6.f});
-        ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 4.f);
-        const ImVec2 cur = ImGui::GetCursorScreenPos();
-        const bool gearClicked = ImGui::Button("##gear", {28.f, 28.f});
-        drawGearClean(ImGui::GetWindowDrawList(),
-                      {cur.x + 14.f, cur.y + 14.f}, IM_COL32(255, 255, 255, 255));
-        ImGui::PopStyleVar(2);
-        ImGui::PopStyleColor(3);
-        if (gearClicked && engine) engine->switchLayer(EditorLayer::Settings);
-    });
+    // ── Top bar: gradient M tile + crumb (no gear — Settings is per-project,
+    //   not a Hub-level page).
+    ui::TopBar({"Project Hub"}, nullptr);
 
     // ── Header row: title + subtitle (left) | search + actions (right) ─
     {
-        const float hdrH = 70.f;
+        const float hdrH = 80.f;            // breathing room for 2.3× title + subtitle
         ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0,0,0,0));
         ImGui::BeginChild("##hdr", ImVec2(0, hdrH), false,
                           ImGuiWindowFlags_NoScrollbar);
         const float fullW = ImGui::GetContentRegionAvail().x;
 
-        // Title — large bold per prototype (~2.3× base).
-        ImGui::SetWindowFontScale(2.3f);
-        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.f, 1.f, 1.f, 1.f));
-        ImGui::TextUnformatted("Projects");
-        ImGui::PopStyleColor();
-        ImGui::SetWindowFontScale(1.0f);
+        // Title — pushed in a 40 px Roboto-Medium font that's pre-rasterized
+        // by ImGuiLayer (we use the 48 px slot via getLogoFont). Scaling the
+        // base font with SetWindowFontScale produces blurry text because the
+        // glyph atlas lacks the higher-res glyph data.
+        {
+            ImFont* titleFont = engine
+                ? engine->imguiLayer().getLogoFont(48.f)
+                : nullptr;
+            if (titleFont) ImGui::PushFont(titleFont);
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.f, 1.f, 1.f, 1.f));
+            ImGui::TextUnformatted("Projects");
+            ImGui::PopStyleColor();
+            if (titleFont) ImGui::PopFont();
+        }
 
-        // Subtitle — secondary tier (~0.85× base), regular (not mono) sans.
-        ImGui::SetWindowFontScale(0.85f);
-        ImGui::PushStyleColor(ImGuiCol_Text, SoftWhite);
+        // Subtitle — base size, dim text. Prototype renders this at the
+        // standard body size (not the small 0.85× tier).
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.66f, 0.68f, 0.71f, 1.f));
         if (m_projects.empty())
             ImGui::TextUnformatted("0 projects");
         else
@@ -733,18 +745,20 @@ void ProjectHub::render(Engine* engine) {
                         (int)m_projects.size(),
                         m_projects.front().name.c_str());
         ImGui::PopStyleColor();
-        ImGui::SetWindowFontScale(1.0f);  // reset after subtitle
 
         // Right cluster: search + Add file + Create game.
-        const float searchW = 260.f;
-        const float addW    = 96.f;
-        const float createW = 140.f;
-        const float gap     = 8.f;
+        const float searchW = 320.f;        // wider so placeholder fits without overlap
+        const float addW    = 130.f;
+        const float createW = 180.f;
+        const float gap     = 10.f;
+        const float rightPad = 20.f;        // breathing room from window edge
         const float groupW  = searchW + addW + createW + gap * 2.f;
-        ImGui::SetCursorPos({fullW - groupW, 8.f});
+        ImGui::SetCursorPos({fullW - groupW - rightPad, 8.f});
 
-        // Search input — placeholder "Search projects..."; the Ctrl+K hint is
-        // drawn AFTER the input as a small chip overlapping the right edge.
+        // Search input — magnifier glyph drawn over the left, Ctrl+K chip over
+        // the right. Placeholder text starts after the magnifier (extra space
+        // padding) so it never collides with either ornament.
+        ImDrawList* hdrDl = ImGui::GetWindowDrawList();
         const ImVec2 searchCur = ImGui::GetCursorScreenPos();
         ImGui::SetNextItemWidth(searchW);
         ImGui::PushStyleColor(ImGuiCol_FrameBg,        BgVoid);
@@ -754,59 +768,93 @@ void ProjectHub::render(Engine* engine) {
         ImGui::PushStyleColor(ImGuiCol_Border,         Cyan);
         ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1.f);
         ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding,   6.f);
-        ImGui::InputTextWithHint("##search", "Search projects...",
+        // Bake the icon into the placeholder padding so the user-typed buffer
+        // also offsets cleanly. Two leading spaces ≈ 28 px at default font.
+        ImGui::InputTextWithHint("##search", "    Search projects...",
                                  m_searchBuf, sizeof(m_searchBuf));
+        const bool searchHovered = ImGui::IsItemHovered();
+        const bool searchActive  = ImGui::IsItemActive();
         ImGui::PopStyleVar(2);
         ImGui::PopStyleColor(5);
 
-        // Ctrl+K chip drawn over the right side of the input.
-        {
-            ImDrawList* dl = ImGui::GetWindowDrawList();
+        // Magnifier on the left edge of the input.
+        drawMagnifier(hdrDl,
+                      {searchCur.x + 12.f, searchCur.y + 14.f},
+                      IM_COL32(255, 255, 255, 220));
+
+        // Ctrl+K chip — drawn over the right side of the input only when the
+        // input is hovered or focused. Hidden otherwise so the placeholder
+        // text reads cleanly.
+        if (searchHovered || searchActive) {
             const char* hint = "Ctrl+K";
             const ImVec2 hintSz = ImGui::CalcTextSize(hint);
-            const float chipW = hintSz.x + 10.f;
+            const float chipW = hintSz.x + 12.f;
             const float chipH = 18.f;
             const ImVec2 chipMin{searchCur.x + searchW - chipW - 6.f,
                                   searchCur.y + (28.f - chipH) * 0.5f};
             const ImVec2 chipMax{chipMin.x + chipW, chipMin.y + chipH};
-            dl->AddRectFilled(chipMin, chipMax, ToU32(Cyan), 4.f);
-            dl->AddText({chipMin.x + 5.f,
-                         chipMin.y + (chipH - hintSz.y) * 0.5f},
-                        IM_COL32(0, 0, 0, 255), hint);
+            hdrDl->AddRectFilled(chipMin, chipMax, ToU32(Cyan), 4.f);
+            hdrDl->AddText({chipMin.x + 6.f,
+                            chipMin.y + (chipH - hintSz.y) * 0.5f},
+                           IM_COL32(0, 0, 0, 255), hint);
         }
 
         ImGui::SameLine(0.f, gap);
-        // Add file button: outlined, with up-arrow icon.
+        // ── Add file button — outlined, with up-arrow icon. Use a blank-label
+        //   button + manual icon/text draws so the (icon + text) group is
+        //   visually centred (leading-space hacks shove text off-centre).
         {
             const ImVec2 bCur = ImGui::GetCursorScreenPos();
             ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0,0,0,0));
             ImGui::PushStyleColor(ImGuiCol_ButtonHovered, Cyan);
             ImGui::PushStyleColor(ImGuiCol_ButtonActive,  Cyan);
-            ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(1.f, 1.f, 1.f, 1.f));
             ImGui::PushStyleColor(ImGuiCol_Border,        Cyan);
             ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1.f);
             ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding,   6.f);
-            if (ImGui::Button("    Add file", ImVec2(addW, 28))) {
-                m_showAddFileDialog = true;
-                m_addFileError.clear();
-            }
+            const bool clicked = ImGui::Button("##addbtn", ImVec2(addW, 28));
             ImGui::PopStyleVar(2);
-            ImGui::PopStyleColor(5);
-            drawUpArrow(ImGui::GetWindowDrawList(),
-                        {bCur.x + 16.f, bCur.y + 14.f}, IM_COL32(255, 255, 255, 255));
+            ImGui::PopStyleColor(4);
+            if (clicked) { m_showAddFileDialog = true; m_addFileError.clear(); }
+
+            const char* lbl = "Add file";
+            const float lblW = ImGui::CalcTextSize(lbl).x;
+            const float iconW = 12.f;
+            const float gapW  = 6.f;
+            const float groupW = iconW + gapW + lblW;
+            const float gx = bCur.x + (addW - groupW) * 0.5f;
+            ImDrawList* dl = ImGui::GetWindowDrawList();
+            drawUpArrow(dl, {gx + iconW * 0.5f, bCur.y + 14.f},
+                        IM_COL32(255, 255, 255, 255));
+            dl->AddText({gx + iconW + gapW,
+                         bCur.y + (28.f - ImGui::GetFontSize()) * 0.5f},
+                        IM_COL32(255, 255, 255, 255), lbl);
         }
 
         ImGui::SameLine(0.f, gap);
-        // Create game button: cyan filled (no alpha — full saturation).
-        ImGui::PushStyleColor(ImGuiCol_Button,        Cyan);
-        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, Cyan);
-        ImGui::PushStyleColor(ImGuiCol_ButtonActive,  Cyan);
-        ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(0, 0, 0, 1));
-        ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 6.f);
-        if (ImGui::Button("+ Create game", ImVec2(createW, 28)))
-            m_showCreateDialog = true;
-        ImGui::PopStyleVar();
-        ImGui::PopStyleColor(4);
+        // ── Create game button — cyan filled. "+" drawn as a glyph so the
+        //   (icon + text) group can be visually centred too.
+        {
+            const ImVec2 bCur = ImGui::GetCursorScreenPos();
+            ImGui::PushStyleColor(ImGuiCol_Button,        Cyan);
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, Cyan);
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive,  Cyan);
+            ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 6.f);
+            const bool clicked = ImGui::Button("##createbtn", ImVec2(createW, 28));
+            ImGui::PopStyleVar();
+            ImGui::PopStyleColor(3);
+            if (clicked) m_showCreateDialog = true;
+
+            const char* lbl = "Create game";
+            const float plusW = ImGui::CalcTextSize("+").x;
+            const float lblW  = ImGui::CalcTextSize(lbl).x;
+            const float gapW  = 6.f;
+            const float groupW = plusW + gapW + lblW;
+            const float gx = bCur.x + (createW - groupW) * 0.5f;
+            const float gy = bCur.y + (28.f - ImGui::GetFontSize()) * 0.5f;
+            ImDrawList* dl = ImGui::GetWindowDrawList();
+            dl->AddText({gx,                       gy}, IM_COL32(0, 0, 0, 255), "+");
+            dl->AddText({gx + plusW + gapW,        gy}, IM_COL32(0, 0, 0, 255), lbl);
+        }
 
         ImGui::EndChild();
         ImGui::PopStyleColor();  // ChildBg
@@ -825,7 +873,7 @@ void ProjectHub::render(Engine* engine) {
     // ── Body: rail | middle | detail ─────────────────────────────────
     const float bodyH   = std::max(220.f, ImGui::GetContentRegionAvail().y);
     const float railW   = 200.f;
-    const float detailW = 320.f;
+    const float detailW = 480.f;        // wide enough for "DEFAULT CHART" label + full path values
     const float midW    = std::max(280.f,
         ImGui::GetContentRegionAvail().x - railW - detailW
         - ImGui::GetStyle().ItemSpacing.x * 2.f);
@@ -919,39 +967,12 @@ void ProjectHub::render(Engine* engine) {
     ImGui::BeginChild("##mid", ImVec2(midW, bodyH), false,
                       ImGuiWindowFlags_NoScrollbar);
     {
+        ImGui::Dummy(ImVec2(0, 6.f));   // breathing space below the header
         const ImVec2 chipsRowOrigin = ImGui::GetCursorScreenPos();
         const float midFullW = ImGui::GetContentRegionAvail().x;
-
-        // ── Five chip DOTS (no labels, no fill when inactive) ──
-        struct Chip { ImVec4 color; int idx; };
-        const Chip chips[] = {
-            {Cyan,    -1}, {Cyan,     0}, {Magenta,  1},
-            {Amber,    2}, {Lime,     3},
-        };
-        const float dotW = 18.f, dotH = 10.f, dotGap = 6.f;
         ImDrawList* dl = ImGui::GetWindowDrawList();
-        for (int i = 0; i < 5; ++i) {
-            const Chip& c = chips[i];
-            ImGui::PushID(i);
-            const ImVec2 dCur = ImGui::GetCursorScreenPos();
-            ImGui::SetCursorScreenPos({dCur.x, dCur.y + 6.f});
-            const bool clicked = ImGui::InvisibleButton("##dot", {dotW, dotH});
-            const bool hovered = ImGui::IsItemHovered();
-            const bool active  = (m_modeFilter == c.idx);
-            const ImVec2 dotMin{dCur.x, dCur.y + 6.f};
-            const ImVec2 dotMax{dotMin.x + dotW, dotMin.y + dotH};
-            if (active) {
-                dl->AddRectFilled(dotMin, dotMax, ToU32(c.color), dotH * 0.5f);
-            } else {
-                // Full-saturation outline (any alpha reads as gray).
-                dl->AddRect(dotMin, dotMax, ToU32(c.color),
-                            dotH * 0.5f, 0, 1.f);
-            }
-            (void)hovered;
-            if (clicked) m_modeFilter = c.idx;
-            ImGui::PopID();
-            ImGui::SameLine(0.f, dotGap);
-        }
+        // Mode-filter chip dots are not in the prototype — removed.
+        m_modeFilter = -1;
 
         // ── Sort (right-anchored): "Sort:" + "Last modified ▾" frameless ──
         const char* sortLabel =
@@ -1056,9 +1077,6 @@ void ProjectHub::render(Engine* engine) {
         std::transform(query.begin(), query.end(), query.begin(),
                        [](unsigned char c){ return (char)std::tolower(c); });
 
-        int maxSongs = 1;
-        for (const auto& p : m_projects) maxSongs = std::max(maxSongs, p.songCount);
-
         // ── Projects table — no inner row dividers (they read as edges).
         const ImGuiTableFlags tflags = ImGuiTableFlags_RowBg
                                      | ImGuiTableFlags_NoBordersInBody
@@ -1069,17 +1087,34 @@ void ProjectHub::render(Engine* engine) {
         ImGui::PushStyleColor(ImGuiCol_TableRowBg,        ImVec4(0,0,0,0));
         ImGui::PushStyleColor(ImGuiCol_TableRowBgAlt,     ImVec4(0,0,0,0));
 
-        if (ImGui::BeginTable("##projects", 4, tflags,
+        if (ImGui::BeginTable("##projects", 3, tflags,
                               ImVec2(0, ImGui::GetContentRegionAvail().y))) {
             ImGui::TableSetupColumn("NAME",     ImGuiTableColumnFlags_WidthStretch);
-            ImGui::TableSetupColumn("MODE",     ImGuiTableColumnFlags_WidthFixed, 80);
-            ImGui::TableSetupColumn("SONGS",    ImGuiTableColumnFlags_WidthFixed, 130);
-            ImGui::TableSetupColumn("MODIFIED", ImGuiTableColumnFlags_WidthFixed, 220);
+            ImGui::TableSetupColumn("SONGS",    ImGuiTableColumnFlags_WidthFixed, 160);
+            ImGui::TableSetupColumn("MODIFIED", ImGuiTableColumnFlags_WidthFixed, 200);
             ImGui::TableSetupScrollFreeze(0, 1);
 
+            // Manual header row so SONGS / MODIFIED can be CENTRED to match
+            // their cell content. NAME stays left-aligned (under its tile+name).
             ImGui::SetWindowFontScale(0.85f);
-            ImGui::PushStyleColor(ImGuiCol_Text, SoftWhite);
-            ImGui::TableHeadersRow();
+            ImGui::TableNextRow(0, ImGui::GetFontSize() + 8.f);
+            auto centredHeader = [](const char* s) {
+                const ImVec2 hTL = ImGui::GetCursorScreenPos();
+                const float hW = ImGui::GetContentRegionAvail().x;
+                const float tW = ImGui::CalcTextSize(s).x;
+                ImGui::SetCursorScreenPos({hTL.x + (hW - tW) * 0.5f, hTL.y});
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.66f, 0.68f, 0.71f, 1.f));
+                ImGui::TextUnformatted(s);
+                ImGui::PopStyleColor();
+            };
+            ImGui::TableSetColumnIndex(0);
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.66f, 0.68f, 0.71f, 1.f));
+            ImGui::TextUnformatted("NAME");
+            ImGui::PopStyleColor();
+            ImGui::TableSetColumnIndex(1); centredHeader("SONGS");
+            ImGui::TableSetColumnIndex(2);
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.66f, 0.68f, 0.71f, 1.f));
+            ImGui::TextUnformatted("MODIFIED");
             ImGui::PopStyleColor();
             ImGui::SetWindowFontScale(1.0f);
 
@@ -1134,32 +1169,18 @@ void ProjectHub::render(Engine* engine) {
                 drawMusicNote(dl2,
                     {tileMin.x + 18.f, tileMin.y + 18.f}, ToU32(mv.color));
 
-                // Project name (white, vertically centred against tile).
-                const float nameY = cellTL.y + (64.f - ImGui::GetFontSize()) * 0.5f;
-                ImGui::SetCursorScreenPos({cellTL.x + 60.f, nameY});
-                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.f, 1.f, 1.f, 1.f));
-                ImGui::TextUnformatted(proj.name.c_str());
-                ImGui::PopStyleColor();
-
-                // Star toggle on the far right of the NAME cell.
-                const float nameAvailW = ImGui::GetContentRegionAvail().x;
-                const ImVec2 starTL{cellTL.x + nameAvailW - 28.f, cellTL.y + 22.f};
-                ImGui::SetCursorScreenPos(starTL);
-                bool starClicked = ImGui::InvisibleButton("##star", {22.f, 22.f});
-                const bool starHovered = ImGui::IsItemHovered();
-                const bool starred = m_starred.count(proj.name) > 0;
-                drawStarIcon(dl2,
-                    {starTL.x + 11.f, starTL.y + 11.f}, 8.f,
-                    starred ? ToU32(Amber) : IM_COL32(255, 255, 255, 255),
-                    starred);
-                (void)starHovered;
-                if (starClicked) {
-                    if (starred) m_starred.erase(proj.name);
-                    else         m_starred.insert(proj.name);
-                    saveStarred();
+                // Project name — single line, vertically centred against the
+                // tile. Path subtitle removed (prototype doesn't show it).
+                {
+                    const float nameY =
+                        cellTL.y + (64.f - ImGui::GetFontSize()) * 0.5f;
+                    ImGui::SetCursorScreenPos({cellTL.x + 60.f, nameY});
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.f, 1.f, 1.f, 1.f));
+                    ImGui::TextUnformatted(proj.name.c_str());
+                    ImGui::PopStyleColor();
                 }
 
-                if (rowClicked && !starClicked) {
+                if (rowClicked) {
                     m_selectedIdx = idx;
                     if (dbl && engine) {
                         m_selectedProject = proj;
@@ -1171,53 +1192,34 @@ void ProjectHub::render(Engine* engine) {
                     }
                 }
 
-                // ── MODE cell: deliberately empty (mode shown by tile border).
+                // ── SONGS cell — numeral horizontally centred in the column. ──
                 ImGui::TableSetColumnIndex(1);
-
-                // ── SONGS cell ──
-                ImGui::TableSetColumnIndex(2);
                 {
                     const ImVec2 sTL = ImGui::GetCursorScreenPos();
-                    const float barW = 80.f, barH = 4.f;
-                    const ImVec2 bMin{sTL.x, sTL.y + 30.f};
-                    const ImVec2 bMax{bMin.x + barW, bMin.y + barH};
-                    // Cyan-bordered empty track (no gray fill).
-                    dl2->AddRect(bMin, bMax, ToU32(Cyan), 2.f, 0, 1.f);
-                    const float fillW = barW *
-                        std::min(1.f, (float)proj.songCount / (float)maxSongs);
-                    if (fillW > 0.5f) {
-                        dl2->AddRectFilled(bMin, {bMin.x + fillW, bMax.y},
-                                           ToU32(Cyan), 2.f);
-                    }
+                    const float colW = ImGui::GetContentRegionAvail().x;
+                    char nbuf[16]; snprintf(nbuf, sizeof(nbuf), "%d", proj.songCount);
+                    const float nW = ImGui::CalcTextSize(nbuf).x;
                     ImGui::SetCursorScreenPos(
-                        {bMax.x + 10.f, sTL.y + 24.f});
-                    ui::PushMono();
+                        {sTL.x + (colW - nW) * 0.5f,
+                         sTL.y + (64.f - ImGui::GetFontSize()) * 0.5f});
                     ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.f, 1.f, 1.f, 1.f));
-                    ImGui::Text("%d", proj.songCount);
+                    ImGui::TextUnformatted(nbuf);
                     ImGui::PopStyleColor();
-                    ui::PopMono();
                 }
 
-                // ── MODIFIED cell ──
-                ImGui::TableSetColumnIndex(3);
+                // ── MODIFIED cell — vertically centred text + right chevron. ──
+                ImGui::TableSetColumnIndex(2);
                 {
                     const ImVec2 mTL = ImGui::GetCursorScreenPos();
                     const float colW = ImGui::GetContentRegionAvail().x;
-                    ImGui::SetCursorScreenPos({mTL.x, mTL.y + 24.f});
-                    ui::PushMono();
+                    ImGui::SetCursorScreenPos(
+                        {mTL.x, mTL.y + (64.f - ImGui::GetFontSize()) * 0.5f});
                     ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.f, 1.f, 1.f, 1.f));
                     ImGui::TextUnformatted(
                         proj.lastModified.empty() ? "-" : proj.lastModified.c_str());
                     ImGui::PopStyleColor();
-                    ui::PopMono();
-                    // Right chevron.
-                    const ImVec2 chC{mTL.x + colW - 14.f, mTL.y + 32.f};
-                    const float chs = 5.f;
-                    dl2->AddTriangleFilled(
-                        {chC.x - chs * 0.5f, chC.y - chs},
-                        {chC.x - chs * 0.5f, chC.y + chs},
-                        {chC.x + chs * 0.6f, chC.y},
-                        IM_COL32(255, 255, 255, 255));
+                    drawChevronRight(dl2, {mTL.x + colW - 14.f, mTL.y + 32.f},
+                                     IM_COL32(255, 255, 255, 200));
                 }
 
                 ImGui::PopID();
@@ -1239,8 +1241,10 @@ void ProjectHub::render(Engine* engine) {
     ImGui::SameLine();
 
     // ── DETAIL PANEL ──────────────────────────────────────────────────
+    // Subtle border (BorderHi α=0.10) — prototype card has only a hairline,
+    // not a saturated cyan outline.
     ImGui::PushStyleColor(ImGuiCol_ChildBg,  ImVec4(0,0,0,0));
-    ImGui::PushStyleColor(ImGuiCol_Border,   Cyan);
+    ImGui::PushStyleColor(ImGuiCol_Border,   BorderHi);
     ImGui::PushStyleVar(ImGuiStyleVar_ChildBorderSize, 1.f);
     ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding,   8.f);
     ImGui::BeginChild("##detail", ImVec2(detailW, bodyH), true,
@@ -1257,33 +1261,32 @@ void ProjectHub::render(Engine* engine) {
             const ModeView mv = modeViewFor(sel);
             ImDrawList* dl3 = ImGui::GetWindowDrawList();
 
-            // ── Header tile ──
+            // ── Header tile (44 px square + larger name + body-sized subtitle) ──
             {
-                ImGui::Dummy(ImVec2(0, 4.f));
+                ImGui::Dummy(ImVec2(0, 6.f));
                 const ImVec2 tilePos = ImGui::GetCursorScreenPos();
-                ImGui::InvisibleButton("##headerTile", {32.f, 32.f});
-                dl3->AddRect(tilePos, {tilePos.x + 32.f, tilePos.y + 32.f},
-                             ToU32(mv.color), 6.f, 0, 1.5f);
+                const float tileSz = 44.f;
+                ImGui::InvisibleButton("##headerTile", {tileSz, tileSz});
+                dl3->AddRect(tilePos, {tilePos.x + tileSz, tilePos.y + tileSz},
+                             ToU32(mv.color), 8.f, 0, 1.5f);
                 drawMusicNote(dl3,
-                    {tilePos.x + 16.f, tilePos.y + 16.f}, ToU32(mv.color));
+                    {tilePos.x + tileSz * 0.5f, tilePos.y + tileSz * 0.5f},
+                    ToU32(mv.color));
 
-                // Detail project name — slightly larger than body (~1.15×).
-                ImGui::SetCursorScreenPos({tilePos.x + 44.f, tilePos.y - 4.f});
-                ImGui::SetWindowFontScale(1.15f);
+                // Detail project name — 1.25× over the body base.
+                ImGui::SetCursorScreenPos({tilePos.x + tileSz + 12.f, tilePos.y});
+                ImGui::SetWindowFontScale(1.25f);
                 ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.f, 1.f, 1.f, 1.f));
                 ImGui::TextUnformatted(sel.name.c_str());
                 ImGui::PopStyleColor();
                 ImGui::SetWindowFontScale(1.0f);
-                // Subtitle — smaller secondary tier (~0.85×), mono.
-                ImGui::SetCursorScreenPos({tilePos.x + 44.f, tilePos.y + 18.f});
-                ImGui::SetWindowFontScale(0.85f);
-                ui::PushMono();
-                ImGui::PushStyleColor(ImGuiCol_Text, SoftWhite);
-                ImGui::Text("%s  -  %d songs", mv.label, sel.songCount);
+                // Subtitle — body size, dim text.
+                ImGui::SetCursorScreenPos(
+                    {tilePos.x + tileSz + 12.f, tilePos.y + 26.f});
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.66f, 0.68f, 0.71f, 1.f));
+                ImGui::Text("%s | %d songs", mv.label, sel.songCount);
                 ImGui::PopStyleColor();
-                ui::PopMono();
-                ImGui::SetWindowFontScale(1.0f);
-                ImGui::SetCursorScreenPos({tilePos.x, tilePos.y + 44.f});
+                ImGui::SetCursorScreenPos({tilePos.x, tilePos.y + tileSz + 8.f});
             }
 
             ImGui::Dummy(ImVec2(0, 6.f));
@@ -1292,7 +1295,7 @@ void ProjectHub::render(Engine* engine) {
             if (ImGui::BeginTable("##meta", 2,
                     ImGuiTableFlags_SizingFixedFit |
                     ImGuiTableFlags_NoBordersInBody)) {
-                ImGui::TableSetupColumn("k", ImGuiTableColumnFlags_WidthFixed, 160.f);
+                ImGui::TableSetupColumn("k", ImGuiTableColumnFlags_WidthFixed, 170.f);
                 ImGui::TableSetupColumn("v", ImGuiTableColumnFlags_WidthStretch);
 
                 auto row = [&](const char* k, const std::string& v) {
@@ -1301,18 +1304,17 @@ void ProjectHub::render(Engine* engine) {
                     std::string up;
                     for (const char* p = k; *p; ++p)
                         up += (char)((*p >= 'a' && *p <= 'z') ? (*p - 32) : *p);
-                    // Label tier — small (~0.85× base) per prototype.
-                    ImGui::SetWindowFontScale(0.85f);
-                    ImGui::PushStyleColor(ImGuiCol_Text, SoftWhite);
+                    // Label — body size, dim-grey (text "VERSION" / "PATH" etc.).
+                    ImGui::PushStyleColor(ImGuiCol_Text,
+                                          ImVec4(0.66f, 0.68f, 0.71f, 1.f));
                     ImGui::TextUnformatted(up.c_str());
                     ImGui::PopStyleColor();
-                    ImGui::SetWindowFontScale(1.0f);
 
                     ImGui::TableSetColumnIndex(1);
-                    ui::PushMono();
+                    // Default font (NOT mono) — the mono font in this build
+                    // is intrinsically smaller, which made values look tiny
+                    // next to the labels.
                     ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.f, 1.f, 1.f, 1.f));
-                    // Truncate with ellipsis instead of wrapping — keeps each
-                    // row one line tall so labels and values never overlap.
                     const std::string display = v.empty() ? "-" : v;
                     const float availW = ImGui::GetContentRegionAvail().x;
                     if (ImGui::CalcTextSize(display.c_str()).x <= availW) {
@@ -1331,7 +1333,6 @@ void ProjectHub::render(Engine* engine) {
                             ImGui::SetTooltip("%s", display.c_str());
                     }
                     ImGui::PopStyleColor();
-                    ui::PopMono();
                 };
                 row("Version",       sel.version);
                 row("Default chart", sel.defaultChart);
@@ -1390,7 +1391,7 @@ void ProjectHub::render(Engine* engine) {
             ImGui::Dummy(ImVec2(0, 10.f));
 
             // ── PACKAGE APK card ──
-            const float cardH = m_apkProjectName.empty() ? 64.f
+            const float cardH = m_apkProjectName.empty() ? 48.f
                               : (m_apkRunning ? 100.f : 134.f);
             ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0,0,0,0));
             ImGui::PushStyleColor(ImGuiCol_Border,  Amber);
@@ -1412,9 +1413,13 @@ void ProjectHub::render(Engine* engine) {
                 ImGui::TextUnformatted("PACKAGE APK");
                 ImGui::PopStyleColor();
 
-                // Build button (outlined, with download icon).
+                // Build button (outlined, with download icon). Right-anchored
+                // with breathing room from the card's right border. Blank-label
+                // button + manual icon/text so the group is visually centred.
+                const float buildBtnW = 100.f;
+                const float buildBtnH = 24.f;
                 ImGui::SetCursorScreenPos(
-                    {origin.x + ImGui::GetContentRegionAvail().x - 76.f,
+                    {origin.x + ImGui::GetContentRegionAvail().x - buildBtnW - 4.f,
                      origin.y});
                 if (m_apkRunning) ImGui::BeginDisabled();
                 {
@@ -1422,16 +1427,27 @@ void ProjectHub::render(Engine* engine) {
                     ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0,0,0,0));
                     ImGui::PushStyleColor(ImGuiCol_ButtonHovered, Cyan);
                     ImGui::PushStyleColor(ImGuiCol_ButtonActive,  Cyan);
-                    ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(1.f, 1.f, 1.f, 1.f));
                     ImGui::PushStyleColor(ImGuiCol_Border,        Cyan);
                     ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1.f);
                     ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding,   6.f);
-                    if (ImGui::Button("    Build", ImVec2(76.f, 24.f)))
-                        startApkBuild(sel);
+                    const bool clicked = ImGui::Button("##buildbtn",
+                                                       ImVec2(buildBtnW, buildBtnH));
                     ImGui::PopStyleVar(2);
-                    ImGui::PopStyleColor(5);
+                    ImGui::PopStyleColor(4);
+                    if (clicked) startApkBuild(sel);
+
+                    const char* lbl = "Build";
+                    const float lblW  = ImGui::CalcTextSize(lbl).x;
+                    const float iconW = 12.f;
+                    const float gapW  = 6.f;
+                    const float groupW = iconW + gapW + lblW;
+                    const float gx = bCur.x + (buildBtnW - groupW) * 0.5f;
                     drawDownArrow(dlc,
-                        {bCur.x + 14.f, bCur.y + 12.f}, IM_COL32(255, 255, 255, 255));
+                        {gx + iconW * 0.5f, bCur.y + buildBtnH * 0.5f},
+                        IM_COL32(255, 255, 255, 255));
+                    dlc->AddText({gx + iconW + gapW,
+                                  bCur.y + (buildBtnH - ImGui::GetFontSize()) * 0.5f},
+                                 IM_COL32(255, 255, 255, 255), lbl);
                 }
                 if (m_apkRunning) ImGui::EndDisabled();
 
@@ -2938,10 +2954,9 @@ void ProjectHub::renderApkPanel() {
     using namespace ui::tokens;
 
     // Inline status block — caller provides border + header. All text white.
+    // Idle state: render nothing inside the card body (the header row alone
+    // matches the prototype's compact "PACKAGE APK [Build]" card).
     if (m_apkProjectName.empty()) {
-        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.f, 1.f, 1.f, 1.f));
-        ImGui::TextWrapped("Builds an APK to your desktop.");
-        ImGui::PopStyleColor();
         return;
     }
 

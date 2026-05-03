@@ -1932,3 +1932,165 @@ immediately.
   pure white (was `TextHi` off-white).
 
 Branch is `ui-test`; no merge to main per the user's instruction.
+
+## 2026-05-03 (evening) — ProjectHub iteration pass
+
+The morning's prototype-faithful rebuild landed the structure but a
+side-by-side review surfaced ~20 individual visual/UX bugs. The user
+walked through each one and we corrected them in sequence. Live
+render still in `engine/src/ui/ProjectHub.cpp` (legacy `#if 0` block
+unchanged).
+
+### Header
+
+- Right cluster widths bumped (`searchW 260→320`, `addW 96→130`,
+  `createW 140→180`) plus a `rightPad = 20` from window edge — the
+  earlier widths clipped the labels.
+- Header child: 70 → 80 px so the bigger title + body-size subtitle
+  fit cleanly.
+- "Projects" title: `SetWindowFontScale(2.3f)` replaced with
+  `engine->imguiLayer().getLogoFont(48.f)` + `PushFont`. Scaling a
+  17 px atlas to 39 px is blurry; the 48 px Roboto-Medium font is
+  already loaded by `ImGuiLayer` for the logo text, so this reuses
+  that slot. Required adding `Engine::imguiLayer()` accessor.
+- Subtitle ("3 projects | last opened test") promoted from 0.85×
+  scale to body size, dim color
+  `ImVec4(0.66f, 0.68f, 0.71f, 1.f)` — at 0.85× it was unreadable.
+- Search input gained a magnifier glyph (`drawMagnifier`) over the
+  left edge plus the existing Ctrl+K cyan chip. The chip is now
+  hidden by default and only renders when the input is hovered or
+  focused (`IsItemHovered() || IsItemActive()`). Placeholder padded
+  with two leading spaces so user-typed text doesn't collide with
+  the magnifier.
+- Settings gear button **removed entirely** from the TopBar
+  rightSlot (passed `nullptr` to `ui::TopBar`). Settings is a
+  per-project page that depends on `PlayerSettings` + active game
+  mode and has no place at the Hub level.
+
+### Buttons — manual icon+label centring
+
+The morning pass put icons via `dl->AddText` after a `Button`
+labelled with leading spaces (e.g. `"    Build"`). ImGui centres
+the entire padded string, so the visible text shifts off-centre and
+the icon often collides with or floats away from it. Replaced all
+three (Add file, Create game, Build) with a blank-button +
+manual-draw pattern:
+
+```cpp
+const ImVec2 bCur = ImGui::GetCursorScreenPos();
+const bool clicked = ImGui::Button("##id", ImVec2(W, H));
+const float groupW = iconW + gapW + lblW;
+const float gx = bCur.x + (W - groupW) * 0.5f;
+drawIcon(dl, {gx + iconW * 0.5f, bCur.y + H * 0.5f}, color);
+dl->AddText({gx + iconW + gapW, bCur.y + (H - GetFontSize()) * 0.5f},
+            color, lbl);
+```
+
+The (icon + label) group is geometrically centred regardless of
+button width.
+
+### Project rows — column changes
+
+- **MODE column removed entirely.** Rationale from user: "one song
+  can only use one mode, but there are many different songs in a
+  game — we cannot determine the mode of game." Table is now 3
+  columns (NAME / SONGS / MODIFIED). The colored mode-tile in NAME
+  stays as decoration (still based on the first song's mode).
+- **SONGS column**: width 80 → 160 so the numeral has room to centre
+  away from MODIFIED. Progress bar removed. Numeral horizontally
+  centred. SONGS header centred too — replaced `TableHeadersRow()`
+  with manual cell-by-cell rendering using a `centredHeader` lambda
+  (NAME and MODIFIED stay left-aligned to match their content).
+- **Path subtitle** (`Projects/<name>/`) under each project name —
+  added then removed (user: "you do not need to show the address
+  under the name").
+- **Star icon removed** from rows (not in prototype). The starred
+  state plumbing stays for the left-rail filter; rows just don't
+  expose a toggle.
+- **MODIFIED chevron** replaced with a clean `>` shape via two lines
+  (`drawChevronRight`).
+
+### Mode-filter chip dots — REMOVED
+
+Not in prototype. `m_modeFilter` forced to `-1` each render.
+
+### Detail panel
+
+- Width 320 → 480 px so `DEFAULT CHART` label + full
+  `C:\Users\wense\…` path both fit without ellipsis.
+- Border switched from saturated `Cyan` to `BorderHi` (α=0.10) — a
+  hairline, not a shouting outline.
+- Header tile 32 → 44 px; project name `SetWindowFontScale(1.25f)`
+  (the morning's 1.45× over a 1.18× panel base compounded to ~1.7×
+  and overflowed).
+- Subtitle uses ASCII `|` separator (the middle-dot U+00B7 doesn't
+  render under MSVC CP936) at body size with dim color.
+- Meta-table label column 160 → 170 px so "DEFAULT CHART" fits.
+- **Mono font dropped on meta values.** Cousine-Regular in this
+  build is intrinsically smaller than the default Roboto at the
+  same nominal size; mixing them in one row makes the mono side
+  look half-height. Both columns now use the default font.
+- An attempt to scale the whole detail child by 1.18× via
+  `SetWindowFontScale` was reverted — child windows do not inherit
+  the parent's scale, so nested children (APK card) needed
+  re-applies, and the underlying mono-size disparity made labels
+  look balloon-large vs values. Dropping mono was the actual fix.
+
+### APK card
+
+- Idle state body: `renderApkPanel()` early-returns without drawing.
+  The earlier `TextWrapped("Builds an APK to your desktop.")`
+  wrapped to two lines and pushed the Build button outside the
+  card.
+- Card height 64 → 48 px in idle.
+
+### Win32 dark title bar
+
+The OS title bar's bright Windows-default background didn't match
+the editor theme. Added `DwmSetWindowAttribute` calls right after
+`glfwCreateWindow` in `Engine::init`:
+
+```cpp
+HWND hwnd = glfwGetWin32Window(m_window);
+BOOL useDark = TRUE;
+DwmSetWindowAttribute(hwnd, 20, &useDark, sizeof(useDark));  // Win11
+DwmSetWindowAttribute(hwnd, 19, &useDark, sizeof(useDark));  // Win10 19H1+
+```
+
+Required adding `<dwmapi.h>` + `GLFW_EXPOSE_NATIVE_WIN32` /
+`<GLFW/glfw3native.h>` includes plus
+`#pragma comment(lib, "dwmapi.lib")` for auto-link, all under
+`#ifdef _WIN32`. `DwmSetWindowAttribute` returns `E_INVALIDARG` for
+unknown attributes — both calls are safe on every build.
+
+### New file-local helpers
+
+In `ProjectHub.cpp` icon namespace:
+
+- `drawMagnifier(dl, c, color)` — circle ring + diagonal handle.
+- `drawChevronRight(dl, c, color)` — clean `>` from two lines.
+
+### Files touched
+
+- `engine/src/ui/ProjectHub.cpp` — header cluster, buttons, row
+  rendering, MODE column delete, SONGS centring, panel widths,
+  helpers.
+- `engine/src/engine/Engine.cpp` — Win32 dark title bar.
+- `engine/src/engine/Engine.h` — `imguiLayer()` accessor.
+
+### Lessons saved out of this pass
+
+- **Diagnose before widening.** Before changing pixel sizes when
+  text "displays badly", read the actual draw path — the issue was
+  centring math + leading-space hack, not button width.
+- **`PushFont` over `SetWindowFontScale` for big text.** Anything
+  past ~1.3× needs a pre-rasterized larger font; scaling produces
+  blurry glyphs.
+- **`SetWindowFontScale` is per-window.** Child windows do NOT
+  inherit the parent's scale; re-apply inside each nested child if
+  you actually need a per-region bump.
+- **Default font ≠ mono font even at the same nominal size** in
+  this build. Don't reach for `ui::PushMono` for "monospace look"
+  if the row mixes both — the size disparity is jarring.
+
+Branch is still `ui-test`; no merge to main.

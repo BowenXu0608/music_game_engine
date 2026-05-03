@@ -62,6 +62,7 @@ public:
     AudioEngine& audio() { return m_audio; }
     Renderer& renderer() { return m_renderer; }
     GameClock& clock() { return m_clock; }
+    ImGuiLayer& imguiLayer() { return m_imgui; }
 
     // Preview: set up a renderer and render one frame at the given time
     void setupPreviewMode(const GameModeConfig& config, const ChartData& chart,
