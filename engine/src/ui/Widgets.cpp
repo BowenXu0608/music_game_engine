@@ -429,9 +429,9 @@ float TopBar(std::initializer_list<const char*> crumbs,
     {
         float cx = tileMax.x + 14.f;
         const float cy = origin.y + 18.f;
-        const ImU32 colHi  = ToU32(TextHi);
-        const ImU32 colLow = ToU32(TextLow);
-        const ImU32 colSep = ToU32(TextLow);
+        const ImU32 colHi  = IM_COL32(255, 255, 255, 255);
+        const ImU32 colLow = IM_COL32(255, 255, 255, 255);
+        const ImU32 colSep = IM_COL32(255, 255, 255, 255);
         int idx = 0;
         int total = (int)crumbs.size();
         for (auto* c : crumbs) {

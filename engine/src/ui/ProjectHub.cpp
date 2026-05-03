@@ -3,8 +3,10 @@
 #include "Widgets.h"
 #include "engine/Engine.h"
 #include <imgui.h>
+#include <imgui_internal.h>
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <ctime>
 #include <cstring>
 #include <fstream>
@@ -191,6 +193,131 @@ void formatMtime(fs::file_time_type ft, std::string& out, long long& rawSec) {
 #endif
     std::strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M", &tmv);
     out = buf;
+}
+
+} // namespace
+
+// ── starred persistence ─────────────────────────────────────────────────────
+//
+// Stored alongside the Projects/ folder so the user's per-machine
+// preferences travel with the workspace, not with the engine binary.
+// Underscore prefix keeps it from being mistaken for a project folder by
+// the scanProjects directory walk (which already requires project.json).
+
+void ProjectHub::loadStarred() {
+    if (m_starredLoaded) return;
+    m_starredLoaded = true;
+    fs::path p = "../../Projects/_hub_state.json";
+    if (!fs::exists(p)) return;
+    try {
+        std::ifstream f(p);
+        auto j = nlohmann::json::parse(f, nullptr, false);
+        if (!j.is_object() || !j.contains("starred")) return;
+        for (const auto& s : j["starred"]) {
+            if (s.is_string()) m_starred.insert(s.get<std::string>());
+        }
+    } catch (...) {
+        // Tolerant: malformed file just yields an empty starred set.
+    }
+}
+
+void ProjectHub::saveStarred() {
+    fs::path p = "../../Projects/_hub_state.json";
+    nlohmann::json j;
+    j["starred"] = nlohmann::json::array();
+    for (const auto& s : m_starred) j["starred"].push_back(s);
+    // Per the user-data writes fail loud rule: refuse to write on dump
+    // throw rather than silently swallow / replace bad bytes.
+    try {
+        std::string text = j.dump(2);
+        std::ofstream(p) << text;
+    } catch (...) {
+        // Leave the existing file untouched on error.
+    }
+}
+
+void ProjectHub::revealInExplorer(const std::string& projectPath) {
+#ifdef _WIN32
+    // Use a sentinel inside the folder so Explorer opens *in* it instead of
+    // selecting the folder itself in its parent. project.json is guaranteed
+    // to exist (scanProjects requires it).
+    fs::path proj = fs::path(projectPath) / "project.json";
+    std::string arg = "/select,\"" + proj.string() + "\"";
+    ShellExecuteA(nullptr, "open", "explorer.exe",
+                  arg.c_str(), nullptr, SW_SHOWNORMAL);
+#else
+    (void)projectPath;
+#endif
+}
+
+// ── small primitive icons (no font glyphs — CP936-safe) ───────────────────
+
+namespace {
+
+// Draw a 14×14 gear at (cx,cy) using six trapezoid teeth + center hole.
+void drawGearIcon(ImDrawList* dl, ImVec2 c, ImU32 color) {
+    constexpr int teeth = 6;
+    const float rOuter = 7.f;
+    const float rInner = 5.f;
+    const float toothHalf = 0.20f; // radians
+    for (int i = 0; i < teeth; ++i) {
+        const float a = (float)i * (3.14159265f * 2.f / teeth);
+        const float a0 = a - toothHalf;
+        const float a1 = a + toothHalf;
+        ImVec2 p0{c.x + std::cos(a0) * rInner, c.y + std::sin(a0) * rInner};
+        ImVec2 p1{c.x + std::cos(a0) * rOuter, c.y + std::sin(a0) * rOuter};
+        ImVec2 p2{c.x + std::cos(a1) * rOuter, c.y + std::sin(a1) * rOuter};
+        ImVec2 p3{c.x + std::cos(a1) * rInner, c.y + std::sin(a1) * rInner};
+        ImVec2 quad[4] = {p0, p1, p2, p3};
+        dl->AddConvexPolyFilled(quad, 4, color);
+    }
+    dl->AddCircleFilled(c, rInner, color, 24);
+    // Hub hole — punch with bg color.
+    dl->AddCircleFilled(c, 2.0f, IM_COL32(0, 0, 0, 255), 16);
+}
+
+// Draw a 14×14 star at center. Filled when `solid`, outline otherwise.
+void drawStarIcon(ImDrawList* dl, ImVec2 c, float r, ImU32 color, bool solid) {
+    ImVec2 pts[10];
+    for (int i = 0; i < 10; ++i) {
+        const float a = -3.14159265f * 0.5f + (float)i * (3.14159265f / 5.f);
+        const float rr = (i & 1) ? r * 0.42f : r;
+        pts[i] = {c.x + std::cos(a) * rr, c.y + std::sin(a) * rr};
+    }
+    if (solid) dl->AddConvexPolyFilled(pts, 10, color);
+    else       dl->AddPolyline(pts, 10, color, ImDrawFlags_Closed, 1.5f);
+}
+
+// Draw a small folder glyph (12×9) for the "All projects" rail row.
+void drawFolderIcon(ImDrawList* dl, ImVec2 c, ImU32 color) {
+    const ImVec2 a{c.x - 7.f, c.y - 4.f};
+    const ImVec2 b{c.x - 1.f, c.y - 4.f};
+    const ImVec2 d{c.x,       c.y - 2.f};
+    const ImVec2 e{c.x + 7.f, c.y - 2.f};
+    const ImVec2 f{c.x + 7.f, c.y + 5.f};
+    const ImVec2 g{c.x - 7.f, c.y + 5.f};
+    ImVec2 tab[4] = {a, b, d, {c.x - 1.f, c.y - 2.f}};
+    dl->AddConvexPolyFilled(tab, 4, color);
+    dl->AddRectFilled({a.x, c.y - 2.f}, f, color, 1.5f);
+    (void)e; (void)g;
+}
+
+// Draw a clock glyph (circle + two hands) for the "Recent" rail row.
+void drawClockIcon(ImDrawList* dl, ImVec2 c, ImU32 color) {
+    dl->AddCircle(c, 6.5f, color, 20, 1.5f);
+    dl->AddLine(c, {c.x, c.y - 4.f}, color, 1.5f);
+    dl->AddLine(c, {c.x + 3.5f, c.y + 1.f}, color, 1.5f);
+}
+
+// Draw a funnel glyph (downward-narrowing chevron with stem).
+void drawFunnelIcon(ImDrawList* dl, ImVec2 c, ImU32 color) {
+    ImVec2 top0{c.x - 7.f, c.y - 5.f};
+    ImVec2 top1{c.x + 7.f, c.y - 5.f};
+    ImVec2 mid0{c.x - 1.f, c.y + 1.f};
+    ImVec2 mid1{c.x + 1.f, c.y + 1.f};
+    ImVec2 quad[4] = {top0, top1, mid1, mid0};
+    dl->AddConvexPolyFilled(quad, 4, color);
+    dl->AddRectFilled({c.x - 1.f, c.y + 1.f}, {c.x + 1.f, c.y + 6.f}, color);
 }
 
 } // namespace
@@ -408,8 +535,156 @@ void ProjectHub::renderCreateDialog(Engine* engine) {
 
 // ── main render ───────────────────────────────────────────────────────────────
 
+// ── render-side helpers (file-local, ImGui-only typography) ──────────────
+
+namespace {
+
+struct ModeView { const char* label; ImVec4 color; };
+
+ModeView modeViewFor(const ProjectInfo& proj) {
+    using namespace ui::tokens;
+    switch (proj.gameMode) {
+        case GameModeType::DropNotes:
+            return (proj.gameDim == DropDimension::ThreeD)
+                ? ModeView{"Drop 3D", Magenta}
+                : ModeView{"Drop 2D", Cyan};
+        case GameModeType::ScanLine: return {"Scan Line", Amber};
+        case GameModeType::Circle:   return {"Circle",    Lime};
+    }
+    return {"Drop 2D", Cyan};
+}
+
+int modeFilterIdxFor(const ProjectInfo& proj) {
+    switch (proj.gameMode) {
+        case GameModeType::DropNotes:
+            return (proj.gameDim == DropDimension::ThreeD) ? 1 : 0;
+        case GameModeType::ScanLine: return 2;
+        case GameModeType::Circle:   return 3;
+    }
+    return 0;
+}
+
+// Clean gear: filled circle + 8 small square teeth at the rim + dark hub.
+void drawGearClean(ImDrawList* dl, ImVec2 c, ImU32 color) {
+    dl->AddCircleFilled(c, 5.f, color, 16);
+    for (int i = 0; i < 8; ++i) {
+        const float a = (float)i * 3.14159265f * 0.25f;
+        const ImVec2 p{c.x + std::cos(a) * 7.f, c.y + std::sin(a) * 7.f};
+        dl->AddRectFilled({p.x - 1.5f, p.y - 1.5f}, {p.x + 1.5f, p.y + 1.5f}, color);
+    }
+    dl->AddCircleFilled(c, 1.8f, IM_COL32(0, 0, 0, 255), 12);
+}
+
+} // namespace
+
+// ── render orchestrator ──────────────────────────────────────────────────
+
+namespace {
+
+// Forward-declared inline lambdas would pollute scope; keep these as
+// file-local helpers so the render path reads top-down.
+
+void styleGhostButton(bool push) {
+    using namespace ui::tokens;
+    if (push) {
+        ImGui::PushStyleColor(ImGuiCol_Button,        BgPanel2);
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, BgPanel3);
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive,  BgPanel3);
+        ImGui::PushStyleColor(ImGuiCol_Border,        BorderHi);
+        ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1.f);
+    } else {
+        ImGui::PopStyleVar();
+        ImGui::PopStyleColor(4);
+    }
+}
+
+void stylePrimaryCyanButton(bool push) {
+    using namespace ui::tokens;
+    if (push) {
+        ImGui::PushStyleColor(ImGuiCol_Button,        WithAlpha(Cyan, 0.85f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, Cyan);
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive,  Cyan);
+        ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(0, 0, 0, 1));
+    } else {
+        ImGui::PopStyleColor(4);
+    }
+}
+
+// ── Single-glyph icon primitives (CP936-safe — no font glyphs) ──────────
+
+// Music note: small filled head + thin stem + small flag.
+void drawMusicNote(ImDrawList* dl, ImVec2 c, ImU32 color) {
+    dl->AddCircleFilled({c.x - 2.f, c.y + 4.f}, 3.f, color, 16);
+    dl->AddRectFilled({c.x + 0.6f, c.y - 6.f}, {c.x + 2.4f, c.y + 4.f}, color);
+    dl->AddTriangleFilled({c.x + 2.4f, c.y - 6.f},
+                          {c.x + 6.5f, c.y - 4.f},
+                          {c.x + 2.4f, c.y - 1.5f}, color);
+}
+
+// Disc: filled outer ring + thin centred ring (for the APK card icon).
+void drawDisc(ImDrawList* dl, ImVec2 c, float r, ImU32 color) {
+    dl->AddCircleFilled(c, r, color, 24);
+    dl->AddCircle(c, r * 0.45f, IM_COL32(0, 0, 0, 200), 16, 1.5f);
+    dl->AddCircleFilled(c, 1.5f, IM_COL32(0, 0, 0, 220), 8);
+}
+
+// Arrow pointing up (used by Add file).
+void drawUpArrow(ImDrawList* dl, ImVec2 c, ImU32 color) {
+    dl->AddTriangleFilled({c.x - 4.f, c.y - 1.f},
+                          {c.x + 4.f, c.y - 1.f},
+                          {c.x,       c.y - 6.f}, color);
+    dl->AddRectFilled({c.x - 1.f, c.y - 1.f}, {c.x + 1.f, c.y + 5.f}, color);
+}
+
+// Arrow pointing down (used by Build).
+void drawDownArrow(ImDrawList* dl, ImVec2 c, ImU32 color) {
+    dl->AddTriangleFilled({c.x - 4.f, c.y + 1.f},
+                          {c.x + 4.f, c.y + 1.f},
+                          {c.x,       c.y + 6.f}, color);
+    dl->AddRectFilled({c.x - 1.f, c.y - 5.f}, {c.x + 1.f, c.y + 1.f}, color);
+}
+
+// Frameless icon + text clickable. Returns true on click.
+bool textActionRow(const char* id,
+                   const char* label,
+                   void (*icon)(ImDrawList*, ImVec2, ImU32),
+                   float width,
+                   float height) {
+    using namespace ui::tokens;
+    const ImVec2 cur = ImGui::GetCursorScreenPos();
+    ImGui::PushID(id);
+    const bool clicked = ImGui::InvisibleButton("##t", {width, height});
+    const bool hovered = ImGui::IsItemHovered();
+    ImGui::PopID();
+
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    (void)hovered;
+    icon(dl, {cur.x + 12.f, cur.y + height * 0.5f}, IM_COL32(255, 255, 255, 255));
+    dl->AddText({cur.x + 26.f, cur.y + (height - ImGui::GetFontSize()) * 0.5f},
+                IM_COL32(255, 255, 255, 255), label);
+    return clicked;
+}
+
+} // namespace
+
 void ProjectHub::render(Engine* engine) {
     scanProjects();
+    loadStarred();
+    using namespace ui::tokens;
+
+    // Auto-select most-recent project on first frame.
+    if (!m_initialSelectDone) {
+        if (m_selectedIdx < 0 && !m_projects.empty()) m_selectedIdx = 0;
+        m_initialSelectDone = true;
+    }
+
+    // No-gray rule: every label/border/glyph is pure white #FFFFFF or a
+    // fully saturated accent color. TextHi (#F4F4F7) is OFF-white and reads
+    // as gray on black, so we use ImVec4{1,1,1,1} directly.
+    const ImVec4 PureWhite     = ImVec4(1.f, 1.f, 1.f, 1.f);
+    const ImU32  PureWhiteU32  = IM_COL32(255, 255, 255, 255);
+    const ImVec4 SoftWhite     = PureWhite;        // alias for legacy refs
+    (void)PureWhiteU32;
 
     ImGui::SetNextWindowPos(ImVec2(0, 0));
     ImGui::SetNextWindowSize(ImGui::GetIO().DisplaySize);
@@ -417,30 +692,1448 @@ void ProjectHub::render(Engine* engine) {
                  ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse |
                  ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize);
 
-    // Top bar matching MIGRATION mock — gradient logo + crumbs + Settings
-    // gear (placeholder). Replaces the inline "Music Game Engine - Project
-    // Hub" line that the rest of this function below used to print.
+    // ── Top bar: gradient M tile + crumb + gear ────────────────────────
     ui::TopBar({"Project Hub"}, [&]{
-        if (ui::TopNavForward("Settings")) {
-            if (engine) engine->switchLayer(EditorLayer::Settings);
-        }
+        ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0, 0, 0, 0));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, Cyan);
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive,  Cyan);
+        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding,  {6.f, 6.f});
+        ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 4.f);
+        const ImVec2 cur = ImGui::GetCursorScreenPos();
+        const bool gearClicked = ImGui::Button("##gear", {28.f, 28.f});
+        drawGearClean(ImGui::GetWindowDrawList(),
+                      {cur.x + 14.f, cur.y + 14.f}, IM_COL32(255, 255, 255, 255));
+        ImGui::PopStyleVar(2);
+        ImGui::PopStyleColor(3);
+        if (gearClicked && engine) engine->switchLayer(EditorLayer::Settings);
     });
 
-    // ── Header row (MIGRATION §3.1): big title + subtitle, right-aligned
-    // search + Add file outline + Create primary-glow ─────────────────────
-    using namespace ui::tokens;
+    // ── Header row: title + subtitle (left) | search + actions (right) ─
+    {
+        const float hdrH = 70.f;
+        ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0,0,0,0));
+        ImGui::BeginChild("##hdr", ImVec2(0, hdrH), false,
+                          ImGuiWindowFlags_NoScrollbar);
+        const float fullW = ImGui::GetContentRegionAvail().x;
+
+        // Title — large bold per prototype (~2.3× base).
+        ImGui::SetWindowFontScale(2.3f);
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.f, 1.f, 1.f, 1.f));
+        ImGui::TextUnformatted("Projects");
+        ImGui::PopStyleColor();
+        ImGui::SetWindowFontScale(1.0f);
+
+        // Subtitle — secondary tier (~0.85× base), regular (not mono) sans.
+        ImGui::SetWindowFontScale(0.85f);
+        ImGui::PushStyleColor(ImGuiCol_Text, SoftWhite);
+        if (m_projects.empty())
+            ImGui::TextUnformatted("0 projects");
+        else
+            ImGui::Text("%d projects  |  last opened %s",
+                        (int)m_projects.size(),
+                        m_projects.front().name.c_str());
+        ImGui::PopStyleColor();
+        ImGui::SetWindowFontScale(1.0f);  // reset after subtitle
+
+        // Right cluster: search + Add file + Create game.
+        const float searchW = 260.f;
+        const float addW    = 96.f;
+        const float createW = 140.f;
+        const float gap     = 8.f;
+        const float groupW  = searchW + addW + createW + gap * 2.f;
+        ImGui::SetCursorPos({fullW - groupW, 8.f});
+
+        // Search input — placeholder "Search projects..."; the Ctrl+K hint is
+        // drawn AFTER the input as a small chip overlapping the right edge.
+        const ImVec2 searchCur = ImGui::GetCursorScreenPos();
+        ImGui::SetNextItemWidth(searchW);
+        ImGui::PushStyleColor(ImGuiCol_FrameBg,        BgVoid);
+        ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, BgVoid);
+        ImGui::PushStyleColor(ImGuiCol_FrameBgActive,  BgVoid);
+        ImGui::PushStyleColor(ImGuiCol_Text,           ImVec4(1.f, 1.f, 1.f, 1.f));
+        ImGui::PushStyleColor(ImGuiCol_Border,         Cyan);
+        ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1.f);
+        ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding,   6.f);
+        ImGui::InputTextWithHint("##search", "Search projects...",
+                                 m_searchBuf, sizeof(m_searchBuf));
+        ImGui::PopStyleVar(2);
+        ImGui::PopStyleColor(5);
+
+        // Ctrl+K chip drawn over the right side of the input.
+        {
+            ImDrawList* dl = ImGui::GetWindowDrawList();
+            const char* hint = "Ctrl+K";
+            const ImVec2 hintSz = ImGui::CalcTextSize(hint);
+            const float chipW = hintSz.x + 10.f;
+            const float chipH = 18.f;
+            const ImVec2 chipMin{searchCur.x + searchW - chipW - 6.f,
+                                  searchCur.y + (28.f - chipH) * 0.5f};
+            const ImVec2 chipMax{chipMin.x + chipW, chipMin.y + chipH};
+            dl->AddRectFilled(chipMin, chipMax, ToU32(Cyan), 4.f);
+            dl->AddText({chipMin.x + 5.f,
+                         chipMin.y + (chipH - hintSz.y) * 0.5f},
+                        IM_COL32(0, 0, 0, 255), hint);
+        }
+
+        ImGui::SameLine(0.f, gap);
+        // Add file button: outlined, with up-arrow icon.
+        {
+            const ImVec2 bCur = ImGui::GetCursorScreenPos();
+            ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0,0,0,0));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, Cyan);
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive,  Cyan);
+            ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(1.f, 1.f, 1.f, 1.f));
+            ImGui::PushStyleColor(ImGuiCol_Border,        Cyan);
+            ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1.f);
+            ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding,   6.f);
+            if (ImGui::Button("    Add file", ImVec2(addW, 28))) {
+                m_showAddFileDialog = true;
+                m_addFileError.clear();
+            }
+            ImGui::PopStyleVar(2);
+            ImGui::PopStyleColor(5);
+            drawUpArrow(ImGui::GetWindowDrawList(),
+                        {bCur.x + 16.f, bCur.y + 14.f}, IM_COL32(255, 255, 255, 255));
+        }
+
+        ImGui::SameLine(0.f, gap);
+        // Create game button: cyan filled (no alpha — full saturation).
+        ImGui::PushStyleColor(ImGuiCol_Button,        Cyan);
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, Cyan);
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive,  Cyan);
+        ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(0, 0, 0, 1));
+        ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 6.f);
+        if (ImGui::Button("+ Create game", ImVec2(createW, 28)))
+            m_showCreateDialog = true;
+        ImGui::PopStyleVar();
+        ImGui::PopStyleColor(4);
+
+        ImGui::EndChild();
+        ImGui::PopStyleColor();  // ChildBg
+    }
+
+    if (m_projects.empty()) {
+        ImGui::PushStyleColor(ImGuiCol_Text, SoftWhite);
+        ImGui::TextUnformatted("No projects found. Create one to get started.");
+        ImGui::PopStyleColor();
+        ImGui::End();
+        renderCreateDialog(engine);
+        renderAddFileDialog();
+        return;
+    }
+
+    // ── Body: rail | middle | detail ─────────────────────────────────
+    const float bodyH   = std::max(220.f, ImGui::GetContentRegionAvail().y);
+    const float railW   = 200.f;
+    const float detailW = 320.f;
+    const float midW    = std::max(280.f,
+        ImGui::GetContentRegionAvail().x - railW - detailW
+        - ImGui::GetStyle().ItemSpacing.x * 2.f);
+
+    // ── LEFT RAIL ─────────────────────────────────────────────────────
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0,0,0,0));
+    ImGui::BeginChild("##rail", ImVec2(railW, bodyH), false,
+                      ImGuiWindowFlags_NoScrollbar);
+    {
+        struct Row {
+            const char* label;
+            HubLeftRail value;
+            int         count;
+            void (*icon)(ImDrawList*, ImVec2, ImU32);
+        };
+        const int recentCount = std::min((int)m_projects.size(), 3);
+        int starredCount = 0;
+        for (const auto& p : m_projects)
+            if (m_starred.count(p.name)) ++starredCount;
+
+        const Row rows[] = {
+            {"All projects", HubLeftRail::All,     (int)m_projects.size(),
+                [](ImDrawList* dl, ImVec2 c, ImU32 col){ drawFolderIcon(dl, c, col); }},
+            {"Recent",       HubLeftRail::Recent,  recentCount,
+                [](ImDrawList* dl, ImVec2 c, ImU32 col){ drawClockIcon(dl, c, col); }},
+            {"Starred",      HubLeftRail::Starred, starredCount,
+                [](ImDrawList* dl, ImVec2 c, ImU32 col){ drawStarIcon(dl, c, 7.f, col, false); }},
+        };
+
+        for (const auto& r : rows) {
+            ImGui::PushID((int)r.value);
+            const ImVec2 cur = ImGui::GetCursorScreenPos();
+            const float rowW = ImGui::GetContentRegionAvail().x;
+            const float rowH = 40.f;
+            const bool active = (m_leftRail == r.value);
+
+            if (ImGui::InvisibleButton("##row", {rowW, rowH}))
+                m_leftRail = r.value;
+            const bool hovered = ImGui::IsItemHovered();
+
+            ImDrawList* dl = ImGui::GetWindowDrawList();
+
+            // Active: bordered rounded rect with cyan border + side bar.
+            // No background fill (any alpha-tint reads as gray).
+            if (active) {
+                dl->AddRect(cur, {cur.x + rowW, cur.y + rowH},
+                            ToU32(Cyan), 8.f, 0, 1.5f);
+                dl->AddRectFilled(cur, {cur.x + 3.f, cur.y + rowH}, ToU32(Cyan));
+            }
+            (void)hovered;
+
+            // Icon (white, brighter when active).
+            const ImU32 iconCol = active ? ToU32(Cyan) : IM_COL32(255, 255, 255, 255);
+            r.icon(dl, {cur.x + 22.f, cur.y + rowH * 0.5f}, iconCol);
+
+            // Label (white).
+            ImGui::SetCursorScreenPos(
+                {cur.x + 40.f, cur.y + (rowH - ImGui::GetFontSize()) * 0.5f});
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.f, 1.f, 1.f, 1.f));
+            ImGui::TextUnformatted(r.label);
+            ImGui::PopStyleColor();
+
+            // Count badge (rounded rect + white text).
+            char nb[16];
+            snprintf(nb, sizeof(nb), "%d", r.count);
+            const float numW = ImGui::CalcTextSize(nb).x;
+            const float padX = 8.f;
+            const float bW = numW + padX * 2.f;
+            const float bH = 18.f;
+            const ImVec2 bMin{cur.x + rowW - bW - 12.f, cur.y + (rowH - bH) * 0.5f};
+            // No background — count text only, smaller (~0.85×).
+            ImGui::SetWindowFontScale(0.85f);
+            ImGui::SetCursorScreenPos(
+                {bMin.x + padX, bMin.y + (bH - ImGui::GetFontSize()) * 0.5f});
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.f, 1.f, 1.f, 1.f));
+            ImGui::TextUnformatted(nb);
+            ImGui::PopStyleColor();
+            ImGui::SetWindowFontScale(1.0f);
+
+            ImGui::SetCursorScreenPos({cur.x, cur.y + rowH + 4.f});
+            ImGui::PopID();
+        }
+    }
+    ImGui::EndChild();
+    ImGui::PopStyleColor();  // rail ChildBg
+
+    ImGui::SameLine();
+
+    // ── MIDDLE: chip dots + sort + table ──────────────────────────────
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0,0,0,0));
+    ImGui::BeginChild("##mid", ImVec2(midW, bodyH), false,
+                      ImGuiWindowFlags_NoScrollbar);
+    {
+        const ImVec2 chipsRowOrigin = ImGui::GetCursorScreenPos();
+        const float midFullW = ImGui::GetContentRegionAvail().x;
+
+        // ── Five chip DOTS (no labels, no fill when inactive) ──
+        struct Chip { ImVec4 color; int idx; };
+        const Chip chips[] = {
+            {Cyan,    -1}, {Cyan,     0}, {Magenta,  1},
+            {Amber,    2}, {Lime,     3},
+        };
+        const float dotW = 18.f, dotH = 10.f, dotGap = 6.f;
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        for (int i = 0; i < 5; ++i) {
+            const Chip& c = chips[i];
+            ImGui::PushID(i);
+            const ImVec2 dCur = ImGui::GetCursorScreenPos();
+            ImGui::SetCursorScreenPos({dCur.x, dCur.y + 6.f});
+            const bool clicked = ImGui::InvisibleButton("##dot", {dotW, dotH});
+            const bool hovered = ImGui::IsItemHovered();
+            const bool active  = (m_modeFilter == c.idx);
+            const ImVec2 dotMin{dCur.x, dCur.y + 6.f};
+            const ImVec2 dotMax{dotMin.x + dotW, dotMin.y + dotH};
+            if (active) {
+                dl->AddRectFilled(dotMin, dotMax, ToU32(c.color), dotH * 0.5f);
+            } else {
+                // Full-saturation outline (any alpha reads as gray).
+                dl->AddRect(dotMin, dotMax, ToU32(c.color),
+                            dotH * 0.5f, 0, 1.f);
+            }
+            (void)hovered;
+            if (clicked) m_modeFilter = c.idx;
+            ImGui::PopID();
+            ImGui::SameLine(0.f, dotGap);
+        }
+
+        // ── Sort (right-anchored): "Sort:" + "Last modified ▾" frameless ──
+        const char* sortLabel =
+            (m_sortMode == HubSortMode::LastModified) ? "Last modified" :
+            (m_sortMode == HubSortMode::NameAZ)       ? "Name A-Z" : "Song count";
+        const float sortLabelW = ImGui::CalcTextSize("Sort:").x + 6.f;
+        const float sortValW   = ImGui::CalcTextSize(sortLabel).x + 24.f;
+        const float funnelW    = 26.f;
+        const float sortGroupW = sortLabelW + sortValW + funnelW + 8.f;
+
+        ImGui::SetCursorScreenPos(
+            {chipsRowOrigin.x + midFullW - sortGroupW,
+             chipsRowOrigin.y + 4.f});
+        ImGui::AlignTextToFramePadding();
+        ImGui::PushStyleColor(ImGuiCol_Text, SoftWhite);
+        ImGui::TextUnformatted("Sort:");
+        ImGui::PopStyleColor();
+        ImGui::SameLine();
+
+        // Frameless sort selector.
+        {
+            const ImVec2 sCur = ImGui::GetCursorScreenPos();
+            ImGui::PushID("##sortbtn");
+            const bool sClicked = ImGui::InvisibleButton("##s",
+                {sortValW, ImGui::GetFontSize() + 6.f});
+            const bool sHovered = ImGui::IsItemHovered();
+            ImGui::PopID();
+            (void)sHovered;
+            dl->AddText({sCur.x + 4.f, sCur.y + 3.f},
+                        IM_COL32(255, 255, 255, 255), sortLabel);
+            // Chevron triangle to the right of the label.
+            const float chvX = sCur.x + sortValW - 14.f;
+            const float chvY = sCur.y + ImGui::GetFontSize() * 0.5f + 3.f;
+            dl->AddTriangleFilled({chvX - 4.f, chvY - 2.f},
+                                   {chvX + 4.f, chvY - 2.f},
+                                   {chvX,       chvY + 3.f},
+                                   IM_COL32(255, 255, 255, 255));
+            if (sClicked) ImGui::OpenPopup("##sortpop");
+        }
+        ImGui::PushStyleColor(ImGuiCol_PopupBg, ImVec4(0, 0, 0, 1));
+        if (ImGui::BeginPopup("##sortpop")) {
+            if (ImGui::MenuItem("Last modified", nullptr,
+                                m_sortMode == HubSortMode::LastModified))
+                m_sortMode = HubSortMode::LastModified;
+            if (ImGui::MenuItem("Name A-Z", nullptr,
+                                m_sortMode == HubSortMode::NameAZ))
+                m_sortMode = HubSortMode::NameAZ;
+            if (ImGui::MenuItem("Song count", nullptr,
+                                m_sortMode == HubSortMode::SongCount))
+                m_sortMode = HubSortMode::SongCount;
+            ImGui::EndPopup();
+        }
+        ImGui::PopStyleColor();  // PopupBg
+
+        ImGui::SameLine();
+        // Funnel button (frameless).
+        {
+            const ImVec2 fCur = ImGui::GetCursorScreenPos();
+            ImGui::PushID("##funbtn");
+            ImGui::InvisibleButton("##f", {funnelW, 22.f});
+            const bool fHovered = ImGui::IsItemHovered();
+            ImGui::PopID();
+            (void)fHovered;
+            drawFunnelIcon(dl, {fCur.x + funnelW * 0.5f, fCur.y + 11.f},
+                           IM_COL32(255, 255, 255, 255));
+        }
+
+        ImGui::Dummy(ImVec2(0, 12.f));
+
+        // ── Build sort order ──
+        std::vector<int> order(m_projects.size());
+        for (int i = 0; i < (int)m_projects.size(); ++i) order[i] = i;
+        switch (m_sortMode) {
+            case HubSortMode::LastModified:
+                std::sort(order.begin(), order.end(), [&](int a, int b){
+                    return m_projects[a].lastModifiedRaw > m_projects[b].lastModifiedRaw;
+                });
+                break;
+            case HubSortMode::NameAZ:
+                std::sort(order.begin(), order.end(), [&](int a, int b){
+                    return m_projects[a].name < m_projects[b].name;
+                });
+                break;
+            case HubSortMode::SongCount:
+                std::sort(order.begin(), order.end(), [&](int a, int b){
+                    return m_projects[a].songCount > m_projects[b].songCount;
+                });
+                break;
+        }
+
+        std::set<int> recentSet;
+        if (m_leftRail == HubLeftRail::Recent) {
+            std::vector<int> byMod = order;
+            std::sort(byMod.begin(), byMod.end(), [&](int a, int b){
+                return m_projects[a].lastModifiedRaw > m_projects[b].lastModifiedRaw;
+            });
+            for (int i = 0; i < (int)byMod.size() && i < 3; ++i)
+                recentSet.insert(byMod[i]);
+        }
+
+        std::string query = m_searchBuf;
+        std::transform(query.begin(), query.end(), query.begin(),
+                       [](unsigned char c){ return (char)std::tolower(c); });
+
+        int maxSongs = 1;
+        for (const auto& p : m_projects) maxSongs = std::max(maxSongs, p.songCount);
+
+        // ── Projects table — no inner row dividers (they read as edges).
+        const ImGuiTableFlags tflags = ImGuiTableFlags_RowBg
+                                     | ImGuiTableFlags_NoBordersInBody
+                                     | ImGuiTableFlags_ScrollY;
+        ImGui::PushStyleColor(ImGuiCol_TableBorderLight,  ImVec4(0,0,0,0));
+        ImGui::PushStyleColor(ImGuiCol_TableBorderStrong, ImVec4(0,0,0,0));
+        ImGui::PushStyleColor(ImGuiCol_TableHeaderBg,     ImVec4(0,0,0,0));
+        ImGui::PushStyleColor(ImGuiCol_TableRowBg,        ImVec4(0,0,0,0));
+        ImGui::PushStyleColor(ImGuiCol_TableRowBgAlt,     ImVec4(0,0,0,0));
+
+        if (ImGui::BeginTable("##projects", 4, tflags,
+                              ImVec2(0, ImGui::GetContentRegionAvail().y))) {
+            ImGui::TableSetupColumn("NAME",     ImGuiTableColumnFlags_WidthStretch);
+            ImGui::TableSetupColumn("MODE",     ImGuiTableColumnFlags_WidthFixed, 80);
+            ImGui::TableSetupColumn("SONGS",    ImGuiTableColumnFlags_WidthFixed, 130);
+            ImGui::TableSetupColumn("MODIFIED", ImGuiTableColumnFlags_WidthFixed, 220);
+            ImGui::TableSetupScrollFreeze(0, 1);
+
+            ImGui::SetWindowFontScale(0.85f);
+            ImGui::PushStyleColor(ImGuiCol_Text, SoftWhite);
+            ImGui::TableHeadersRow();
+            ImGui::PopStyleColor();
+            ImGui::SetWindowFontScale(1.0f);
+
+            int visibleCount = 0;
+            for (int idx : order) {
+                const auto& proj = m_projects[idx];
+                if (m_leftRail == HubLeftRail::Recent  && !recentSet.count(idx)) continue;
+                if (m_leftRail == HubLeftRail::Starred && !m_starred.count(proj.name)) continue;
+                if (!query.empty()) {
+                    std::string lower = proj.name;
+                    std::transform(lower.begin(), lower.end(), lower.begin(),
+                                   [](unsigned char c){ return (char)std::tolower(c); });
+                    if (lower.find(query) == std::string::npos) continue;
+                }
+                if (m_modeFilter >= 0 && modeFilterIdxFor(proj) != m_modeFilter) continue;
+                ++visibleCount;
+
+                ImGui::PushID(idx);
+                ImGui::TableNextRow(0, 64.f);
+
+                const ModeView mv = modeViewFor(proj);
+                const bool selected = (idx == m_selectedIdx);
+                // Selected: indicated by side-bar + cyan name color, not bg.
+
+                // ── NAME cell ──
+                ImGui::TableSetColumnIndex(0);
+                const ImVec2 cellTL = ImGui::GetCursorScreenPos();
+
+                ImGui::PushStyleColor(ImGuiCol_Header,        ImVec4(0,0,0,0));
+                ImGui::PushStyleColor(ImGuiCol_HeaderHovered, ImVec4(0,0,0,0));
+                ImGui::PushStyleColor(ImGuiCol_HeaderActive,  ImVec4(0,0,0,0));
+                bool rowClicked = ImGui::Selectable("##row", selected,
+                    ImGuiSelectableFlags_SpanAllColumns |
+                    ImGuiSelectableFlags_AllowDoubleClick,
+                    ImVec2(0, 64.f));
+                ImGui::PopStyleColor(3);
+                bool dbl = rowClicked && ImGui::IsMouseDoubleClicked(0);
+
+                ImDrawList* dl2 = ImGui::GetWindowDrawList();
+
+                // Selected row: cyan side-bar + thin border across full row.
+                if (selected) {
+                    dl2->AddRectFilled(cellTL,
+                        {cellTL.x + 3.f, cellTL.y + 64.f}, ToU32(Cyan));
+                }
+
+                // Mode-bordered icon tile (36×36) — black inside, full
+                // saturation border + colored music-note. No alpha fills.
+                const ImVec2 tileMin{cellTL.x + 12.f, cellTL.y + 14.f};
+                const ImVec2 tileMax{tileMin.x + 36.f, tileMin.y + 36.f};
+                dl2->AddRect(tileMin, tileMax, ToU32(mv.color), 8.f, 0, 1.5f);
+                drawMusicNote(dl2,
+                    {tileMin.x + 18.f, tileMin.y + 18.f}, ToU32(mv.color));
+
+                // Project name (white, vertically centred against tile).
+                const float nameY = cellTL.y + (64.f - ImGui::GetFontSize()) * 0.5f;
+                ImGui::SetCursorScreenPos({cellTL.x + 60.f, nameY});
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.f, 1.f, 1.f, 1.f));
+                ImGui::TextUnformatted(proj.name.c_str());
+                ImGui::PopStyleColor();
+
+                // Star toggle on the far right of the NAME cell.
+                const float nameAvailW = ImGui::GetContentRegionAvail().x;
+                const ImVec2 starTL{cellTL.x + nameAvailW - 28.f, cellTL.y + 22.f};
+                ImGui::SetCursorScreenPos(starTL);
+                bool starClicked = ImGui::InvisibleButton("##star", {22.f, 22.f});
+                const bool starHovered = ImGui::IsItemHovered();
+                const bool starred = m_starred.count(proj.name) > 0;
+                drawStarIcon(dl2,
+                    {starTL.x + 11.f, starTL.y + 11.f}, 8.f,
+                    starred ? ToU32(Amber) : IM_COL32(255, 255, 255, 255),
+                    starred);
+                (void)starHovered;
+                if (starClicked) {
+                    if (starred) m_starred.erase(proj.name);
+                    else         m_starred.insert(proj.name);
+                    saveStarred();
+                }
+
+                if (rowClicked && !starClicked) {
+                    m_selectedIdx = idx;
+                    if (dbl && engine) {
+                        m_selectedProject = proj;
+                        m_projectSelected = true;
+                        engine->openProject(proj.path);
+                        engine->startScreenEditor().load(proj.path);
+                        engine->switchLayer(EditorLayer::StartScreen);
+                        if (m_launchCallback) m_launchCallback(proj);
+                    }
+                }
+
+                // ── MODE cell: deliberately empty (mode shown by tile border).
+                ImGui::TableSetColumnIndex(1);
+
+                // ── SONGS cell ──
+                ImGui::TableSetColumnIndex(2);
+                {
+                    const ImVec2 sTL = ImGui::GetCursorScreenPos();
+                    const float barW = 80.f, barH = 4.f;
+                    const ImVec2 bMin{sTL.x, sTL.y + 30.f};
+                    const ImVec2 bMax{bMin.x + barW, bMin.y + barH};
+                    // Cyan-bordered empty track (no gray fill).
+                    dl2->AddRect(bMin, bMax, ToU32(Cyan), 2.f, 0, 1.f);
+                    const float fillW = barW *
+                        std::min(1.f, (float)proj.songCount / (float)maxSongs);
+                    if (fillW > 0.5f) {
+                        dl2->AddRectFilled(bMin, {bMin.x + fillW, bMax.y},
+                                           ToU32(Cyan), 2.f);
+                    }
+                    ImGui::SetCursorScreenPos(
+                        {bMax.x + 10.f, sTL.y + 24.f});
+                    ui::PushMono();
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.f, 1.f, 1.f, 1.f));
+                    ImGui::Text("%d", proj.songCount);
+                    ImGui::PopStyleColor();
+                    ui::PopMono();
+                }
+
+                // ── MODIFIED cell ──
+                ImGui::TableSetColumnIndex(3);
+                {
+                    const ImVec2 mTL = ImGui::GetCursorScreenPos();
+                    const float colW = ImGui::GetContentRegionAvail().x;
+                    ImGui::SetCursorScreenPos({mTL.x, mTL.y + 24.f});
+                    ui::PushMono();
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.f, 1.f, 1.f, 1.f));
+                    ImGui::TextUnformatted(
+                        proj.lastModified.empty() ? "-" : proj.lastModified.c_str());
+                    ImGui::PopStyleColor();
+                    ui::PopMono();
+                    // Right chevron.
+                    const ImVec2 chC{mTL.x + colW - 14.f, mTL.y + 32.f};
+                    const float chs = 5.f;
+                    dl2->AddTriangleFilled(
+                        {chC.x - chs * 0.5f, chC.y - chs},
+                        {chC.x - chs * 0.5f, chC.y + chs},
+                        {chC.x + chs * 0.6f, chC.y},
+                        IM_COL32(255, 255, 255, 255));
+                }
+
+                ImGui::PopID();
+            }
+
+            ImGui::EndTable();
+
+            if (visibleCount == 0) {
+                ImGui::PushStyleColor(ImGuiCol_Text, SoftWhite);
+                ImGui::TextUnformatted("No projects match the current filter.");
+                ImGui::PopStyleColor();
+            }
+        }
+        ImGui::PopStyleColor(5);
+    }
+    ImGui::EndChild();
+    ImGui::PopStyleColor();  // mid ChildBg
+
+    ImGui::SameLine();
+
+    // ── DETAIL PANEL ──────────────────────────────────────────────────
+    ImGui::PushStyleColor(ImGuiCol_ChildBg,  ImVec4(0,0,0,0));
+    ImGui::PushStyleColor(ImGuiCol_Border,   Cyan);
+    ImGui::PushStyleVar(ImGuiStyleVar_ChildBorderSize, 1.f);
+    ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding,   8.f);
+    ImGui::BeginChild("##detail", ImVec2(detailW, bodyH), true,
+                      ImGuiWindowFlags_NoScrollbar);
+    {
+        const bool hasSel = m_selectedIdx >= 0 &&
+                            m_selectedIdx < (int)m_projects.size();
+        if (!hasSel) {
+            ImGui::PushStyleColor(ImGuiCol_Text, SoftWhite);
+            ImGui::TextUnformatted("Select a project.");
+            ImGui::PopStyleColor();
+        } else {
+            const ProjectInfo& sel = m_projects[m_selectedIdx];
+            const ModeView mv = modeViewFor(sel);
+            ImDrawList* dl3 = ImGui::GetWindowDrawList();
+
+            // ── Header tile ──
+            {
+                ImGui::Dummy(ImVec2(0, 4.f));
+                const ImVec2 tilePos = ImGui::GetCursorScreenPos();
+                ImGui::InvisibleButton("##headerTile", {32.f, 32.f});
+                dl3->AddRect(tilePos, {tilePos.x + 32.f, tilePos.y + 32.f},
+                             ToU32(mv.color), 6.f, 0, 1.5f);
+                drawMusicNote(dl3,
+                    {tilePos.x + 16.f, tilePos.y + 16.f}, ToU32(mv.color));
+
+                // Detail project name — slightly larger than body (~1.15×).
+                ImGui::SetCursorScreenPos({tilePos.x + 44.f, tilePos.y - 4.f});
+                ImGui::SetWindowFontScale(1.15f);
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.f, 1.f, 1.f, 1.f));
+                ImGui::TextUnformatted(sel.name.c_str());
+                ImGui::PopStyleColor();
+                ImGui::SetWindowFontScale(1.0f);
+                // Subtitle — smaller secondary tier (~0.85×), mono.
+                ImGui::SetCursorScreenPos({tilePos.x + 44.f, tilePos.y + 18.f});
+                ImGui::SetWindowFontScale(0.85f);
+                ui::PushMono();
+                ImGui::PushStyleColor(ImGuiCol_Text, SoftWhite);
+                ImGui::Text("%s  -  %d songs", mv.label, sel.songCount);
+                ImGui::PopStyleColor();
+                ui::PopMono();
+                ImGui::SetWindowFontScale(1.0f);
+                ImGui::SetCursorScreenPos({tilePos.x, tilePos.y + 44.f});
+            }
+
+            ImGui::Dummy(ImVec2(0, 6.f));
+
+            // ── Metadata ──
+            if (ImGui::BeginTable("##meta", 2,
+                    ImGuiTableFlags_SizingFixedFit |
+                    ImGuiTableFlags_NoBordersInBody)) {
+                ImGui::TableSetupColumn("k", ImGuiTableColumnFlags_WidthFixed, 160.f);
+                ImGui::TableSetupColumn("v", ImGuiTableColumnFlags_WidthStretch);
+
+                auto row = [&](const char* k, const std::string& v) {
+                    ImGui::TableNextRow();
+                    ImGui::TableSetColumnIndex(0);
+                    std::string up;
+                    for (const char* p = k; *p; ++p)
+                        up += (char)((*p >= 'a' && *p <= 'z') ? (*p - 32) : *p);
+                    // Label tier — small (~0.85× base) per prototype.
+                    ImGui::SetWindowFontScale(0.85f);
+                    ImGui::PushStyleColor(ImGuiCol_Text, SoftWhite);
+                    ImGui::TextUnformatted(up.c_str());
+                    ImGui::PopStyleColor();
+                    ImGui::SetWindowFontScale(1.0f);
+
+                    ImGui::TableSetColumnIndex(1);
+                    ui::PushMono();
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.f, 1.f, 1.f, 1.f));
+                    // Truncate with ellipsis instead of wrapping — keeps each
+                    // row one line tall so labels and values never overlap.
+                    const std::string display = v.empty() ? "-" : v;
+                    const float availW = ImGui::GetContentRegionAvail().x;
+                    if (ImGui::CalcTextSize(display.c_str()).x <= availW) {
+                        ImGui::TextUnformatted(display.c_str());
+                    } else {
+                        std::string fit;
+                        for (size_t i = 0; i < display.size(); ++i) {
+                            std::string trial = display.substr(0, i + 1) + "...";
+                            if (ImGui::CalcTextSize(trial.c_str()).x > availW)
+                                break;
+                            fit = display.substr(0, i + 1);
+                        }
+                        std::string out = fit + "...";
+                        ImGui::TextUnformatted(out.c_str());
+                        if (ImGui::IsItemHovered())
+                            ImGui::SetTooltip("%s", display.c_str());
+                    }
+                    ImGui::PopStyleColor();
+                    ui::PopMono();
+                };
+                row("Version",       sel.version);
+                row("Default chart", sel.defaultChart);
+                row("Shader path",   sel.shaderPath);
+                row("Last opened",   sel.lastModified);
+                row("Path",          sel.path);
+                ImGui::EndTable();
+            }
+
+            ImGui::Dummy(ImVec2(0, 14.f));
+
+            // ── Open Project (cyan filled, play triangle + label) ──
+            {
+                const ImVec2 btnPos = ImGui::GetCursorScreenPos();
+                ImGui::PushStyleColor(ImGuiCol_Button,        Cyan);
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, Cyan);
+                ImGui::PushStyleColor(ImGuiCol_ButtonActive,  Cyan);
+                ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(0, 0.06f, 0.10f, 1.f));
+                ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 8.f);
+                const float btnH = 44.f;
+                const bool openClicked =
+                    ImGui::Button("    Open Project", ImVec2(-1, btnH));
+                ImGui::PopStyleVar();
+                ImGui::PopStyleColor(4);
+                // Play triangle drawn over the left of the button.
+                const float cx = btnPos.x + 22.f;
+                const float cy = btnPos.y + btnH * 0.5f;
+                dl3->AddTriangleFilled({cx - 6.f, cy - 7.f},
+                                        {cx - 6.f, cy + 7.f},
+                                        {cx + 6.f, cy},
+                                        IM_COL32(0, 0, 0, 255));
+                if (openClicked) {
+                    m_selectedProject = sel;
+                    m_projectSelected = true;
+                    if (engine) {
+                        engine->openProject(sel.path);
+                        engine->startScreenEditor().load(sel.path);
+                        engine->switchLayer(EditorLayer::StartScreen);
+                    }
+                    if (m_launchCallback) m_launchCallback(sel);
+                }
+            }
+
+            ImGui::Dummy(ImVec2(0, 8.f));
+
+            // ── Reveal + Add file (frameless icon+text) ──
+            const float halfW = (ImGui::GetContentRegionAvail().x - 8.f) * 0.5f;
+            if (textActionRow("##rev", "Reveal", drawFolderIcon, halfW, 24.f))
+                revealInExplorer(sel.path);
+            ImGui::SameLine(0.f, 8.f);
+            if (textActionRow("##addd", "Add file", drawUpArrow, halfW, 24.f)) {
+                m_showAddFileDialog = true;
+                m_addFileError.clear();
+            }
+
+            ImGui::Dummy(ImVec2(0, 10.f));
+
+            // ── PACKAGE APK card ──
+            const float cardH = m_apkProjectName.empty() ? 64.f
+                              : (m_apkRunning ? 100.f : 134.f);
+            ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0,0,0,0));
+            ImGui::PushStyleColor(ImGuiCol_Border,  Amber);
+            ImGui::PushStyleVar(ImGuiStyleVar_ChildBorderSize, 1.f);
+            ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding,   8.f);
+            ImGui::BeginChild("##apk_card", ImVec2(0, cardH), true,
+                              ImGuiWindowFlags_NoScrollbar);
+            {
+                const ImVec2 origin = ImGui::GetCursorScreenPos();
+                ImDrawList* dlc = ImGui::GetWindowDrawList();
+                // Amber music-disc icon (22 px).
+                drawDisc(dlc, {origin.x + 12.f, origin.y + 12.f}, 11.f,
+                         ToU32(Amber));
+                // "PACKAGE APK" white bold text.
+                ImGui::SetCursorScreenPos(
+                    {origin.x + 30.f,
+                     origin.y + (24.f - ImGui::GetFontSize()) * 0.5f});
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.f, 1.f, 1.f, 1.f));
+                ImGui::TextUnformatted("PACKAGE APK");
+                ImGui::PopStyleColor();
+
+                // Build button (outlined, with download icon).
+                ImGui::SetCursorScreenPos(
+                    {origin.x + ImGui::GetContentRegionAvail().x - 76.f,
+                     origin.y});
+                if (m_apkRunning) ImGui::BeginDisabled();
+                {
+                    const ImVec2 bCur = ImGui::GetCursorScreenPos();
+                    ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0,0,0,0));
+                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, Cyan);
+                    ImGui::PushStyleColor(ImGuiCol_ButtonActive,  Cyan);
+                    ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(1.f, 1.f, 1.f, 1.f));
+                    ImGui::PushStyleColor(ImGuiCol_Border,        Cyan);
+                    ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1.f);
+                    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding,   6.f);
+                    if (ImGui::Button("    Build", ImVec2(76.f, 24.f)))
+                        startApkBuild(sel);
+                    ImGui::PopStyleVar(2);
+                    ImGui::PopStyleColor(5);
+                    drawDownArrow(dlc,
+                        {bCur.x + 14.f, bCur.y + 12.f}, IM_COL32(255, 255, 255, 255));
+                }
+                if (m_apkRunning) ImGui::EndDisabled();
+
+                ImGui::SetCursorScreenPos({origin.x, origin.y + 32.f});
+                renderApkPanel();
+            }
+            ImGui::EndChild();
+            ImGui::PopStyleVar(2);
+            ImGui::PopStyleColor(2);
+        }
+    }
+    ImGui::EndChild();
+    ImGui::PopStyleVar(2);
+    ImGui::PopStyleColor(2);
+
+    ImGui::End();
+
+    renderCreateDialog(engine);
+    renderAddFileDialog();
+}
+
+// ── Below: dead code from earlier attempts, preprocessor-disabled ──
+#if 0
+    if (!m_initialSelectDone) {
+        if (m_selectedIdx < 0 && !m_projects.empty()) m_selectedIdx = 0;
+        m_initialSelectDone = true;
+    }
+
+    // ── Outer hub window (full display) ────────────────────────────────
+    ImGui::SetNextWindowPos(ImVec2(0, 0));
+    ImGui::SetNextWindowSize(ImGui::GetIO().DisplaySize);
+    ImGui::Begin("Project Hub", nullptr,
+                 ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse |
+                 ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize);
+
+    // ── Top bar: gradient M tile + "Project Hub" crumb + gear button ──
+    ui::TopBar({"Project Hub"}, [&]{
+        ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0, 0, 0, 0));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, WithAlpha(Cyan, 0.10f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive,  WithAlpha(Cyan, 0.18f));
+        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding,  {6.f, 6.f});
+        ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 4.f);
+        const ImVec2 cur = ImGui::GetCursorScreenPos();
+        const bool gearClicked = ImGui::Button("##gear", {28.f, 28.f});
+        drawGearClean(ImGui::GetWindowDrawList(),
+                      {cur.x + 14.f, cur.y + 14.f}, ToU32(TextMid));
+        ImGui::PopStyleVar(2);
+        ImGui::PopStyleColor(3);
+        if (gearClicked && engine) engine->switchLayer(EditorLayer::Settings);
+    });
+
+    // ── Header row: title + subtitle (left) | search + actions (right) ─
+    {
+        const float hdrH = 64.f;
+        ImGui::BeginChild("##hdr", ImVec2(0, hdrH), false,
+                          ImGuiWindowFlags_NoScrollbar);
+        const float fullW = ImGui::GetContentRegionAvail().x;
+
+        // Left: stacked title + subtitle.
+        ImGui::SetWindowFontScale(1.6f);
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.f, 1.f, 1.f, 1.f));
+        ImGui::TextUnformatted("Projects");
+        ImGui::PopStyleColor();
+        ImGui::SetWindowFontScale(1.0f);
+
+        ui::PushMono();
+        ImGui::PushStyleColor(ImGuiCol_Text, TextMid);
+        if (m_projects.empty())
+            ImGui::TextUnformatted("0 projects");
+        else
+            ImGui::Text("%d projects | last opened %s",
+                        (int)m_projects.size(), m_projects.front().name.c_str());
+        ImGui::PopStyleColor();
+        ui::PopMono();
+
+        // Right: search + Add file + Create — anchored top-right.
+        const float searchW = 240.f;
+        const float addW    = 96.f;
+        const float createW = 140.f;
+        const float gap     = 8.f;
+        const float groupW  = searchW + addW + createW + gap * 2.f;
+        ImGui::SetCursorPos({fullW - groupW, 6.f});
+
+        ImGui::SetNextItemWidth(searchW);
+        ImGui::InputTextWithHint("##search", "Search projects...   Ctrl+K",
+                                 m_searchBuf, sizeof(m_searchBuf));
+        ImGui::SameLine(0.f, gap);
+        styleGhostButton(true);
+        if (ImGui::Button("Add file", ImVec2(addW, 28))) {
+            m_showAddFileDialog = true;
+            m_addFileError.clear();
+        }
+        styleGhostButton(false);
+        ImGui::SameLine(0.f, gap);
+        stylePrimaryCyanButton(true);
+        if (ImGui::Button("+ Create game", ImVec2(createW, 28)))
+            m_showCreateDialog = true;
+        stylePrimaryCyanButton(false);
+
+        ImGui::EndChild();
+    }
+
+    if (m_projects.empty()) {
+        ImGui::PushStyleColor(ImGuiCol_Text, TextLow);
+        ImGui::TextUnformatted("No projects found. Create one to get started.");
+        ImGui::PopStyleColor();
+        ImGui::End();
+        renderCreateDialog(engine);
+        renderAddFileDialog();
+        return;
+    }
+
+    // ── Body: three columns (rail | middle | detail) ──────────────────
+    const float bodyH   = std::max(220.f, ImGui::GetContentRegionAvail().y);
+    const float railW   = 200.f;
+    const float detailW = 320.f;
+    const float midW    = std::max(280.f,
+        ImGui::GetContentRegionAvail().x - railW - detailW
+        - ImGui::GetStyle().ItemSpacing.x * 2.f);
+
+    // ── LEFT RAIL ─────────────────────────────────────────────────────
+    ImGui::BeginChild("##rail", ImVec2(railW, bodyH), false,
+                      ImGuiWindowFlags_NoScrollbar);
+    {
+        struct Row {
+            const char* label;
+            HubLeftRail value;
+            int         count;
+            void (*icon)(ImDrawList*, ImVec2, ImU32);
+        };
+        const int recentCount = std::min((int)m_projects.size(), 3);
+        int starredCount = 0;
+        for (const auto& p : m_projects)
+            if (m_starred.count(p.name)) ++starredCount;
+
+        const Row rows[] = {
+            {"All projects", HubLeftRail::All,     (int)m_projects.size(),
+                [](ImDrawList* dl, ImVec2 c, ImU32 col){ drawFolderIcon(dl, c, col); }},
+            {"Recent",       HubLeftRail::Recent,  recentCount,
+                [](ImDrawList* dl, ImVec2 c, ImU32 col){ drawClockIcon(dl, c, col); }},
+            {"Starred",      HubLeftRail::Starred, starredCount,
+                [](ImDrawList* dl, ImVec2 c, ImU32 col){ drawStarIcon(dl, c, 7.f, col, false); }},
+        };
+
+        for (const auto& r : rows) {
+            ImGui::PushID((int)r.value);
+            const ImVec2 cur = ImGui::GetCursorScreenPos();
+            const float rowW = ImGui::GetContentRegionAvail().x;
+            const float rowH = 40.f;
+            const bool active = (m_leftRail == r.value);
+
+            if (ImGui::InvisibleButton("##row", {rowW, rowH}))
+                m_leftRail = r.value;
+            const bool hovered = ImGui::IsItemHovered();
+
+            ImDrawList* dl = ImGui::GetWindowDrawList();
+
+            // Subtle row background on hover/active.
+            if (active) {
+                dl->AddRectFilled(cur, {cur.x + rowW, cur.y + rowH},
+                                  ToU32(WithAlpha(Cyan, 0.10f)), 6.f);
+                dl->AddRectFilled(cur, {cur.x + 3.f, cur.y + rowH}, ToU32(Cyan));
+            } else if (hovered) {
+                dl->AddRectFilled(cur, {cur.x + rowW, cur.y + rowH},
+                                  ToU32(WithAlpha(Cyan, 0.04f)), 6.f);
+            }
+
+            // Icon.
+            const ImU32 iconCol =
+                ToU32(active ? Cyan : (hovered ? TextMid : TextLow));
+            r.icon(dl, {cur.x + 22.f, cur.y + rowH * 0.5f}, iconCol);
+
+            // Label (ImGui text — proper layout).
+            ImGui::SetCursorScreenPos(
+                {cur.x + 40.f, cur.y + (rowH - ImGui::GetFontSize()) * 0.5f});
+            ImGui::PushStyleColor(ImGuiCol_Text,
+                active ? TextHi : (hovered ? TextMid : TextLow));
+            ImGui::TextUnformatted(r.label);
+            ImGui::PopStyleColor();
+
+            // Count badge — rounded rect + ImGui text.
+            char nb[16];
+            snprintf(nb, sizeof(nb), "%d", r.count);
+            const float numW = ImGui::CalcTextSize(nb).x;
+            const float padX = 8.f;
+            const float bW = numW + padX * 2.f;
+            const float bH = 18.f;
+            const ImVec2 bMin{cur.x + rowW - bW - 12.f, cur.y + (rowH - bH) * 0.5f};
+            // No background — count text only.
+            ImGui::SetCursorScreenPos(
+                {bMin.x + padX, bMin.y + (bH - ImGui::GetFontSize()) * 0.5f});
+            ImGui::PushStyleColor(ImGuiCol_Text, TextMid);
+            ImGui::TextUnformatted(nb);
+            ImGui::PopStyleColor();
+
+            // Advance cursor past this row.
+            ImGui::SetCursorScreenPos({cur.x, cur.y + rowH + 4.f});
+
+            ImGui::PopID();
+        }
+    }
+    ImGui::EndChild();
+
+    ImGui::SameLine();
+
+    // ── MIDDLE: chips row + table ──────────────────────────────────────
+    ImGui::BeginChild("##mid", ImVec2(midW, bodyH), false,
+                      ImGuiWindowFlags_NoScrollbar);
+    {
+        // ── Chips row: uniform grayscale (only active is colored) + Sort ──
+        struct ChipDef { const char* label; int idx; };
+        const ChipDef chips[] = {
+            {"All",       -1}, {"Drop 2D",   0}, {"Drop 3D",   1},
+            {"Scan Line",  2}, {"Circle",    3},
+        };
+        const ImVec2 chipsRowOrigin = ImGui::GetCursorScreenPos();
+        const float midFullW = ImGui::GetContentRegionAvail().x;
+
+        for (const auto& c : chips) {
+            const bool active = (m_modeFilter == c.idx);
+            const ImVec4 bg     = active ? Cyan : BgPanel3;
+            const ImVec4 fg     = active ? ImVec4{0,0,0,1} : TextHi;
+            const ImVec4 border = active ? Cyan : BorderHi;
+            ImGui::PushStyleColor(ImGuiCol_Button,        bg);
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, active ? bg : BgPanel2);
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive,  bg);
+            ImGui::PushStyleColor(ImGuiCol_Text,          fg);
+            ImGui::PushStyleColor(ImGuiCol_Border,        border);
+            ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1.f);
+            ImGui::PushStyleVar(ImGuiStyleVar_FramePadding,    {10.f, 4.f});
+            ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding,   999.f);
+            if (ImGui::Button(c.label)) m_modeFilter = c.idx;
+            ImGui::PopStyleVar(3);
+            ImGui::PopStyleColor(5);
+            ImGui::SameLine();
+        }
+
+        // Right-anchor: Sort label + dropdown.
+        const float sortLabelW = ImGui::CalcTextSize("Sort:").x + 6.f;
+        const float ddW = 160.f;
+        const float sortGroupW = sortLabelW + ddW + 4.f;
+        ImGui::SetCursorScreenPos(
+            {chipsRowOrigin.x + midFullW - sortGroupW,
+             chipsRowOrigin.y + 2.f});
+        ImGui::AlignTextToFramePadding();
+        ImGui::PushStyleColor(ImGuiCol_Text, TextLow);
+        ImGui::TextUnformatted("Sort:");
+        ImGui::PopStyleColor();
+        ImGui::SameLine();
+        const char* sortKey =
+            (m_sortMode == HubSortMode::LastModified) ? "mod" :
+            (m_sortMode == HubSortMode::NameAZ)       ? "name" : "songs";
+        const char* const sortItems[][2] = {
+            {"mod",   "Last modified"},
+            {"name",  "Name A-Z"},
+            {"songs", "Song count"},
+        };
+        ImGui::PushItemWidth(ddW);
+        if (ui::Dropdown("##sort", sortItems, 3, &sortKey)) {
+            if      (std::strcmp(sortKey, "mod")   == 0) m_sortMode = HubSortMode::LastModified;
+            else if (std::strcmp(sortKey, "name")  == 0) m_sortMode = HubSortMode::NameAZ;
+            else if (std::strcmp(sortKey, "songs") == 0) m_sortMode = HubSortMode::SongCount;
+        }
+        ImGui::PopItemWidth();
+
+        ImGui::Dummy(ImVec2(0, 8.f));
+
+        // ── Build sorted index view ────────────────────────────────────
+        std::vector<int> order(m_projects.size());
+        for (int i = 0; i < (int)m_projects.size(); ++i) order[i] = i;
+        switch (m_sortMode) {
+            case HubSortMode::LastModified:
+                std::sort(order.begin(), order.end(), [&](int a, int b){
+                    return m_projects[a].lastModifiedRaw > m_projects[b].lastModifiedRaw;
+                });
+                break;
+            case HubSortMode::NameAZ:
+                std::sort(order.begin(), order.end(), [&](int a, int b){
+                    return m_projects[a].name < m_projects[b].name;
+                });
+                break;
+            case HubSortMode::SongCount:
+                std::sort(order.begin(), order.end(), [&](int a, int b){
+                    return m_projects[a].songCount > m_projects[b].songCount;
+                });
+                break;
+        }
+
+        std::set<int> recentSet;
+        if (m_leftRail == HubLeftRail::Recent) {
+            std::vector<int> byMod = order;
+            std::sort(byMod.begin(), byMod.end(), [&](int a, int b){
+                return m_projects[a].lastModifiedRaw > m_projects[b].lastModifiedRaw;
+            });
+            for (int i = 0; i < (int)byMod.size() && i < 3; ++i)
+                recentSet.insert(byMod[i]);
+        }
+
+        std::string query = m_searchBuf;
+        std::transform(query.begin(), query.end(), query.begin(),
+                       [](unsigned char c){ return (char)std::tolower(c); });
+
+        int maxSongs = 1;
+        for (const auto& p : m_projects) maxSongs = std::max(maxSongs, p.songCount);
+
+        // ── Projects table ─────────────────────────────────────────────
+        const ImGuiTableFlags tflags = ImGuiTableFlags_RowBg
+                                     | ImGuiTableFlags_BordersInnerH
+                                     | ImGuiTableFlags_NoBordersInBody
+                                     | ImGuiTableFlags_ScrollY;
+        ImGui::PushStyleColor(ImGuiCol_TableBorderLight,  Border);
+        ImGui::PushStyleColor(ImGuiCol_TableBorderStrong, BorderHi);
+        ImGui::PushStyleColor(ImGuiCol_TableHeaderBg,     BgPanel);
+        ImGui::PushStyleColor(ImGuiCol_TableRowBg,        BgBase);
+        ImGui::PushStyleColor(ImGuiCol_TableRowBgAlt,     BgBase);
+
+        if (ImGui::BeginTable("##projects", 4, tflags,
+                              ImVec2(0, ImGui::GetContentRegionAvail().y))) {
+            ImGui::TableSetupColumn("NAME",     ImGuiTableColumnFlags_WidthStretch);
+            ImGui::TableSetupColumn("MODE",     ImGuiTableColumnFlags_WidthFixed, 110);
+            ImGui::TableSetupColumn("SONGS",    ImGuiTableColumnFlags_WidthFixed, 130);
+            ImGui::TableSetupColumn("MODIFIED", ImGuiTableColumnFlags_WidthFixed, 200);
+            ImGui::TableSetupScrollFreeze(0, 1);
+
+            ImGui::PushStyleColor(ImGuiCol_Text, TextMid);
+            ImGui::TableHeadersRow();
+            ImGui::PopStyleColor();
+
+            int visibleCount = 0;
+            for (int idx : order) {
+                const auto& proj = m_projects[idx];
+                if (m_leftRail == HubLeftRail::Recent  && !recentSet.count(idx)) continue;
+                if (m_leftRail == HubLeftRail::Starred && !m_starred.count(proj.name)) continue;
+                if (!query.empty()) {
+                    std::string lower = proj.name;
+                    std::transform(lower.begin(), lower.end(), lower.begin(),
+                                   [](unsigned char c){ return (char)std::tolower(c); });
+                    if (lower.find(query) == std::string::npos) continue;
+                }
+                if (m_modeFilter >= 0 && modeFilterIdxFor(proj) != m_modeFilter) continue;
+                ++visibleCount;
+
+                ImGui::PushID(idx);
+                ImGui::TableNextRow(0, 56.f);
+
+                const ModeView mv = modeViewFor(proj);
+                const bool selected = (idx == m_selectedIdx);
+                if (selected) {
+                    ImGui::TableSetBgColor(ImGuiTableBgTarget_RowBg0,
+                        ToU32(WithAlpha(Cyan, 0.14f)));
+                }
+
+                // ── NAME cell ──────────────────────────────────────────
+                ImGui::TableSetColumnIndex(0);
+                const ImVec2 cellTL = ImGui::GetCursorScreenPos();
+
+                // Whole-row Selectable goes FIRST so it's at the back.
+                ImGui::PushStyleColor(ImGuiCol_Header,        ImVec4(0,0,0,0));
+                ImGui::PushStyleColor(ImGuiCol_HeaderHovered, ImVec4(0,0,0,0));
+                ImGui::PushStyleColor(ImGuiCol_HeaderActive,  ImVec4(0,0,0,0));
+                bool rowClicked = ImGui::Selectable("##row", selected,
+                    ImGuiSelectableFlags_SpanAllColumns |
+                    ImGuiSelectableFlags_AllowDoubleClick,
+                    ImVec2(0, 56.f));
+                ImGui::PopStyleColor(3);
+                bool dbl = rowClicked && ImGui::IsMouseDoubleClicked(0);
+
+                ImDrawList* dl = ImGui::GetWindowDrawList();
+
+                // Cyan side-bar on selected.
+                if (selected) {
+                    dl->AddRectFilled(cellTL, {cellTL.x + 3.f, cellTL.y + 56.f},
+                                      ToU32(Cyan));
+                }
+
+                // 32×32 dark-gray tile + colored letter.
+                const ImVec2 tileMin{cellTL.x + 10.f, cellTL.y + 12.f};
+                const ImVec2 tileMax{tileMin.x + 32.f, tileMin.y + 32.f};
+                dl->AddRectFilled(tileMin, tileMax,
+                                  ToU32(BgPanel3), 6.f);
+                dl->AddRect(tileMin, tileMax,
+                            ToU32(BorderHi), 6.f);
+                {
+                    char letter[2] = {(char)std::toupper((unsigned char)proj.name[0]), 0};
+                    const float ts = ImGui::GetFontSize() * 1.1f;
+                    const float tw = ImGui::CalcTextSize(letter).x;
+                    dl->AddText(nullptr, ts,
+                        {tileMin.x + (32.f - tw) * 0.5f,
+                         tileMin.y + (32.f - ts) * 0.5f - 1.f},
+                        ToU32(mv.color), letter);
+                }
+
+                // Name (TextHi) and path (mono TextLow) — placed by absolute
+                // ScreenPos so they don't fight the Selectable's hit test.
+                ImGui::SetCursorScreenPos({cellTL.x + 52.f, cellTL.y + 8.f});
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.f, 1.f, 1.f, 1.f));
+                ImGui::TextUnformatted(proj.name.c_str());
+                ImGui::PopStyleColor();
+
+                ImGui::SetCursorScreenPos({cellTL.x + 52.f, cellTL.y + 30.f});
+                ui::PushMono();
+                ImGui::PushStyleColor(ImGuiCol_Text, TextMid);
+                ImGui::Text("Projects/%s/", proj.name.c_str());
+                ImGui::PopStyleColor();
+                ui::PopMono();
+
+                // Star toggle — placed AFTER the Selectable and the visible
+                // text, so its InvisibleButton wins the click on hover.
+                const float nameAvailW = ImGui::GetContentRegionAvail().x;
+                const ImVec2 starTL{cellTL.x + nameAvailW - 28.f, cellTL.y + 18.f};
+                ImGui::SetCursorScreenPos(starTL);
+                bool starClicked = ImGui::InvisibleButton("##star", {22.f, 22.f});
+                const bool starHovered = ImGui::IsItemHovered();
+                const bool starred = m_starred.count(proj.name) > 0;
+                drawStarIcon(dl,
+                    {starTL.x + 11.f, starTL.y + 11.f}, 8.f,
+                    ToU32(starred ? Amber
+                           : (starHovered ? WithAlpha(Amber, 0.75f)
+                                          : WithAlpha(TextLow, 0.55f))),
+                    starred);
+                if (starClicked) {
+                    if (starred) m_starred.erase(proj.name);
+                    else         m_starred.insert(proj.name);
+                    saveStarred();
+                }
+
+                // Apply row-click effect (skip if star handled the click).
+                if (rowClicked && !starClicked) {
+                    m_selectedIdx = idx;
+                    if (dbl && engine) {
+                        m_selectedProject = proj;
+                        m_projectSelected = true;
+                        engine->openProject(proj.path);
+                        engine->startScreenEditor().load(proj.path);
+                        engine->switchLayer(EditorLayer::StartScreen);
+                        if (m_launchCallback) m_launchCallback(proj);
+                    }
+                }
+
+                // ── MODE cell ──────────────────────────────────────────
+                ImGui::TableSetColumnIndex(1);
+                ImGui::Dummy(ImVec2(0, 16.f));
+                ui::Pill(mv.label, mv.color, /*solid*/ false);
+
+                // ── SONGS cell ─────────────────────────────────────────
+                ImGui::TableSetColumnIndex(2);
+                {
+                    const ImVec2 sTL = ImGui::GetCursorScreenPos();
+                    const float barW = 70.f, barH = 4.f;
+                    const ImVec2 bMin{sTL.x, sTL.y + 24.f};
+                    const ImVec2 bMax{bMin.x + barW, bMin.y + barH};
+                    dl->AddRectFilled(bMin, bMax, ToU32(BgPanel3), 2.f);
+                    const float fillW = barW *
+                        std::min(1.f, (float)proj.songCount / (float)maxSongs);
+                    if (fillW > 0.5f) {
+                        dl->AddRectFilled(bMin, {bMin.x + fillW, bMax.y},
+                                          ToU32(Cyan), 2.f);
+                    }
+                    ImGui::SetCursorScreenPos({bMax.x + 8.f, sTL.y + 18.f});
+                    ui::PushMono();
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.f, 1.f, 1.f, 1.f));
+                    ImGui::Text("%d", proj.songCount);
+                    ImGui::PopStyleColor();
+                    ui::PopMono();
+                }
+
+                // ── MODIFIED cell ──────────────────────────────────────
+                ImGui::TableSetColumnIndex(3);
+                {
+                    const ImVec2 mTL = ImGui::GetCursorScreenPos();
+                    const float colW = ImGui::GetContentRegionAvail().x;
+                    ImGui::SetCursorScreenPos({mTL.x, mTL.y + 18.f});
+                    ui::PushMono();
+                    ImGui::PushStyleColor(ImGuiCol_Text, TextMid);
+                    ImGui::TextUnformatted(
+                        proj.lastModified.empty() ? "-" : proj.lastModified.c_str());
+                    ImGui::PopStyleColor();
+                    ui::PopMono();
+                    // Right chevron.
+                    const ImVec2 chC{mTL.x + colW - 14.f, mTL.y + 26.f};
+                    const float chs = 5.f;
+                    dl->AddTriangleFilled(
+                        {chC.x - chs * 0.5f, chC.y - chs},
+                        {chC.x - chs * 0.5f, chC.y + chs},
+                        {chC.x + chs * 0.6f, chC.y},
+                        ToU32(TextLow));
+                }
+
+                ImGui::PopID();
+            }
+
+            ImGui::EndTable();
+
+            if (visibleCount == 0) {
+                ImGui::PushStyleColor(ImGuiCol_Text, TextLow);
+                ImGui::TextUnformatted("No projects match the current filter.");
+                ImGui::PopStyleColor();
+            }
+        }
+        ImGui::PopStyleColor(5);
+    }
+    ImGui::EndChild();
+
+    ImGui::SameLine();
+
+    // ── DETAIL PANEL ────────────────────────────────────────────────────
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, BgBase);
+    ImGui::BeginChild("##detail", ImVec2(detailW, bodyH), false,
+                      ImGuiWindowFlags_NoScrollbar);
+    {
+        const bool hasSel = m_selectedIdx >= 0 &&
+                            m_selectedIdx < (int)m_projects.size();
+        if (!hasSel) {
+            ImGui::PushStyleColor(ImGuiCol_Text, TextLow);
+            ImGui::TextUnformatted("Select a project to see details.");
+            ImGui::PopStyleColor();
+        } else {
+            const ProjectInfo& sel = m_projects[m_selectedIdx];
+            const ModeView mv = modeViewFor(sel);
+
+            // ── Header tile: 40×40 letter square + name + subtitle ──
+            {
+                ImGui::Dummy(ImVec2(0, 4.f));
+                const ImVec2 tilePos = ImGui::GetCursorScreenPos();
+                ImGui::InvisibleButton("##headerTile", {40.f, 40.f});
+                ImDrawList* dl = ImGui::GetWindowDrawList();
+                dl->AddRectFilled(tilePos, {tilePos.x + 40.f, tilePos.y + 40.f},
+                                  ToU32(BgPanel3), 6.f);
+                dl->AddRect(tilePos, {tilePos.x + 40.f, tilePos.y + 40.f},
+                            ToU32(BorderHi), 6.f);
+                char letter[2] = {(char)std::toupper((unsigned char)sel.name[0]), 0};
+                const float ts = ImGui::GetFontSize() * 1.25f;
+                const float tw = ImGui::CalcTextSize(letter).x;
+                dl->AddText(nullptr, ts,
+                    {tilePos.x + (40.f - tw) * 0.5f,
+                     tilePos.y + (40.f - ts) * 0.5f - 1.f},
+                    ToU32(mv.color), letter);
+
+                // Right gutter: name (TextHi) + mono subtitle (TextLow).
+                ImGui::SetCursorScreenPos({tilePos.x + 52.f, tilePos.y + 2.f});
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.f, 1.f, 1.f, 1.f));
+                ImGui::TextUnformatted(sel.name.c_str());
+                ImGui::PopStyleColor();
+                ImGui::SetCursorScreenPos({tilePos.x + 52.f, tilePos.y + 22.f});
+                ui::PushMono();
+                ImGui::PushStyleColor(ImGuiCol_Text, TextMid);
+                ImGui::Text("%s  -  %d songs", mv.label, sel.songCount);
+                ImGui::PopStyleColor();
+                ui::PopMono();
+                ImGui::SetCursorScreenPos({tilePos.x, tilePos.y + 56.f});
+            }
+
+            // ── Metadata key/value table ──
+            if (ImGui::BeginTable("##meta", 2,
+                    ImGuiTableFlags_SizingFixedFit |
+                    ImGuiTableFlags_NoBordersInBody)) {
+                ImGui::TableSetupColumn("k", ImGuiTableColumnFlags_WidthFixed, 100.f);
+                ImGui::TableSetupColumn("v", ImGuiTableColumnFlags_WidthStretch);
+
+                auto row = [](const char* k, const std::string& v) {
+                    ImGui::TableNextRow();
+                    ImGui::TableSetColumnIndex(0);
+                    std::string up;
+                    for (const char* p = k; *p; ++p)
+                        up += (char)((*p >= 'a' && *p <= 'z') ? (*p - 32) : *p);
+                    ImGui::PushStyleColor(ImGuiCol_Text, TextMid);
+                    ImGui::TextUnformatted(up.c_str());
+                    ImGui::PopStyleColor();
+
+                    ImGui::TableSetColumnIndex(1);
+                    ui::PushMono();
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.f, 1.f, 1.f, 1.f));
+                    ImGui::PushTextWrapPos(0.f);
+                    ImGui::TextUnformatted(v.empty() ? "-" : v.c_str());
+                    ImGui::PopTextWrapPos();
+                    ImGui::PopStyleColor();
+                    ui::PopMono();
+                };
+
+                row("Version",       sel.version);
+                row("Default chart", sel.defaultChart);
+                row("Shader path",   sel.shaderPath);
+                row("Last opened",   sel.lastModified);
+                row("Path",          sel.path);
+                ImGui::EndTable();
+            }
+
+            ImGui::Dummy(ImVec2(0, 12.f));
+
+            // ── Open Project (primary cyan with play-triangle prefix) ──
+            stylePrimaryCyanButton(true);
+            const ImVec2 btnPos = ImGui::GetCursorScreenPos();
+            const float  btnW   = ImGui::GetContentRegionAvail().x;
+            const bool   openClicked = ImGui::Button("    Open Project", ImVec2(-1, 36));
+            // Play triangle drawn after the button so it sits on top.
+            {
+                ImDrawList* dl = ImGui::GetWindowDrawList();
+                const float cy = btnPos.y + 18.f;
+                const float cx = btnPos.x + 18.f;
+                dl->AddTriangleFilled({cx - 5.f, cy - 6.f},
+                                       {cx - 5.f, cy + 6.f},
+                                       {cx + 6.f, cy},
+                                       IM_COL32(0, 0, 0, 255));
+                (void)btnW;
+            }
+            if (openClicked) {
+                m_selectedProject = sel;
+                m_projectSelected = true;
+                if (engine) {
+                    engine->openProject(sel.path);
+                    engine->startScreenEditor().load(sel.path);
+                    engine->switchLayer(EditorLayer::StartScreen);
+                }
+                if (m_launchCallback) m_launchCallback(sel);
+            }
+            stylePrimaryCyanButton(false);
+
+            ImGui::Dummy(ImVec2(0, 6.f));
+
+            // ── Reveal + Add file (ghost) ──
+            const float halfW = (ImGui::GetContentRegionAvail().x - 6.f) * 0.5f;
+            styleGhostButton(true);
+            if (ImGui::Button("Reveal", ImVec2(halfW, 26)))
+                revealInExplorer(sel.path);
+            ImGui::SameLine();
+            if (ImGui::Button("Add file##detail", ImVec2(halfW, 26))) {
+                m_showAddFileDialog = true;
+                m_addFileError.clear();
+            }
+            styleGhostButton(false);
+
+            ImGui::Dummy(ImVec2(0, 8.f));
+
+            // ── Package APK card ──
+            const float cardH = m_apkProjectName.empty() ? 60.f
+                              : (m_apkRunning ? 96.f : 132.f);
+            ImGui::PushStyleColor(ImGuiCol_ChildBg, BgPanel);
+            ImGui::PushStyleColor(ImGuiCol_Border,  BorderHi);
+            ImGui::PushStyleVar(ImGuiStyleVar_ChildBorderSize, 1.f);
+            ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding,   6.f);
+            ImGui::BeginChild("##apk_card", ImVec2(0, cardH), true,
+                              ImGuiWindowFlags_NoScrollbar);
+            {
+                // Header: amber filled pill containing white "PACKAGE APK" + Build.
+                const ImVec2 origin = ImGui::GetCursorScreenPos();
+                ImDrawList* dl = ImGui::GetWindowDrawList();
+                const char* hdrLabel = "PACKAGE APK";
+                const float hdrW = ImGui::CalcTextSize(hdrLabel).x + 18.f;
+                const float hdrH = 22.f;
+                dl->AddRectFilled(origin, {origin.x + hdrW, origin.y + hdrH},
+                                  ToU32(Amber), 4.f);
+                ImGui::SetCursorScreenPos(
+                    {origin.x + 9.f,
+                     origin.y + (hdrH - ImGui::GetFontSize()) * 0.5f});
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0, 0, 0, 1));
+                ImGui::TextUnformatted(hdrLabel);
+                ImGui::PopStyleColor();
+
+                // Right-anchored Build button on same row.
+                ImGui::SetCursorScreenPos(
+                    {origin.x + ImGui::GetContentRegionAvail().x - 60.f,
+                     origin.y});
+                if (m_apkRunning) ImGui::BeginDisabled();
+                styleGhostButton(true);
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.f, 1.f, 1.f, 1.f));
+                if (ImGui::Button("Build", ImVec2(60.f, hdrH)))
+                    startApkBuild(sel);
+                ImGui::PopStyleColor();
+                styleGhostButton(false);
+                if (m_apkRunning) ImGui::EndDisabled();
+
+                ImGui::SetCursorScreenPos({origin.x, origin.y + hdrH + 8.f});
+                renderApkPanel();
+            }
+            ImGui::EndChild();
+            ImGui::PopStyleVar(2);
+            ImGui::PopStyleColor(2);
+        }
+    }
+    ImGui::EndChild();
+    ImGui::PopStyleColor();
+
+    ImGui::End();
+
+    renderCreateDialog(engine);
+    renderAddFileDialog();
+}
+
+#if 0  // ── legacy render path (kept temporarily for reference; remove later) ──
+static void __unused_old_render() {
+
+    // ── Header row: title + subtitle on the left, search + actions right ─
     {
         const float headerH = 44.f;
         ImVec2 origin = ImGui::GetCursorScreenPos();
         const float fullW = ImGui::GetContentRegionAvail().x;
 
-        // Title (large) + subtitle (small mono).
         ImDrawList* dl = ImGui::GetWindowDrawList();
         const float titleSize = ImGui::GetFontSize() * 1.6f;
         dl->AddText(nullptr, titleSize, origin,
-                    ToU32(TextHi), "Projects");
+                    IM_COL32(255, 255, 255, 255), "Projects");
 
-        // Last-opened sentinel: pick the first (most recent) entry post-scan.
         std::string subtitle = std::to_string(m_projects.size()) + " projects";
         if (!m_projects.empty())
             subtitle += " | last opened " + m_projects.front().name;
@@ -449,10 +2142,10 @@ void ProjectHub::render(Engine* engine) {
                     ToU32(TextLow), subtitle.c_str());
         ui::PopMono();
 
-        // Right-aligned: search box + Add file + Create game.
-        ImGui::SetCursorScreenPos({origin.x + fullW - 480.f, origin.y + 6.f});
-        ImGui::SetNextItemWidth(220);
-        ImGui::InputTextWithHint("##search", "Search projects...",
+        // Right-aligned: search + Add file + Create game.
+        ImGui::SetCursorScreenPos({origin.x + fullW - 500.f, origin.y + 6.f});
+        ImGui::SetNextItemWidth(240);
+        ImGui::InputTextWithHint("##search", "Search projects...   Ctrl+K",
                                  m_searchBuf, sizeof(m_searchBuf));
         ImGui::SameLine();
         ImGui::PushStyleColor(ImGuiCol_Button,        BgPanel2);
@@ -477,8 +2170,102 @@ void ProjectHub::render(Engine* engine) {
         ImGui::SetCursorScreenPos({origin.x, origin.y + headerH + 14.f});
     }
 
-    // ── Filter pills row: All / 2D / 3D / Scan Line / Circle ────────────
+    // ── Three-column layout: left rail | table | detail panel ──────────────
+    if (m_projects.empty()) {
+        ImGui::TextDisabled("No projects found. Create one to get started.");
+        ImGui::End();
+        renderCreateDialog(engine);
+        renderAddFileDialog();
+        return;
+    }
+
+    const float railW   = 180.f;
+    const float detailW = 300.f;
+    const float midW    = std::max(280.f,
+        ImGui::GetContentRegionAvail().x - railW - detailW
+        - ImGui::GetStyle().ItemSpacing.x * 2.f);
+    const float colsH   = std::max(220.f, ImGui::GetContentRegionAvail().y);
+
+    // Auto-select most-recent project on first frame so the detail panel
+    // renders immediately, matching the React mock.
+    if (!m_initialSelectDone) {
+        if (m_selectedIdx < 0 && !m_projects.empty()) m_selectedIdx = 0;
+        m_initialSelectDone = true;
+    }
+
+    // ── Left rail ──────────────────────────────────────────────────────────
+    ImGui::BeginChild("##hub_rail", ImVec2(railW, colsH), false,
+                      ImGuiWindowFlags_NoScrollbar);
     {
+        struct RailRow {
+            const char* label;
+            HubLeftRail value;
+            int         count;
+            void (*icon)(ImDrawList*, ImVec2, ImU32);
+        };
+        const int recentCount  = std::min((int)m_projects.size(), 3);
+        int starredCount = 0;
+        for (const auto& p : m_projects)
+            if (m_starred.count(p.name)) ++starredCount;
+
+        const RailRow rows[] = {
+            {"All projects", HubLeftRail::All,     (int)m_projects.size(), drawFolderIcon},
+            {"Recent",       HubLeftRail::Recent,  recentCount,            drawClockIcon},
+            {"Starred",      HubLeftRail::Starred, starredCount,           [](ImDrawList* dl, ImVec2 c, ImU32 col){ drawStarIcon(dl, c, 7.f, col, false); }},
+        };
+
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        for (const auto& r : rows) {
+            ImGui::PushID((int)r.value);
+            const ImVec2 cur = ImGui::GetCursorScreenPos();
+            const float  rowW = ImGui::GetContentRegionAvail().x;
+            const float  rowH = 36.f;
+            const bool   active = (m_leftRail == r.value);
+
+            if (ImGui::InvisibleButton("##rail_row", {rowW, rowH}))
+                m_leftRail = r.value;
+            const bool hovered = ImGui::IsItemHovered();
+
+            // Background + active indicator.
+            const ImU32 bg = active ? ToU32(WithAlpha(Cyan, 0.10f))
+                              : (hovered ? ToU32(WithAlpha(Cyan, 0.05f)) : 0);
+            if (bg) dl->AddRectFilled(cur, {cur.x + rowW, cur.y + rowH}, bg, 6.f);
+            if (active) dl->AddRectFilled(cur, {cur.x + 3.f, cur.y + rowH}, ToU32(Cyan));
+
+            // Icon.
+            const ImU32 iconCol = ToU32(active ? Cyan : (hovered ? TextMid : TextLow));
+            r.icon(dl, {cur.x + 22.f, cur.y + rowH * 0.5f}, iconCol);
+
+            // Label.
+            const ImU32 textCol = ToU32(active ? TextHi : (hovered ? TextMid : TextLow));
+            dl->AddText({cur.x + 40.f, cur.y + (rowH - ImGui::GetFontSize()) * 0.5f},
+                        textCol, r.label);
+
+            // Count badge (right-aligned).
+            char numBuf[16];
+            snprintf(numBuf, sizeof(numBuf), "%d", r.count);
+            const float numW = ImGui::CalcTextSize(numBuf).x;
+            const float padX = 8.f;
+            const float badgeW = numW + padX * 2.f;
+            const float badgeH = 18.f;
+            const ImVec2 bMin{cur.x + rowW - badgeW - 12.f, cur.y + (rowH - badgeH) * 0.5f};
+            const ImVec2 bMax{bMin.x + badgeW, bMin.y + badgeH};
+            dl->AddRectFilled(bMin, bMax, ToU32(BgPanel3), 9.f);
+            dl->AddText({bMin.x + padX, bMin.y + (badgeH - ImGui::GetFontSize()) * 0.5f},
+                        ToU32(TextMid), numBuf);
+
+            ImGui::PopID();
+        }
+    }
+    ImGui::EndChild();
+
+    ImGui::SameLine();
+
+    // ── Middle: chips row + sort row + table ──────────────────────────────
+    ImGui::BeginChild("##hub_mid", ImVec2(midW, colsH), false,
+                      ImGuiWindowFlags_NoScrollbar);
+    {
+        // Compact mode-filter chips (faint dots, mock-style).
         struct FilterDef { const char* label; ImVec4 color; int idx; };
         const FilterDef filters[] = {
             {"All",       Cyan,    -1},
@@ -489,16 +2276,19 @@ void ProjectHub::render(Engine* engine) {
         };
         for (const auto& f : filters) {
             const bool active = (m_modeFilter == f.idx);
-            const ImVec4 bg     = active ? f.color : WithAlpha(f.color, 0.14f);
-            const ImVec4 fg     = active ? ImVec4{0,0,0,1} : f.color;
-            const ImVec4 border = active ? f.color : WithAlpha(f.color, 0.40f);
+            // Inactive: faint gray dot (no accent). Active: filled with the
+            // mode color and dark text. Matches the prototype where the
+            // chips read as small affordances, not headline elements.
+            const ImVec4 bg     = active ? f.color : WithAlpha(TextLow, 0.10f);
+            const ImVec4 fg     = active ? ImVec4{0,0,0,1} : TextMid;
+            const ImVec4 border = active ? f.color : WithAlpha(TextLow, 0.20f);
             ImGui::PushStyleColor(ImGuiCol_Button,        bg);
-            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, bg);
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, active ? bg : WithAlpha(TextLow, 0.18f));
             ImGui::PushStyleColor(ImGuiCol_ButtonActive,  bg);
             ImGui::PushStyleColor(ImGuiCol_Text,          fg);
             ImGui::PushStyleColor(ImGuiCol_Border,        border);
             ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1.f);
-            ImGui::PushStyleVar(ImGuiStyleVar_FramePadding,    {10.f, 3.f});
+            ImGui::PushStyleVar(ImGuiStyleVar_FramePadding,    {6.f, 2.f});
             ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding,   999.f);
             if (ImGui::Button(f.label))
                 m_modeFilter = f.idx;
@@ -506,140 +2296,300 @@ void ProjectHub::render(Engine* engine) {
             ImGui::PopStyleColor(5);
             ImGui::SameLine();
         }
-        ImGui::NewLine();
-    }
 
-    ImGui::Spacing();
+        // Sort dropdown + funnel (right-aligned on the same row).
+        const float fullW = ImGui::GetContentRegionAvail().x;
+        ImGui::SameLine();
+        const char* sortKey =
+            (m_sortMode == HubSortMode::LastModified) ? "mod" :
+            (m_sortMode == HubSortMode::NameAZ)       ? "name" : "songs";
+        const char* const sortItems[][2] = {
+            {"mod",   "Last modified"},
+            {"name",  "Name A-Z"},
+            {"songs", "Song count"},
+        };
+        const float ddW = 160.f;
+        const float lblW = ImGui::CalcTextSize("Sort:").x + 6.f;
+        const float funnelW = 30.f;
+        const float rightStart = ImGui::GetCursorPosX() + std::max(0.f,
+            fullW - lblW - ddW - funnelW - 12.f);
+        ImGui::SetCursorPosX(rightStart);
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextColored(TextLow, "Sort:");
+        ImGui::SameLine();
+        ImGui::PushItemWidth(ddW);
+        const char* prev = sortKey;
+        if (ui::Dropdown("##hub_sort", sortItems, 3, &sortKey)) {
+            if      (std::strcmp(sortKey, "mod")   == 0) m_sortMode = HubSortMode::LastModified;
+            else if (std::strcmp(sortKey, "name")  == 0) m_sortMode = HubSortMode::NameAZ;
+            else if (std::strcmp(sortKey, "songs") == 0) m_sortMode = HubSortMode::SongCount;
+        }
+        (void)prev;
+        ImGui::PopItemWidth();
+        ImGui::SameLine();
+        {
+            ImVec2 cur = ImGui::GetCursorScreenPos();
+            ImGui::PushStyleColor(ImGuiCol_Button,        BgPanel2);
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, BgPanel3);
+            ImGui::PushStyleColor(ImGuiCol_Border,        BorderHi);
+            ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1.f);
+            ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding,   4.f);
+            ImGui::PushStyleVar(ImGuiStyleVar_FramePadding,    {6.f, 6.f});
+            ImGui::Button("##funnel", {26.f, 26.f});
+            ImGui::PopStyleVar(3);
+            ImGui::PopStyleColor(3);
+            drawFunnelIcon(ImGui::GetWindowDrawList(),
+                           {cur.x + 13.f, cur.y + 13.f}, ToU32(TextMid));
+        }
 
-    if (m_projects.empty()) {
-        ImGui::TextDisabled("No projects found. Create one to get started.");
-        ImGui::End();
-        renderCreateDialog(engine);
-        renderAddFileDialog();
-        return;
-    }
+        ImGui::Spacing();
 
-    // ── Two-column layout: project list (fills) | detail panel (280 px) ────
-    // Per MIGRATION §3.1. Selection in the list fills the detail panel, where
-    // metadata + Open + inline APK build live.
-    const float detailW = 300.f;
-    const float listW   = std::max(200.f,
-        ImGui::GetContentRegionAvail().x - detailW
-        - ImGui::GetStyle().ItemSpacing.x);
-    const float colsH   = std::max(160.f, ImGui::GetContentRegionAvail().y);
+        // Build the sorted index view, then apply rail + mode + search filters.
+        std::vector<int> order(m_projects.size());
+        for (int i = 0; i < (int)m_projects.size(); ++i) order[i] = i;
+        switch (m_sortMode) {
+            case HubSortMode::LastModified:
+                std::sort(order.begin(), order.end(), [&](int a, int b){
+                    return m_projects[a].lastModifiedRaw > m_projects[b].lastModifiedRaw;
+                });
+                break;
+            case HubSortMode::NameAZ:
+                std::sort(order.begin(), order.end(), [&](int a, int b){
+                    return m_projects[a].name < m_projects[b].name;
+                });
+                break;
+            case HubSortMode::SongCount:
+                std::sort(order.begin(), order.end(), [&](int a, int b){
+                    return m_projects[a].songCount > m_projects[b].songCount;
+                });
+                break;
+        }
 
-    ImGui::BeginChild("##hub_list", ImVec2(listW, colsH), true,
-                      ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_HorizontalScrollbar);
-    {
-        // Case-insensitive substring match against project name.
+        // Recent rail = top 3 by modified time, regardless of current sort.
+        std::set<int> recentSet;
+        if (m_leftRail == HubLeftRail::Recent) {
+            std::vector<int> byMod = order;
+            std::sort(byMod.begin(), byMod.end(), [&](int a, int b){
+                return m_projects[a].lastModifiedRaw > m_projects[b].lastModifiedRaw;
+            });
+            for (int i = 0; i < (int)byMod.size() && i < 3; ++i)
+                recentSet.insert(byMod[i]);
+        }
+
         std::string query = m_searchBuf;
         std::transform(query.begin(), query.end(), query.begin(),
                        [](unsigned char c) { return (char)std::tolower(c); });
 
-        int visibleCount = 0;
-        for (size_t i = 0; i < m_projects.size(); ++i) {
-            const auto& proj = m_projects[i];
-            if (!query.empty()) {
-                std::string lower = proj.name;
-                std::transform(lower.begin(), lower.end(), lower.begin(),
-                               [](unsigned char c) { return (char)std::tolower(c); });
-                if (lower.find(query) == std::string::npos) continue;
-            }
-            // Mode filter: 0 = Drop2D, 1 = Drop3D, 2 = ScanLine, 3 = Circle.
-            if (m_modeFilter >= 0) {
-                int rowIdx;
-                switch (proj.gameMode) {
-                    case GameModeType::DropNotes:
-                        rowIdx = (proj.gameDim == DropDimension::ThreeD) ? 1 : 0; break;
-                    case GameModeType::ScanLine: rowIdx = 2; break;
-                    case GameModeType::Circle:   rowIdx = 3; break;
-                    default: rowIdx = 0; break;
+        int maxSongs = 1;
+        for (const auto& p : m_projects) maxSongs = std::max(maxSongs, p.songCount);
+
+        // Table.
+        ImGui::PushStyleColor(ImGuiCol_TableBorderLight, Border);
+        ImGui::PushStyleColor(ImGuiCol_TableBorderStrong, BorderHi);
+        ImGui::PushStyleColor(ImGuiCol_TableHeaderBg,    BgPanel);
+        ImGui::PushStyleColor(ImGuiCol_TableRowBg,       BgBase);
+        ImGui::PushStyleColor(ImGuiCol_TableRowBgAlt,    BgBase);
+        const ImGuiTableFlags tflags = ImGuiTableFlags_BordersInnerH
+                                     | ImGuiTableFlags_RowBg
+                                     | ImGuiTableFlags_ScrollY
+                                     | ImGuiTableFlags_NoBordersInBody;
+        if (ImGui::BeginTable("##projects", 4, tflags,
+                              ImVec2(0, ImGui::GetContentRegionAvail().y))) {
+            ImGui::TableSetupColumn("NAME",     ImGuiTableColumnFlags_WidthStretch);
+            ImGui::TableSetupColumn("MODE",     ImGuiTableColumnFlags_WidthFixed, 110.f);
+            ImGui::TableSetupColumn("SONGS",    ImGuiTableColumnFlags_WidthFixed, 120.f);
+            ImGui::TableSetupColumn("MODIFIED", ImGuiTableColumnFlags_WidthFixed, 210.f);
+            ImGui::TableSetupScrollFreeze(0, 1);
+
+            // Custom uppercase headers (TextLow).
+            ImGui::PushStyleColor(ImGuiCol_Text, TextMid);
+            ImGui::TableHeadersRow();
+            ImGui::PopStyleColor();
+
+            int visibleCount = 0;
+            for (int idx : order) {
+                const auto& proj = m_projects[idx];
+
+                if (m_leftRail == HubLeftRail::Recent && !recentSet.count(idx)) continue;
+                if (m_leftRail == HubLeftRail::Starred && !m_starred.count(proj.name)) continue;
+
+                if (!query.empty()) {
+                    std::string lower = proj.name;
+                    std::transform(lower.begin(), lower.end(), lower.begin(),
+                                   [](unsigned char c) { return (char)std::tolower(c); });
+                    if (lower.find(query) == std::string::npos) continue;
                 }
-                if (rowIdx != m_modeFilter) continue;
-            }
-            ++visibleCount;
+                if (m_modeFilter >= 0 && modeFilterIdxFor(proj) != m_modeFilter) continue;
 
-            ImGui::PushID((int)i);
-            const bool selected = (int)i == m_selectedIdx;
+                ++visibleCount;
 
-            const ImVec2 rowPos = ImGui::GetCursorScreenPos();
-            const float  rowW   = ImGui::GetContentRegionAvail().x;
-            const ImVec2 rowSize(rowW, 56.f);
+                ImGui::PushID(idx);
+                ImGui::TableNextRow(0, 56.f);
 
-            if (selected) {
+                const ModeView mv = modeViewFor(proj);
+
+                // Hit area covering the full row (NAME col); SpanAllColumns
+                // makes selection/click behave for the whole row.
+                ImGui::TableSetColumnIndex(0);
+                const ImVec2 rowMin = ImGui::GetCursorScreenPos();
+                const float fullRowW =
+                    ImGui::GetContentRegionAvail().x
+                    + ImGui::GetColumnWidth(1)
+                    + ImGui::GetColumnWidth(2)
+                    + ImGui::GetColumnWidth(3) + 24.f;
+                const float rowH = 56.f;
+                const bool selected = (idx == m_selectedIdx);
                 ImDrawList* dl = ImGui::GetWindowDrawList();
-                dl->AddRectFilled(rowPos,
-                                  ImVec2(rowPos.x + rowW, rowPos.y + rowSize.y),
-                                  ui::tokens::ToU32(ui::tokens::WithAlpha(ui::tokens::Cyan, 0.10f)), 6.f);
-                dl->AddRect(rowPos,
-                            ImVec2(rowPos.x + rowW, rowPos.y + rowSize.y),
-                            ui::tokens::ToU32(ui::tokens::Cyan), 6.f, 0, 1.5f);
-                dl->AddRectFilled(rowPos,
-                                  ImVec2(rowPos.x + 3, rowPos.y + rowSize.y),
-                                  ui::tokens::ToU32(ui::tokens::Cyan));
-            }
 
-            bool clicked = ImGui::Selectable("##proj_row", selected,
-                                              ImGuiSelectableFlags_AllowDoubleClick,
-                                              rowSize);
-            bool dbl = clicked && ImGui::IsMouseDoubleClicked(0);
-
-            ImGui::SetCursorScreenPos(ImVec2(rowPos.x + 14, rowPos.y + 8));
-            ImGui::Text("%s", proj.name.c_str());
-            ImGui::SetCursorScreenPos(ImVec2(rowPos.x + 14, rowPos.y + 30));
-            ui::PushMono();
-            ImGui::TextDisabled("Projects/%s/  |  v%s  |  %s",
-                                proj.name.c_str(),
-                                proj.version.c_str(),
-                                proj.lastModified.empty() ? "-" : proj.lastModified.c_str());
-            ui::PopMono();
-
-            // Mode pill (right-aligned).
-            const char* modeLabel = "Drop 2D";
-            ImVec4 modeColor = ui::tokens::Cyan;
-            switch (proj.gameMode) {
-                case GameModeType::DropNotes:
-                    if (proj.gameDim == DropDimension::ThreeD) {
-                        modeLabel = "Drop 3D"; modeColor = ui::tokens::Magenta;
-                    } else {
-                        modeLabel = "Drop 2D"; modeColor = ui::tokens::Cyan;
-                    } break;
-                case GameModeType::ScanLine:
-                    modeLabel = "Scan Line"; modeColor = ui::tokens::Amber; break;
-                case GameModeType::Circle:
-                    modeLabel = "Circle";    modeColor = ui::tokens::Lime;  break;
-            }
-            const float pillW = ImGui::CalcTextSize(modeLabel).x + 16.f;
-            ImGui::SetCursorScreenPos(ImVec2(rowPos.x + rowW - pillW - 16.f,
-                                              rowPos.y + (rowSize.y - 18.f) * 0.5f));
-            ui::Pill(modeLabel, modeColor, /*solid*/ false);
-
-            ImGui::SetCursorScreenPos(ImVec2(rowPos.x, rowPos.y + rowSize.y + 4));
-
-            if (clicked) {
-                m_selectedIdx = (int)i;
-                if (dbl && engine) {
-                    m_selectedProject = proj;
-                    m_projectSelected = true;
-                    engine->openProject(proj.path);
-                    engine->startScreenEditor().load(proj.path);
-                    engine->switchLayer(EditorLayer::StartScreen);
-                    if (m_launchCallback) m_launchCallback(proj);
+                if (selected) {
+                    dl->AddRectFilled(rowMin,
+                        {rowMin.x + fullRowW, rowMin.y + rowH},
+                        ToU32(WithAlpha(Cyan, 0.08f)), 4.f);
+                    dl->AddRectFilled(rowMin,
+                        {rowMin.x + 3.f, rowMin.y + rowH},
+                        ToU32(Cyan));
                 }
+
+                // Icon tile (32×32 colored letter).
+                const ImVec2 tileMin{rowMin.x + 10.f, rowMin.y + 12.f};
+                const ImVec2 tileMax{tileMin.x + 32.f, tileMin.y + 32.f};
+                dl->AddRectFilled(tileMin, tileMax,
+                                  ToU32(WithAlpha(mv.color, 0.18f)), 6.f);
+                dl->AddRect(tileMin, tileMax,
+                            ToU32(WithAlpha(mv.color, 0.50f)), 6.f);
+                {
+                    char letter[2] = {0, 0};
+                    letter[0] = std::toupper((unsigned char)proj.name[0]);
+                    const float ts = ImGui::GetFontSize() * 1.1f;
+                    const float tw = ImGui::CalcTextSize(letter).x;
+                    dl->AddText(nullptr, ts,
+                        {tileMin.x + (32.f - tw) * 0.5f,
+                         tileMin.y + (32.f - ts) * 0.5f - 1.f},
+                        ToU32(mv.color), letter);
+                }
+
+                // Name + path (in NAME cell, after the icon tile).
+                dl->AddText({rowMin.x + 52.f, rowMin.y + 10.f},
+                            IM_COL32(255, 255, 255, 255), proj.name.c_str());
+                {
+                    char pathBuf[256];
+                    snprintf(pathBuf, sizeof(pathBuf), "Projects/%s/", proj.name.c_str());
+                    ImFont* mono = ui::s_monoFont ? ui::s_monoFont : ImGui::GetFont();
+                    dl->AddText(mono, ImGui::GetFontSize() * 0.92f,
+                        {rowMin.x + 52.f, rowMin.y + 30.f},
+                        ToU32(TextLow), pathBuf);
+                }
+
+                // Star toggle — place it as an InvisibleButton FIRST so it
+                // wins clicks before the row Selectable below catches them.
+                const float nameAvailW = ImGui::GetContentRegionAvail().x;
+                const ImVec2 starHitMin{rowMin.x + nameAvailW - 26.f, rowMin.y + 18.f};
+                const ImVec2 starHitMax{starHitMin.x + 22.f, starHitMin.y + 22.f};
+                ImGui::SetCursorScreenPos(starHitMin);
+                bool starClicked = ImGui::InvisibleButton("##star", {22.f, 22.f});
+                const bool starHovered = ImGui::IsItemHovered();
+                const bool starred = m_starred.count(proj.name) > 0;
+                drawStarIcon(dl,
+                    {starHitMin.x + 11.f, starHitMin.y + 11.f}, 7.5f,
+                    ToU32(starred ? Amber
+                           : (starHovered ? WithAlpha(Amber, 0.75f)
+                                          : WithAlpha(TextLow, 0.55f))),
+                    starred);
+                if (starClicked) {
+                    if (starred) m_starred.erase(proj.name);
+                    else         m_starred.insert(proj.name);
+                    saveStarred();
+                }
+
+                // Whole-row clickable Selectable. Placed AFTER the star so
+                // the star's InvisibleButton steals the click first when the
+                // pointer is over it.
+                ImGui::SetCursorScreenPos(rowMin);
+                ImGui::PushStyleColor(ImGuiCol_Header,        ImVec4(0,0,0,0));
+                ImGui::PushStyleColor(ImGuiCol_HeaderHovered, ImVec4(0,0,0,0));
+                ImGui::PushStyleColor(ImGuiCol_HeaderActive,  ImVec4(0,0,0,0));
+                bool clicked = ImGui::Selectable("##row", selected,
+                    ImGuiSelectableFlags_AllowDoubleClick |
+                    ImGuiSelectableFlags_SpanAllColumns,
+                    ImVec2(0, rowH));
+                ImGui::PopStyleColor(3);
+                bool dbl = clicked && ImGui::IsMouseDoubleClicked(0);
+                if (clicked && !starClicked) {
+                    m_selectedIdx = idx;
+                    if (dbl && engine) {
+                        m_selectedProject = proj;
+                        m_projectSelected = true;
+                        engine->openProject(proj.path);
+                        engine->startScreenEditor().load(proj.path);
+                        engine->switchLayer(EditorLayer::StartScreen);
+                        if (m_launchCallback) m_launchCallback(proj);
+                    }
+                }
+                (void)starHitMax;
+
+                // MODE column.
+                ImGui::TableSetColumnIndex(1);
+                ImGui::SetCursorPosY(ImGui::GetCursorPosY() + 18.f);
+                ui::Pill(mv.label, mv.color, /*solid*/ false);
+
+                // SONGS column.
+                ImGui::TableSetColumnIndex(2);
+                {
+                    ImVec2 cur = ImGui::GetCursorScreenPos();
+                    cur.y += 24.f;
+                    const float barW = 70.f, barH = 4.f;
+                    dl->AddRectFilled(cur, {cur.x + barW, cur.y + barH},
+                                      ToU32(BgPanel3), 2.f);
+                    const float fillW = barW *
+                        std::min(1.f, (float)proj.songCount / (float)maxSongs);
+                    if (fillW > 0.5f)
+                        dl->AddRectFilled(cur, {cur.x + fillW, cur.y + barH},
+                                          ToU32(WithAlpha(Cyan, 0.85f)), 2.f);
+                    char buf[16];
+                    snprintf(buf, sizeof(buf), "%d", proj.songCount);
+                    ImFont* mono = ui::s_monoFont ? ui::s_monoFont : ImGui::GetFont();
+                    dl->AddText(mono, ImGui::GetFontSize(),
+                        {cur.x + barW + 8.f, cur.y - 4.f},
+                        IM_COL32(255, 255, 255, 255), buf);
+                }
+
+                // MODIFIED column.
+                ImGui::TableSetColumnIndex(3);
+                {
+                    ImVec2 cur = ImGui::GetCursorScreenPos();
+                    cur.y += 20.f;
+                    ImFont* mono = ui::s_monoFont ? ui::s_monoFont : ImGui::GetFont();
+                    dl->AddText(mono, ImGui::GetFontSize(), cur,
+                        ToU32(TextMid),
+                        proj.lastModified.empty() ? "-" : proj.lastModified.c_str());
+                    // Right chevron.
+                    const float colW = ImGui::GetColumnWidth();
+                    const ImVec2 chCenter{cur.x + colW - 18.f, cur.y + 8.f};
+                    const float chs = 5.f;
+                    dl->AddTriangleFilled(
+                        {chCenter.x - chs * 0.5f, chCenter.y - chs},
+                        {chCenter.x - chs * 0.5f, chCenter.y + chs},
+                        {chCenter.x + chs * 0.6f, chCenter.y},
+                        ToU32(TextLow));
+                }
+
+                ImGui::PopID();
             }
 
-            ImGui::PopID();
-        }
+            ImGui::EndTable();
 
-        if (visibleCount == 0) {
-            ImGui::TextDisabled("No projects match '%s'.", m_searchBuf);
+            if (visibleCount == 0) {
+                ImGui::TextDisabled("No projects match the current filter.");
+            }
         }
+        ImGui::PopStyleColor(5);
     }
     ImGui::EndChild();
 
-    // ── Detail panel (right) ────────────────────────────────────────────────
     ImGui::SameLine();
-    ImGui::BeginChild("##hub_detail", ImVec2(detailW, colsH), true,
+
+    // ── Detail panel (right) ────────────────────────────────────────────────
+    ImGui::BeginChild("##hub_detail", ImVec2(detailW, colsH), false,
                       ImGuiWindowFlags_NoScrollbar);
     {
         const bool hasSel = m_selectedIdx >= 0
@@ -648,41 +2598,84 @@ void ProjectHub::render(Engine* engine) {
             ImGui::TextDisabled("Select a project to see details.");
         } else {
             const ProjectInfo& sel = m_projects[m_selectedIdx];
+            const ModeView mv = modeViewFor(sel);
 
-            // Header tile: name + mode subtitle (mirrors React mock).
-            ImGui::Text("%s", sel.name.c_str());
-            const char* modeLabel = "Drop 2D";
-            switch (sel.gameMode) {
-                case GameModeType::DropNotes:
-                    modeLabel = (sel.gameDim == DropDimension::ThreeD) ? "Drop 3D" : "Drop 2D"; break;
-                case GameModeType::ScanLine: modeLabel = "Scan Line"; break;
-                case GameModeType::Circle:   modeLabel = "Circle";    break;
+            // ── Header row: 40×40 colored letter tile + (name / subtitle) ──
+            {
+                const float tile = 40.f;
+                ImVec2 origin = ImGui::GetCursorScreenPos();
+                ImDrawList* dl = ImGui::GetWindowDrawList();
+                dl->AddRectFilled(origin, {origin.x + tile, origin.y + tile},
+                                  ToU32(WithAlpha(mv.color, 0.18f)), 6.f);
+                dl->AddRect(origin, {origin.x + tile, origin.y + tile},
+                            ToU32(WithAlpha(mv.color, 0.50f)), 6.f);
+                char letter[2] = {(char)std::toupper((unsigned char)sel.name[0]), 0};
+                const float ts = ImGui::GetFontSize() * 1.25f;
+                const float tw = ImGui::CalcTextSize(letter).x;
+                dl->AddText(nullptr, ts,
+                    {origin.x + (tile - tw) * 0.5f,
+                     origin.y + (tile - ts) * 0.5f - 1.f},
+                    ToU32(mv.color), letter);
+
+                // Name + subtitle laid out as ImGui widgets in the right gutter
+                // so spacing is honoured and downstream content sits below.
+                ImGui::SetCursorScreenPos({origin.x + tile + 12.f, origin.y + 2.f});
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.f, 1.f, 1.f, 1.f));
+                ImGui::TextUnformatted(sel.name.c_str());
+                ImGui::PopStyleColor();
+                ImGui::SetCursorScreenPos({origin.x + tile + 12.f, origin.y + 22.f});
+                ui::PushMono();
+                ImGui::TextColored(TextLow, "%s  -  %d songs",
+                                   mv.label, sel.songCount);
+                ui::PopMono();
+                ImGui::SetCursorScreenPos({origin.x, origin.y + tile + 14.f});
             }
-            ImGui::TextDisabled("%s  |  %d songs", modeLabel, sel.songCount);
-            ImGui::Spacing();
 
-            if (ui::SectionHeader("Metadata")) {
-                auto kv = [](const char* k, const char* v) {
-                    ImGui::TextDisabled("%s", k);
-                    ImGui::SameLine(96.f);
+            // ── Metadata key/value list. Two-column ImGui::Table so the
+            // value cell wraps within its own width and label/value never
+            // bleed into each other or the next row.
+            if (ImGui::BeginTable("##meta", 2,
+                    ImGuiTableFlags_SizingFixedFit
+                    | ImGuiTableFlags_NoBordersInBody)) {
+                ImGui::TableSetupColumn("k", ImGuiTableColumnFlags_WidthFixed, 110.f);
+                ImGui::TableSetupColumn("v", ImGuiTableColumnFlags_WidthStretch);
+
+                auto row = [](const char* k, const std::string& v) {
+                    ImGui::TableNextRow();
+                    ImGui::TableSetColumnIndex(0);
+                    std::string upper;
+                    for (const char* p = k; *p; ++p)
+                        upper += (char)((*p >= 'a' && *p <= 'z') ? (*p - 32) : *p);
+                    ImGui::PushStyleColor(ImGuiCol_Text, TextLow);
+                    ImGui::TextUnformatted(upper.c_str());
+                    ImGui::PopStyleColor();
+
+                    ImGui::TableSetColumnIndex(1);
                     ui::PushMono();
-                    ImGui::TextWrapped("%s", v && *v ? v : "-");
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.f, 1.f, 1.f, 1.f));
+                    ImGui::PushTextWrapPos(0.f);
+                    ImGui::TextUnformatted(v.empty() ? "-" : v.c_str());
+                    ImGui::PopTextWrapPos();
+                    ImGui::PopStyleColor();
                     ui::PopMono();
                 };
-                kv("Version",      sel.version.c_str());
-                kv("Default chart",sel.defaultChart.c_str());
-                kv("Shader path",  sel.shaderPath.c_str());
-                kv("Last opened",  sel.lastModified.c_str());
-                kv("Path",         sel.path.c_str());
-                ImGui::Spacing();
+
+                row("Version",       sel.version);
+                row("Default chart", sel.defaultChart);
+                row("Shader path",   sel.shaderPath);
+                row("Last opened",   sel.lastModified);
+                row("Path",          sel.path);
+                ImGui::EndTable();
             }
             ImGui::Spacing();
-            ImGui::Separator();
             ImGui::Spacing();
 
-            // Open Project — primary action.
-            if (ImGui::Button(("Open " + sel.name).c_str(),
-                              ImVec2(-1, 32))) {
+            // Open Project — primary cyan CTA.
+            ImGui::PushStyleColor(ImGuiCol_Button,        WithAlpha(Cyan, 0.85f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, Cyan);
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive,  Cyan);
+            ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(0, 0, 0, 1));
+            if (ImGui::Button("Open Project", ImVec2(-1, 32))) {
                 m_selectedProject = sel;
                 m_projectSelected = true;
                 if (engine) {
@@ -692,22 +2685,67 @@ void ProjectHub::render(Engine* engine) {
                 }
                 if (m_launchCallback) m_launchCallback(sel);
             }
+            ImGui::PopStyleColor(4);
             ImGui::Spacing();
 
-            // Inline APK build (no popup).
-            if (m_apkRunning) ImGui::BeginDisabled();
-            ImGui::PushStyleColor(ImGuiCol_Button,
-                ui::tokens::WithAlpha(ui::tokens::Amber, 0.85f));
-            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ui::tokens::Amber);
-            ImGui::PushStyleColor(ImGuiCol_Text,
-                ImVec4(0.f, 0.f, 0.f, 1.f));
-            if (ImGui::Button("Build APK", ImVec2(-1, 26)))
-                startApkBuild(sel);
+            // Reveal + Add file ghost row.
+            const float halfW = (ImGui::GetContentRegionAvail().x - 6.f) * 0.5f;
+            ImGui::PushStyleColor(ImGuiCol_Button,        BgPanel2);
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, BgPanel3);
+            ImGui::PushStyleColor(ImGuiCol_Border,        BorderHi);
+            ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1.f);
+            if (ImGui::Button("Reveal", ImVec2(halfW, 26)))
+                revealInExplorer(sel.path);
+            ImGui::SameLine();
+            if (ImGui::Button("Add file##detail", ImVec2(halfW, 26))) {
+                m_showAddFileDialog = true;
+                m_addFileError.clear();
+            }
+            ImGui::PopStyleVar();
             ImGui::PopStyleColor(3);
-            if (m_apkRunning) ImGui::EndDisabled();
-
             ImGui::Spacing();
-            renderApkPanel();
+
+            // Package APK card.
+            ImGui::PushStyleColor(ImGuiCol_ChildBg, BgPanel);
+            ImGui::PushStyleColor(ImGuiCol_Border,  BorderHi);
+            ImGui::PushStyleVar(ImGuiStyleVar_ChildBorderSize, 1.f);
+            const float cardH = m_apkProjectName.empty() ? 56.f
+                                : (m_apkRunning ? 96.f : 130.f);
+            ImGui::BeginChild("##apk_card", ImVec2(0, cardH), true,
+                              ImGuiWindowFlags_NoScrollbar);
+            {
+                // Header row: amber square + uppercase TextLow label + Build.
+                ImVec2 cur = ImGui::GetCursorScreenPos();
+                ImDrawList* dl = ImGui::GetWindowDrawList();
+                dl->AddRectFilled(cur, {cur.x + 14.f, cur.y + 14.f},
+                                  ToU32(WithAlpha(Amber, 0.85f)), 3.f);
+                ImGui::SetCursorScreenPos({cur.x + 22.f, cur.y});
+                ImGui::PushStyleColor(ImGuiCol_Text, TextLow);
+                ImGui::TextUnformatted("PACKAGE APK");
+                ImGui::PopStyleColor();
+
+                ImGui::SameLine();
+                const float availW = ImGui::GetContentRegionAvail().x;
+                ImGui::SetCursorPosX(ImGui::GetCursorPosX() + availW - 64.f);
+                ImGui::SetCursorPosY(ImGui::GetCursorPosY() - 4.f);
+                if (m_apkRunning) ImGui::BeginDisabled();
+                ImGui::PushStyleColor(ImGuiCol_Button,        BgPanel3);
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, BgPanel2);
+                ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(1.f, 1.f, 1.f, 1.f));
+                ImGui::PushStyleColor(ImGuiCol_Border,        BorderHi);
+                ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1.f);
+                if (ImGui::Button("Build", ImVec2(60.f, 22.f)))
+                    startApkBuild(sel);
+                ImGui::PopStyleVar();
+                ImGui::PopStyleColor(4);
+                if (m_apkRunning) ImGui::EndDisabled();
+
+                ImGui::Dummy(ImVec2(0, 4.f));
+                renderApkPanel();
+            }
+            ImGui::EndChild();
+            ImGui::PopStyleVar();
+            ImGui::PopStyleColor(2);
         }
     }
     ImGui::EndChild();
@@ -717,6 +2755,8 @@ void ProjectHub::render(Engine* engine) {
     renderCreateDialog(engine);
     renderAddFileDialog();
 }
+#endif  // inner legacy render path
+#endif  // outer dead-code disable
 
 // ── import existing project by path ──────────────────────────────────────────
 
@@ -896,54 +2936,44 @@ void ProjectHub::renderApkPanel() {
     }
 
     using namespace ui::tokens;
-    ImGui::PushStyleColor(ImGuiCol_ChildBg, BgPanel);
-    ImGui::BeginChild("##apk_panel",
-                      ImVec2(0, 168), true,
-                      ImGuiWindowFlags_NoScrollbar);
-    {
-        ImGui::TextDisabled("PACKAGE APK");
-        ImGui::Separator();
 
-        if (m_apkProjectName.empty()) {
-            ImGui::TextWrapped("Build an Android APK from the selected project. "
-                               "Output lands under <project>/build/.");
-        } else {
-            ImGui::Text("Project: %s", m_apkProjectName.c_str());
-            if (!m_apkOutputPath.empty())
-                ImGui::TextDisabled("Out: %s", m_apkOutputPath.c_str());
-        }
-        ImGui::Spacing();
-
-        if (m_apkRunning) {
-            ImGui::TextColored(Amber,
-                               "Building... (running Gradle)");
-            if (!m_apkLogPath.empty())
-                ImGui::TextDisabled("Log: %s", m_apkLogPath.c_str());
-        } else if (!m_apkProjectName.empty() && m_apkExitCode == 0
-                   && !m_apkOutputPath.empty()) {
-            ImGui::TextColored(Lime, "BUILD SUCCESSFUL");
-            ImGui::TextDisabled("%s", m_apkOutputPath.c_str());
-#ifdef _WIN32
-            if (ImGui::Button("Show in Explorer", ImVec2(-1, 26))) {
-                std::string arg = "/select,\"" + m_apkOutputPath + "\"";
-                ShellExecuteA(nullptr, "open", "explorer.exe",
-                              arg.c_str(), nullptr, SW_SHOWNORMAL);
-            }
-#endif
-        } else if (!m_apkProjectName.empty() && m_apkExitCode != 0) {
-            ImGui::TextColored(Red, "BUILD FAILED (exit %d)", m_apkExitCode);
-            if (!m_apkLogPath.empty())
-                ImGui::TextDisabled("Log: %s", m_apkLogPath.c_str());
-#ifdef _WIN32
-            if (ImGui::Button("Open Log", ImVec2(-1, 26))) {
-                ShellExecuteA(nullptr, "open", m_apkLogPath.c_str(),
-                              nullptr, nullptr, SW_SHOWNORMAL);
-            }
-#endif
-        } else {
-            ImGui::TextDisabled("Idle. Click Build to package.");
-        }
+    // Inline status block — caller provides border + header. All text white.
+    if (m_apkProjectName.empty()) {
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.f, 1.f, 1.f, 1.f));
+        ImGui::TextWrapped("Builds an APK to your desktop.");
+        ImGui::PopStyleColor();
+        return;
     }
-    ImGui::EndChild();
+
+    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.f, 1.f, 1.f, 1.f));
+    if (!m_apkOutputPath.empty())
+        ImGui::Text("Out: %s", m_apkOutputPath.c_str());
+    ImGui::Spacing();
+
+    if (m_apkRunning) {
+        ImGui::TextColored(Amber, "Building... (running Gradle)");
+        if (!m_apkLogPath.empty())
+            ImGui::Text("Log: %s", m_apkLogPath.c_str());
+    } else if (m_apkExitCode == 0 && !m_apkOutputPath.empty()) {
+        ImGui::TextColored(Lime, "BUILD SUCCESSFUL");
+        ImGui::Text("%s", m_apkOutputPath.c_str());
+#ifdef _WIN32
+        if (ImGui::Button("Show in Explorer", ImVec2(-1, 26))) {
+            std::string arg = "/select,\"" + m_apkOutputPath + "\"";
+            ShellExecuteA(nullptr, "open", "explorer.exe",
+                          arg.c_str(), nullptr, SW_SHOWNORMAL);
+        }
+#endif
+    } else if (m_apkExitCode != 0) {
+        ImGui::TextColored(Red, "BUILD FAILED (exit %d)", m_apkExitCode);
+        if (!m_apkLogPath.empty())
+            ImGui::Text("Log: %s", m_apkLogPath.c_str());
+#ifdef _WIN32
+        if (ImGui::Button("Open Log", ImVec2(-1, 26))) {
+            ShellExecuteA(nullptr, "open", m_apkLogPath.c_str(),
+                          nullptr, nullptr, SW_SHOWNORMAL);
+        }
+#endif
+    }
     ImGui::PopStyleColor();
 }

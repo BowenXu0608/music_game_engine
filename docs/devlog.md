@@ -1764,3 +1764,171 @@ particular still drifts from the mock per the screenshots collected
 during this session (TopBar chrome height + bg color, Hierarchy nav
 icons, Background drop-zone treatment, aspect-bar visual). Those are
 open items for a follow-up pass.
+
+---
+
+## 2026-05-03 — Project Hub redesign (ui-test branch)
+
+Rebuilt `ProjectHub::render()` from scratch to match the React mock at
+`OneDrive/.../屏幕截图 2026-05-03 103008.png`. Worked entirely on the
+`ui-test` branch — not merging to main. ~7 visual passes; the live
+render path is now ~620 lines and the original render is parked in a
+`#if 0 ... #endif` block at the file tail (~660 lines) for reference
+until layout sign-off.
+
+### Layout
+
+Top bar (gradient M tile + crumb + gear) — header row (title + subtitle
++ search + Add file + Create game) — three-column body (200 px rail |
+stretch middle | 320 px detail). Each child window pushes a transparent
+`ChildBg` so the inherited `BgPanel` (`#0D0D10`) gray doesn't bleed
+through.
+
+### "No-gray" rule
+
+The user's hard requirement, distilled across the whole session:
+**every pixel that is not pure black is either pure white `#FFFFFF` or
+a fully saturated accent (Cyan, Magenta, Amber, Lime).** Three traps
+in this codebase that I had to discover and fix:
+
+1. `StyleTokens.h:21` defines `TextHi = #F4F4F7` — a slightly cool
+   off-white. On a black background it reads as gray. The token name is
+   misleading. **Fix:** every `TextHi` reference in the live render path
+   was replaced with `IM_COL32(255, 255, 255, 255)` (draw-list calls)
+   or `ImVec4(1.f, 1.f, 1.f, 1.f)` (`PushStyleColor`). Same for
+   `ui::TopBar` in `Widgets.cpp:432-434` (the crumb at the top).
+2. `StyleTokens.cpp:31` sets `ImGuiCol_ChildBg = BgPanel` (dark gray).
+   Every `BeginChild` inherits a gray background unless explicitly
+   overridden. **Fix:** wrapped each of the five `BeginChild` calls
+   (`##hdr`, `##rail`, `##mid`, `##detail`, `##apk_card`) with a
+   `PushStyleColor(ImGuiCol_ChildBg, ImVec4(0,0,0,0))`.
+3. `ImGuiCol_PopupBg = BgPanel2`. **Fix:** wrapped `BeginPopup` for
+   the sort dropdown with a transparent/black `PopupBg` push.
+
+Other deliberate gray-removal swaps: search-input frame `BgVoid` (true
+black) with full Cyan border; star-icon outline pure white (was
+`WithAlpha(TextHi, 0.40f)`); songs progress bar uses Cyan border + Cyan
+fill (was `BgPanel3` track + `WithAlpha(TextHi, 0.85f)` fill); table
+inner row borders REMOVED entirely (`BordersInnerH` flag dropped) since
+the user described their cyan rendering as "strange edges between
+projects".
+
+### Typography ratios
+
+Read off the prototype and applied via `SetWindowFontScale` per region
+(reset to 1.0 before next region):
+
+- "Projects" title: **2.3×**
+- Header subtitle, table column headers, KV labels, count badges,
+  detail "Drop X · N songs" subtitle: **0.85×**
+- Detail panel project name: **1.15×**
+- Everything else: **1.0×**
+
+### Three-column shell
+
+Left rail = three rows (All projects / Recent / Starred) each with a
+custom-drawn icon (folder / clock / star) + label + count badge. Active
+row indicated by 3 px cyan side bar + cyan-bordered rounded rect (no
+fill — alpha fills look gray).
+
+Middle column = 18×10 chip-dot row + frameless sort selector + table.
+Five chip dots (no labels — just rounded outlines), one per mode. Sort
+selector opens a popup with three options. Sort applied to a frame-local
+index vector — `m_projects` is never re-sorted because the Recent rail
+filter needs the original mod-time order.
+
+Detail column = full-cyan-bordered rounded rectangle containing the
+header tile (mode-bordered icon tile + name + subtitle), metadata
+key-value table, primary cyan Open Project button (with white play
+triangle drawn as a primitive), Reveal + Add file frameless icon-text
+row, and the PACKAGE APK card (full-amber border, amber music-disc icon
+header, white "PACKAGE APK" label, outlined Build button on the right).
+
+### Projects table
+
+`BeginTable("##projects", 4, RowBg | NoBordersInBody | ScrollY)` with
+NAME stretch, MODE 80, SONGS 130, MODIFIED 220. Header row pinned with
+`TableSetupScrollFreeze(0,1)`. Per row (64 px):
+
+- NAME cell: 36×36 mode-bordered icon tile with a custom-drawn music
+  note glyph in mode color, project name in pure white, star toggle on
+  the far right.
+- MODE cell: empty (mode is conveyed by the icon-tile border color, not
+  a separate pill).
+- SONGS cell: cyan-bordered empty track + cyan-filled portion + count.
+- MODIFIED cell: mono timestamp + right chevron triangle.
+
+Selection: drawn as a 3 px cyan side bar in the NAME cell. No row
+background fill (any alpha tint reads as gray).
+
+### KV table — fit-or-ellipsize
+
+Two-column table (label fixed 160 px, value stretch) inside the 320 px
+detail panel. Values use a fit-or-ellipsize loop instead of
+`PushTextWrapPos(0)` because wrapping made long paths span 2-3 lines
+and made adjacent rows visually overlap. The new path:
+
+```cpp
+const float availW = ImGui::GetContentRegionAvail().x;
+if (CalcTextSize(value).x <= availW) Text(value);
+else {
+    // longest prefix that fits + "..."
+    std::string fit;
+    for (size_t i = 0; i < value.size(); ++i) {
+        std::string trial = value.substr(0, i+1) + "...";
+        if (CalcTextSize(trial).x > availW) break;
+        fit = value.substr(0, i+1);
+    }
+    Text(fit + "...");
+    if (IsItemHovered()) SetTooltip("%s", value);
+}
+```
+
+Each row is exactly one line tall; the full value is on hover.
+
+### Custom icon glyphs (CP936-safe — no font glyphs)
+
+All file-local in an anonymous namespace above `render()`:
+
+- `drawGearClean` — circle + 8 axial squares + black hub. Earlier
+  trapezoidal-tooth version rendered as a snowflake.
+- `drawFolderIcon` / `drawClockIcon` / `drawStarIcon` /
+  `drawFunnelIcon` — left rail and sort row.
+- `drawMusicNote` — head + stem + flag triangle.
+- `drawDisc` — APK card icon.
+- `drawUpArrow` / `drawDownArrow` — Add file + Build.
+
+### Persistence
+
+Starred-project state in `Projects/_hub_state.json`. Loaded once per
+render via `m_starredLoaded`; saved on every star click wrapped in
+try/catch (no `error_handler_t::replace`, per the user-data-writes
+rule).
+
+### Search input
+
+`InputTextWithHint` with `FrameBg = BgVoid` and `Border = Cyan`. The
+`Ctrl+K` keyboard hint is a small filled-cyan chip drawn over the
+input's right edge — Windows convention, not the macOS `⌘K` from the
+React mock. Saved a `feedback_windows_shortcuts` memory rule on the
+first iteration after the user pointed this out.
+
+### Auto-select on first frame
+
+`m_initialSelectDone` flag sets `m_selectedIdx = 0` (newest by
+mod-time) on the first render so the detail panel populates
+immediately.
+
+### Files modified
+
+- `engine/src/ui/ProjectHub.h` — added `HubLeftRail` + `HubSortMode`
+  enums and `m_leftRail` / `m_sortMode` / `m_starred` /
+  `m_starredLoaded` / `m_initialSelectDone` state.
+- `engine/src/ui/ProjectHub.cpp` — wholesale `render()` rewrite,
+  added `loadStarred` / `saveStarred` / `revealInExplorer` helpers,
+  added the file-local icon-glyph helpers, removed the dead `if 0`
+  block that the previous attempts left behind.
+- `engine/src/ui/Widgets.cpp` — patched `ui::TopBar` crumb colors to
+  pure white (was `TextHi` off-white).
+
+Branch is `ui-test`; no merge to main per the user's instruction.

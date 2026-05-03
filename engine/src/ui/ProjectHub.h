@@ -2,6 +2,7 @@
 #include <string>
 #include <vector>
 #include <map>
+#include <set>
 #include <functional>
 #include <future>
 
@@ -108,6 +109,13 @@ struct ProjectInfo {
     int           songCount = 0;
 };
 
+// Left rail nav category — drives the visible-set filter alongside the
+// existing mode-chip filter.
+enum class HubLeftRail { All = 0, Recent, Starred };
+
+// Sort order applied to the table view (does NOT mutate m_projects).
+enum class HubSortMode { LastModified = 0, NameAZ, SongCount };
+
 class ProjectHub {
 public:
     using LaunchCallback = std::function<void(const ProjectInfo&)>;
@@ -130,6 +138,13 @@ private:
     // Was previously a separate floating window (`renderApkDialog`).
     void renderApkPanel();
 
+    // Starred-project persistence. File: Projects/_hub_state.json.
+    void loadStarred();
+    void saveStarred();
+
+    // Open Explorer at the project folder (Windows only; no-op elsewhere).
+    void revealInExplorer(const std::string& projectPath);
+
     std::vector<ProjectInfo> m_projects;
     ProjectInfo              m_selectedProject;
     LaunchCallback           m_launchCallback;
@@ -141,6 +156,18 @@ private:
 
     // Filter pill: All / Drop2D / Drop3D / ScanLine / Circle. -1 = All.
     int         m_modeFilter = -1;
+
+    // Left-rail category + sort dropdown.
+    HubLeftRail m_leftRail   = HubLeftRail::All;
+    HubSortMode m_sortMode   = HubSortMode::LastModified;
+
+    // Starred set (project names). Persisted in Projects/_hub_state.json.
+    std::set<std::string> m_starred;
+    bool                  m_starredLoaded     = false;
+
+    // Auto-select the most-recent project on first render so the detail
+    // panel shows immediately, matching the React mock.
+    bool                  m_initialSelectDone = false;
 
     bool        m_showCreateDialog = false;
     char        m_newProjectName[128] = {};
