@@ -872,8 +872,8 @@ void ProjectHub::render(Engine* engine) {
 
     // ── Body: rail | middle | detail ─────────────────────────────────
     const float bodyH   = std::max(220.f, ImGui::GetContentRegionAvail().y);
-    const float railW   = 200.f;
-    const float detailW = 480.f;        // wide enough for "DEFAULT CHART" label + full path values
+    const float railW   = 220.f;
+    const float detailW = 280.f;
     const float midW    = std::max(280.f,
         ImGui::GetContentRegionAvail().x - railW - detailW
         - ImGui::GetStyle().ItemSpacing.x * 2.f);
@@ -916,12 +916,10 @@ void ProjectHub::render(Engine* engine) {
 
             ImDrawList* dl = ImGui::GetWindowDrawList();
 
-            // Active: bordered rounded rect with cyan border + side bar.
-            // No background fill (any alpha-tint reads as gray).
             if (active) {
-                dl->AddRect(cur, {cur.x + rowW, cur.y + rowH},
-                            ToU32(Cyan), 8.f, 0, 1.5f);
-                dl->AddRectFilled(cur, {cur.x + 3.f, cur.y + rowH}, ToU32(Cyan));
+                dl->AddRectFilled(cur, {cur.x + rowW, cur.y + rowH},
+                                  ToU32(WithAlpha(Cyan, 0.08f)), 6.f);
+                dl->AddRectFilled(cur, {cur.x + 2.f, cur.y + rowH}, ToU32(Cyan));
             }
             (void)hovered;
 
@@ -967,12 +965,43 @@ void ProjectHub::render(Engine* engine) {
     ImGui::BeginChild("##mid", ImVec2(midW, bodyH), false,
                       ImGuiWindowFlags_NoScrollbar);
     {
-        ImGui::Dummy(ImVec2(0, 6.f));   // breathing space below the header
+        ImGui::Dummy(ImVec2(0, 6.f));
         const ImVec2 chipsRowOrigin = ImGui::GetCursorScreenPos();
         const float midFullW = ImGui::GetContentRegionAvail().x;
         ImDrawList* dl = ImGui::GetWindowDrawList();
-        // Mode-filter chip dots are not in the prototype — removed.
-        m_modeFilter = -1;
+
+        // Mode-filter pills: All | Drop 2D | Drop 3D | Scan Line | Circle
+        {
+            struct FilterPill { const char* label; int idx; ImVec4 color; };
+            const FilterPill pills[] = {
+                {"All",       -1, Cyan},
+                {"Drop 2D",    0, Cyan},
+                {"Drop 3D",    1, Magenta},
+                {"Scan Line",  2, Amber},
+                {"Circle",     3, Lime},
+            };
+            for (const auto& fp : pills) {
+                const bool active = (m_modeFilter == fp.idx);
+                if (active) {
+                    ImGui::PushStyleColor(ImGuiCol_Button,        WithAlpha(fp.color, 0.85f));
+                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, fp.color);
+                    ImGui::PushStyleColor(ImGuiCol_ButtonActive,  fp.color);
+                    ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(0,0,0,1));
+                } else {
+                    ImGui::PushStyleColor(ImGuiCol_Button,        WithAlpha(fp.color, 0.10f));
+                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, WithAlpha(fp.color, 0.20f));
+                    ImGui::PushStyleColor(ImGuiCol_ButtonActive,  WithAlpha(fp.color, 0.30f));
+                    ImGui::PushStyleColor(ImGuiCol_Text,          fp.color);
+                }
+                ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 12.f);
+                ImGui::PushStyleVar(ImGuiStyleVar_FramePadding,  ImVec2(8.f, 2.f));
+                if (ImGui::SmallButton(fp.label))
+                    m_modeFilter = fp.idx;
+                ImGui::PopStyleVar(2);
+                ImGui::PopStyleColor(4);
+                ImGui::SameLine(0.f, 6.f);
+            }
+        }
 
         // ── Sort (right-anchored): "Sort:" + "Last modified ▾" frameless ──
         const char* sortLabel =
@@ -1562,8 +1591,8 @@ void ProjectHub::render(Engine* engine) {
 
     // ── Body: three columns (rail | middle | detail) ──────────────────
     const float bodyH   = std::max(220.f, ImGui::GetContentRegionAvail().y);
-    const float railW   = 200.f;
-    const float detailW = 320.f;
+    const float railW   = 220.f;
+    const float detailW = 280.f;
     const float midW    = std::max(280.f,
         ImGui::GetContentRegionAvail().x - railW - detailW
         - ImGui::GetStyle().ItemSpacing.x * 2.f);
@@ -2195,8 +2224,8 @@ static void __unused_old_render() {
         return;
     }
 
-    const float railW   = 180.f;
-    const float detailW = 300.f;
+    const float railW   = 220.f;
+    const float detailW = 280.f;
     const float midW    = std::max(280.f,
         ImGui::GetContentRegionAvail().x - railW - detailW
         - ImGui::GetStyle().ItemSpacing.x * 2.f);
@@ -2458,9 +2487,10 @@ static void __unused_old_render() {
                 ImDrawList* dl = ImGui::GetWindowDrawList();
 
                 if (selected) {
-                    dl->AddRectFilled(rowMin,
+                    dl->AddRectFilledMultiColor(rowMin,
                         {rowMin.x + fullRowW, rowMin.y + rowH},
-                        ToU32(WithAlpha(Cyan, 0.08f)), 4.f);
+                        ToU32(WithAlpha(Cyan, 0.10f)), 0,
+                        0, ToU32(WithAlpha(Cyan, 0.10f)));
                     dl->AddRectFilled(rowMin,
                         {rowMin.x + 3.f, rowMin.y + rowH},
                         ToU32(Cyan));
@@ -2484,14 +2514,16 @@ static void __unused_old_render() {
                         ToU32(mv.color), letter);
                 }
 
-                // Name + path (in NAME cell, after the icon tile).
-                dl->AddText({rowMin.x + 52.f, rowMin.y + 10.f},
-                            IM_COL32(255, 255, 255, 255), proj.name.c_str());
+                // Name (bodyMed) + path (monoSm) — two-line layout.
                 {
+                    ImFont* nameFont = ui::fonts.bodyMed ? ui::fonts.bodyMed : ImGui::GetFont();
+                    dl->AddText(nameFont, nameFont->FontSize,
+                        {rowMin.x + 52.f, rowMin.y + 10.f},
+                        ToU32(TextHi), proj.name.c_str());
                     char pathBuf[256];
                     snprintf(pathBuf, sizeof(pathBuf), "Projects/%s/", proj.name.c_str());
-                    ImFont* mono = ui::s_monoFont ? ui::s_monoFont : ImGui::GetFont();
-                    dl->AddText(mono, ImGui::GetFontSize() * 0.92f,
+                    ImFont* pathFont = ui::fonts.monoSm ? ui::fonts.monoSm : ImGui::GetFont();
+                    dl->AddText(pathFont, pathFont->FontSize,
                         {rowMin.x + 52.f, rowMin.y + 30.f},
                         ToU32(TextLow), pathBuf);
                 }
@@ -2548,25 +2580,29 @@ static void __unused_old_render() {
                 ImGui::SetCursorPosY(ImGui::GetCursorPosY() + 18.f);
                 ui::Pill(mv.label, mv.color, /*solid*/ false);
 
-                // SONGS column.
+                // SONGS column: centered number + small progress bar below.
                 ImGui::TableSetColumnIndex(2);
                 {
                     ImVec2 cur = ImGui::GetCursorScreenPos();
-                    cur.y += 24.f;
-                    const float barW = 70.f, barH = 4.f;
-                    dl->AddRectFilled(cur, {cur.x + barW, cur.y + barH},
+                    const float colW = ImGui::GetColumnWidth();
+                    char buf[16];
+                    snprintf(buf, sizeof(buf), "%d", proj.songCount);
+                    ImFont* mono = ui::fonts.mono ? ui::fonts.mono : ImGui::GetFont();
+                    ImVec2 numSz = mono->CalcTextSizeA(mono->FontSize, FLT_MAX, 0.f, buf);
+                    dl->AddText(mono, mono->FontSize,
+                        {cur.x + (colW - numSz.x) * 0.5f, cur.y + 12.f},
+                        ToU32(TextHi), buf);
+                    const float barW = std::min(colW - 16.f, 70.f);
+                    const float barX = cur.x + (colW - barW) * 0.5f;
+                    const float barY = cur.y + 32.f;
+                    const float barH = 3.f;
+                    dl->AddRectFilled({barX, barY}, {barX + barW, barY + barH},
                                       ToU32(BgPanel3), 2.f);
                     const float fillW = barW *
                         std::min(1.f, (float)proj.songCount / (float)maxSongs);
                     if (fillW > 0.5f)
-                        dl->AddRectFilled(cur, {cur.x + fillW, cur.y + barH},
+                        dl->AddRectFilled({barX, barY}, {barX + fillW, barY + barH},
                                           ToU32(WithAlpha(Cyan, 0.85f)), 2.f);
-                    char buf[16];
-                    snprintf(buf, sizeof(buf), "%d", proj.songCount);
-                    ImFont* mono = ui::s_monoFont ? ui::s_monoFont : ImGui::GetFont();
-                    dl->AddText(mono, ImGui::GetFontSize(),
-                        {cur.x + barW + 8.f, cur.y - 4.f},
-                        IM_COL32(255, 255, 255, 255), buf);
                 }
 
                 // MODIFIED column.
@@ -2574,8 +2610,8 @@ static void __unused_old_render() {
                 {
                     ImVec2 cur = ImGui::GetCursorScreenPos();
                     cur.y += 20.f;
-                    ImFont* mono = ui::s_monoFont ? ui::s_monoFont : ImGui::GetFont();
-                    dl->AddText(mono, ImGui::GetFontSize(), cur,
+                    ImFont* mono = ui::fonts.monoSm ? ui::fonts.monoSm : ImGui::GetFont();
+                    dl->AddText(mono, mono->FontSize, cur,
                         ToU32(TextMid),
                         proj.lastModified.empty() ? "-" : proj.lastModified.c_str());
                     // Right chevron.
@@ -2616,9 +2652,9 @@ static void __unused_old_render() {
             const ProjectInfo& sel = m_projects[m_selectedIdx];
             const ModeView mv = modeViewFor(sel);
 
-            // ── Header row: 40×40 colored letter tile + (name / subtitle) ──
+            // ── Header row: 44×44 colored letter tile + (name / subtitle) ──
             {
-                const float tile = 40.f;
+                const float tile = 44.f;
                 ImVec2 origin = ImGui::GetCursorScreenPos();
                 ImDrawList* dl = ImGui::GetWindowDrawList();
                 dl->AddRectFilled(origin, {origin.x + tile, origin.y + tile},
@@ -2626,72 +2662,87 @@ static void __unused_old_render() {
                 dl->AddRect(origin, {origin.x + tile, origin.y + tile},
                             ToU32(WithAlpha(mv.color, 0.50f)), 6.f);
                 char letter[2] = {(char)std::toupper((unsigned char)sel.name[0]), 0};
-                const float ts = ImGui::GetFontSize() * 1.25f;
-                const float tw = ImGui::CalcTextSize(letter).x;
-                dl->AddText(nullptr, ts,
-                    {origin.x + (tile - tw) * 0.5f,
-                     origin.y + (tile - ts) * 0.5f - 1.f},
+                ImFont* headFont = ui::fonts.heading ? ui::fonts.heading : ImGui::GetFont();
+                ImVec2 lsz = headFont->CalcTextSizeA(headFont->FontSize, FLT_MAX, 0.f, letter);
+                dl->AddText(headFont, headFont->FontSize,
+                    {origin.x + (tile - lsz.x) * 0.5f,
+                     origin.y + (tile - headFont->FontSize) * 0.5f},
                     ToU32(mv.color), letter);
 
-                // Name + subtitle laid out as ImGui widgets in the right gutter
-                // so spacing is honoured and downstream content sits below.
-                ImGui::SetCursorScreenPos({origin.x + tile + 12.f, origin.y + 2.f});
-                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.f, 1.f, 1.f, 1.f));
-                ImGui::TextUnformatted(sel.name.c_str());
-                ImGui::PopStyleColor();
-                ImGui::SetCursorScreenPos({origin.x + tile + 12.f, origin.y + 22.f});
-                ui::PushMono();
-                ImGui::TextColored(TextLow, "%s  -  %d songs",
-                                   mv.label, sel.songCount);
-                ui::PopMono();
+                ImFont* nameFont = ui::fonts.bodyMed ? ui::fonts.bodyMed : ImGui::GetFont();
+                dl->AddText(nameFont, nameFont->FontSize,
+                    {origin.x + tile + 12.f, origin.y + 4.f},
+                    ToU32(TextHi), sel.name.c_str());
+
+                ImFont* subFont = ui::fonts.monoSm ? ui::fonts.monoSm : ImGui::GetFont();
+                char subBuf[64];
+                snprintf(subBuf, sizeof(subBuf), "%s  -  %d songs", mv.label, sel.songCount);
+                dl->AddText(subFont, subFont->FontSize,
+                    {origin.x + tile + 12.f, origin.y + 24.f},
+                    ToU32(TextLow), subBuf);
+
                 ImGui::SetCursorScreenPos({origin.x, origin.y + tile + 14.f});
             }
 
-            // ── Metadata key/value list. Two-column ImGui::Table so the
-            // value cell wraps within its own width and label/value never
-            // bleed into each other or the next row.
-            if (ImGui::BeginTable("##meta", 2,
-                    ImGuiTableFlags_SizingFixedFit
-                    | ImGuiTableFlags_NoBordersInBody)) {
-                ImGui::TableSetupColumn("k", ImGuiTableColumnFlags_WidthFixed, 110.f);
-                ImGui::TableSetupColumn("v", ImGuiTableColumnFlags_WidthStretch);
+            // ── Metadata box (BgPanel2, rounded) ────────────────────────
+            {
+                ImDrawList* dl = ImGui::GetWindowDrawList();
+                ImVec2 metaOrigin = ImGui::GetCursorScreenPos();
+                const float metaW = ImGui::GetContentRegionAvail().x;
 
-                auto row = [](const char* k, const std::string& v) {
-                    ImGui::TableNextRow();
-                    ImGui::TableSetColumnIndex(0);
-                    std::string upper;
-                    for (const char* p = k; *p; ++p)
-                        upper += (char)((*p >= 'a' && *p <= 'z') ? (*p - 32) : *p);
-                    ImGui::PushStyleColor(ImGuiCol_Text, TextLow);
-                    ImGui::TextUnformatted(upper.c_str());
-                    ImGui::PopStyleColor();
+                ImGui::PushStyleColor(ImGuiCol_ChildBg, BgPanel2);
+                ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 6.f);
+                ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(10, 10));
+                ImGui::BeginChild("##meta_box", ImVec2(metaW, 0), true,
+                    ImGuiWindowFlags_AutoResize | ImGuiWindowFlags_NoScrollbar);
 
-                    ImGui::TableSetColumnIndex(1);
-                    ui::PushMono();
-                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.f, 1.f, 1.f, 1.f));
-                    ImGui::PushTextWrapPos(0.f);
-                    ImGui::TextUnformatted(v.empty() ? "-" : v.c_str());
-                    ImGui::PopTextWrapPos();
-                    ImGui::PopStyleColor();
-                    ui::PopMono();
-                };
+                ImFont* labelFont = ui::fonts.label ? ui::fonts.label : ImGui::GetFont();
+                ImFont* monoSmFont = ui::fonts.monoSm ? ui::fonts.monoSm : ImGui::GetFont();
 
-                row("Version",       sel.version);
-                row("Default chart", sel.defaultChart);
-                row("Shader path",   sel.shaderPath);
-                row("Last opened",   sel.lastModified);
-                row("Path",          sel.path);
-                ImGui::EndTable();
+                if (ImGui::BeginTable("##meta", 2,
+                        ImGuiTableFlags_SizingFixedFit
+                        | ImGuiTableFlags_NoBordersInBody)) {
+                    ImGui::TableSetupColumn("k", ImGuiTableColumnFlags_WidthFixed, 110.f);
+                    ImGui::TableSetupColumn("v", ImGuiTableColumnFlags_WidthStretch);
+
+                    auto row = [&](const char* k, const std::string& v) {
+                        ImGui::TableNextRow();
+                        ImGui::TableSetColumnIndex(0);
+                        std::string upper;
+                        for (const char* p = k; *p; ++p)
+                            upper += (char)((*p >= 'a' && *p <= 'z') ? (*p - 32) : *p);
+                        ImGui::PushFont(labelFont);
+                        ImGui::PushStyleColor(ImGuiCol_Text, TextLow);
+                        ImGui::TextUnformatted(upper.c_str());
+                        ImGui::PopStyleColor();
+                        ImGui::PopFont();
+
+                        ImGui::TableSetColumnIndex(1);
+                        ImGui::PushFont(monoSmFont);
+                        ImGui::PushStyleColor(ImGuiCol_Text, TextMid);
+                        ImGui::PushTextWrapPos(0.f);
+                        ImGui::TextUnformatted(v.empty() ? "-" : v.c_str());
+                        ImGui::PopTextWrapPos();
+                        ImGui::PopStyleColor();
+                        ImGui::PopFont();
+                    };
+
+                    row("Version",       sel.version);
+                    row("Default chart", sel.defaultChart);
+                    row("Shader path",   sel.shaderPath);
+                    row("Last opened",   sel.lastModified);
+                    row("Path",          sel.path);
+                    ImGui::EndTable();
+                }
+
+                ImGui::EndChild();
+                ImGui::PopStyleVar(2);
+                ImGui::PopStyleColor();
             }
             ImGui::Spacing();
             ImGui::Spacing();
 
-            // Open Project — primary cyan CTA.
-            ImGui::PushStyleColor(ImGuiCol_Button,        WithAlpha(Cyan, 0.85f));
-            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, Cyan);
-            ImGui::PushStyleColor(ImGuiCol_ButtonActive,  Cyan);
-            ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(0, 0, 0, 1));
-            if (ImGui::Button("Open Project", ImVec2(-1, 32))) {
+            if (ui::PrimaryButton("Open Project", Cyan, ImVec2(-1, 32))) {
                 m_selectedProject = sel;
                 m_projectSelected = true;
                 if (engine) {
@@ -2701,24 +2752,16 @@ static void __unused_old_render() {
                 }
                 if (m_launchCallback) m_launchCallback(sel);
             }
-            ImGui::PopStyleColor(4);
             ImGui::Spacing();
 
-            // Reveal + Add file ghost row.
             const float halfW = (ImGui::GetContentRegionAvail().x - 6.f) * 0.5f;
-            ImGui::PushStyleColor(ImGuiCol_Button,        BgPanel2);
-            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, BgPanel3);
-            ImGui::PushStyleColor(ImGuiCol_Border,        BorderHi);
-            ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1.f);
-            if (ImGui::Button("Reveal", ImVec2(halfW, 26)))
+            if (ui::GhostButton("Reveal", ImVec2(halfW, 26)))
                 revealInExplorer(sel.path);
             ImGui::SameLine();
-            if (ImGui::Button("Add file##detail", ImVec2(halfW, 26))) {
+            if (ui::GhostButton("Add file##detail", ImVec2(halfW, 26))) {
                 m_showAddFileDialog = true;
                 m_addFileError.clear();
             }
-            ImGui::PopStyleVar();
-            ImGui::PopStyleColor(3);
             ImGui::Spacing();
 
             // Package APK card.

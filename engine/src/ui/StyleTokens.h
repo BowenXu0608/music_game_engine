@@ -23,15 +23,30 @@ inline constexpr ImVec4 TextMid   {0.659f, 0.675f, 0.714f, 1.f};
 inline constexpr ImVec4 TextLow   {0.369f, 0.388f, 0.431f, 1.f};
 inline constexpr ImVec4 TextDim   {0.227f, 0.243f, 0.278f, 1.f};
 
-// Accents (neon, oklch-derived, share chroma).
-inline constexpr ImVec4 Cyan       {0.133f, 0.902f, 1.000f, 1.f};   // primary
-inline constexpr ImVec4 CyanDim    {0.059f, 0.659f, 0.761f, 1.f};
-inline constexpr ImVec4 Magenta    {1.000f, 0.239f, 0.941f, 1.f};   // active / arc-pink
-inline constexpr ImVec4 MagentaDim {0.722f, 0.122f, 0.659f, 1.f};
-inline constexpr ImVec4 Lime       {0.490f, 1.000f, 0.353f, 1.f};   // success / FC
-inline constexpr ImVec4 Amber      {1.000f, 0.710f, 0.278f, 1.f};   // warning / good
-inline constexpr ImVec4 Red        {1.000f, 0.302f, 0.420f, 1.f};   // error / miss
-inline constexpr ImVec4 Violet     {0.627f, 0.439f, 1.000f, 1.f};   // copilot / AI
+// Accents — muted neon, oklch-derived, shared chroma (from tokens.js).
+inline constexpr ImVec4 Cyan       {0.373f, 0.722f, 0.788f, 1.f};   // primary — desaturated teal
+inline constexpr ImVec4 CyanDim    {0.227f, 0.471f, 0.518f, 1.f};
+inline constexpr ImVec4 Magenta    {0.784f, 0.478f, 0.722f, 1.f};   // secondary — dusty rose
+inline constexpr ImVec4 MagentaDim {0.541f, 0.310f, 0.494f, 1.f};
+inline constexpr ImVec4 Lime       {0.561f, 0.722f, 0.478f, 1.f};   // success / FC — sage
+inline constexpr ImVec4 LimeDim   {0.361f, 0.471f, 0.310f, 1.f};
+inline constexpr ImVec4 Amber      {0.831f, 0.647f, 0.455f, 1.f};   // warning / good — muted gold
+inline constexpr ImVec4 AmberDim  {0.541f, 0.420f, 0.295f, 1.f};
+inline constexpr ImVec4 Red        {0.788f, 0.439f, 0.502f, 1.f};   // error / miss — muted coral
+inline constexpr ImVec4 Violet     {0.541f, 0.498f, 0.690f, 1.f};   // copilot / AI — dusty violet
+
+// Original neon accents preserved for game/scene preview content.
+// Editor chrome uses the muted tokens above; game-facing UI (difficulty
+// pills, START button, song cards, scene overlays) uses these so the
+// player-visible appearance stays vibrant.
+inline constexpr ImVec4 NCyan       {0.133f, 0.902f, 1.000f, 1.f};
+inline constexpr ImVec4 NCyanDim    {0.059f, 0.659f, 0.761f, 1.f};
+inline constexpr ImVec4 NMagenta    {1.000f, 0.239f, 0.941f, 1.f};
+inline constexpr ImVec4 NMagentaDim {0.722f, 0.122f, 0.659f, 1.f};
+inline constexpr ImVec4 NLime       {0.490f, 1.000f, 0.353f, 1.f};
+inline constexpr ImVec4 NAmber      {1.000f, 0.710f, 0.278f, 1.f};
+inline constexpr ImVec4 NRed        {1.000f, 0.302f, 0.420f, 1.f};
+inline constexpr ImVec4 NViolet     {0.627f, 0.439f, 1.000f, 1.f};
 
 // Helpers — ImGui packed colors and alpha tweaks.
 inline ImU32 ToU32(const ImVec4& c) { return ImGui::ColorConvertFloat4ToU32(c); }

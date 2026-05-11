@@ -8,7 +8,10 @@
 #include <stdexcept>
 #include <cmath>
 
-namespace ui { ImFont* s_monoFont = nullptr; }
+namespace ui {
+    ImFont* s_monoFont = nullptr;
+    Fonts fonts;
+}
 using ui::s_monoFont;
 
 void ImGuiLayer::init(GLFWwindow* window, VulkanContext& ctx, VkRenderPass renderPass) {
@@ -43,11 +46,30 @@ void ImGuiLayer::init(GLFWwindow* window, VulkanContext& ctx, VkRenderPass rende
         // Falls back to nullptr if file not found; getLogoFont() handles that
     }
 
-    // Mono font for timecodes / paths / numbers per MIGRATION §2 type table.
-    // Cousine ships with the imgui demo asset bundle; if it's missing we
-    // fall back to the default font in PushMono.
-    const char* cousinePath = "../../third_party/imgui/misc/fonts/Cousine-Regular.ttf";
-    s_monoFont = io.Fonts->AddFontFromFileTTF(cousinePath, 13.f);
+    // Inter font family at multiple weights/sizes for the prototype design language.
+    const char* interR  = "../../third_party/imgui/misc/fonts/Inter-Regular.ttf";
+    const char* interM  = "../../third_party/imgui/misc/fonts/Inter-Medium.ttf";
+    const char* interSB = "../../third_party/imgui/misc/fonts/Inter-SemiBold.ttf";
+    const char* jbmono  = "../../third_party/imgui/misc/fonts/JetBrainsMono-Regular.ttf";
+
+    ui::fonts.body    = io.Fonts->AddFontFromFileTTF(interR,  13.f);
+    ui::fonts.bodyMed = io.Fonts->AddFontFromFileTTF(interM,  13.f);
+    ui::fonts.label   = io.Fonts->AddFontFromFileTTF(interSB, 11.f);
+    ui::fonts.heading = io.Fonts->AddFontFromFileTTF(interSB, 16.f);
+    ui::fonts.title   = io.Fonts->AddFontFromFileTTF(interSB, 18.f);
+    ui::fonts.mono    = io.Fonts->AddFontFromFileTTF(jbmono,  13.f);
+    ui::fonts.monoSm  = io.Fonts->AddFontFromFileTTF(jbmono,  11.f);
+    ui::fonts.monoLg  = io.Fonts->AddFontFromFileTTF(jbmono,  18.f);
+
+    if (ui::fonts.body) io.FontDefault = ui::fonts.body;
+    s_monoFont = ui::fonts.mono;
+
+    // Fallback: Cousine if JetBrains Mono failed to load.
+    if (!s_monoFont) {
+        const char* cousinePath = "../../third_party/imgui/misc/fonts/Cousine-Regular.ttf";
+        s_monoFont = io.Fonts->AddFontFromFileTTF(cousinePath, 13.f);
+        ui::fonts.mono = s_monoFont;
+    }
 
     ImGui_ImplGlfw_InitForVulkan(window, true);
 

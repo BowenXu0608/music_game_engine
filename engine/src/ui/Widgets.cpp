@@ -8,15 +8,13 @@ namespace ui {
 bool SectionHeader(const char* label, std::function<void()> rightSlot) {
     using namespace tokens;
 
-    // Sections are always expanded — the right Hierarchy filter already
-    // limits the panel to a single section, so there is no fold/unfold
-    // affordance to expose. No chevron either.
+    ImFont* labelFont = fonts.label ? fonts.label : ImGui::GetFont();
+    const float labelFontSize = fonts.label ? fonts.label->FontSize : ImGui::GetFontSize() * 0.85f;
+    const float letterSpacing = labelFontSize * 0.15f;
+
     const ImGuiStyle& style = ImGui::GetStyle();
-    const float lineH = ImGui::GetTextLineHeight() + style.FramePadding.y * 2.f;
+    const float lineH = labelFontSize + style.FramePadding.y * 2.f + 4.f;
     const float fullW = ImGui::GetContentRegionAvail().x;
-    // Right slot is measured (font + style derived) rather than reserved by
-    // a hardcoded pixel count, so the pill stays fully visible at any DPI
-    // scale or font size. Margin = one ItemSpacing.x — also style-relative.
     const float pillMargin  = style.ItemSpacing.x;
     const float rightReserve = rightSlot ? (DefaultPillWidth() + pillMargin) : 0.f;
 
@@ -25,27 +23,21 @@ bool SectionHeader(const char* label, std::function<void()> rightSlot) {
     const float  startX = ImGui::GetCursorPosX();
     const float  startY = ImGui::GetCursorPosY();
 
-    // Reserve the row's vertical space.
     ImGui::Dummy(ImVec2(fullW, lineH));
 
-    // Uppercase label flush-left.
     std::string upper;
     upper.reserve(std::strlen(label));
     for (const char* p = label; *p; ++p)
         upper += static_cast<char>((*p >= 'a' && *p <= 'z') ? (*p - 32) : *p);
-    ImGui::GetWindowDrawList()->AddText(
-        nullptr, ImGui::GetFontSize() * 0.85f,
-        {cursorScreen.x + 4.f,
-         cursorScreen.y + style.FramePadding.y * 0.5f + 2.f},
-        ToU32(TextLow), upper.c_str());
 
-    // Right slot inline with the label row — set cursor back onto the row,
-    // anchored rightReserve px from the right edge.
+    DrawSpacedText(ImGui::GetWindowDrawList(), labelFont, labelFontSize,
+        {cursorScreen.x + 4.f,
+         cursorScreen.y + (lineH - labelFontSize) * 0.5f},
+        ToU32(TextLow), upper.c_str(), letterSpacing);
+
     if (rightSlot) {
         ImGui::SetCursorPos(ImVec2(startX + fullW - rightReserve, startY));
         rightSlot();
-        // Restore cursor below the header so subsequent widgets flow
-        // normally, regardless of how tall the right-slot widget is.
         ImGui::SetCursorPos(ImVec2(startX, startY + lineH + style.ItemSpacing.y));
     }
 
@@ -106,21 +98,33 @@ bool DefaultPill(const char* id) {
 
 void Pill(const char* label, const ImVec4& color, bool solid) {
     using namespace tokens;
+
+    std::string upper;
+    for (const char* p = label; *p; ++p)
+        upper += static_cast<char>((*p >= 'a' && *p <= 'z') ? (*p - 32) : *p);
+
+    ImFont* font = fonts.label ? fonts.label : ImGui::GetFont();
+    const float fontSize = font->FontSize;
+    const float spacing = fontSize * 0.04f;
+    const float textW = CalcSpacedTextWidth(font, fontSize, upper.c_str(), spacing);
+    const float padX = 8.f, padY = 3.f;
+    const float pillW = textW + padX * 2.f;
+    const float pillH = fontSize + padY * 2.f;
+
+    const ImVec2 origin = ImGui::GetCursorScreenPos();
+    ImGui::InvisibleButton(label, {pillW, pillH});
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+
     const ImVec4 bg = solid ? color : WithAlpha(color, 0.16f);
     const ImVec4 fg = solid ? ImVec4{0.f, 0.f, 0.f, 1.f} : color;
     const ImVec4 br = solid ? color : WithAlpha(color, 0.40f);
+    const ImVec2 pMax = {origin.x + pillW, origin.y + pillH};
 
-    ImGui::PushStyleColor(ImGuiCol_Button,        bg);
-    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, bg);
-    ImGui::PushStyleColor(ImGuiCol_ButtonActive,  bg);
-    ImGui::PushStyleColor(ImGuiCol_Text,          fg);
-    ImGui::PushStyleColor(ImGuiCol_Border,        br);
-    ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1.f);
-    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding,  {8.f, 2.f});
-    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 999.f);
-    ImGui::SmallButton(label);
-    ImGui::PopStyleVar(3);
-    ImGui::PopStyleColor(5);
+    dl->AddRectFilled(origin, pMax, ToU32(bg), 999.f);
+    dl->AddRect(origin, pMax, ToU32(br), 999.f);
+    DrawSpacedText(dl, font, fontSize,
+        {origin.x + padX, origin.y + padY},
+        ToU32(fg), upper.c_str(), spacing);
 }
 
 bool LabeledChip(const char* label, int keyHint, const ImVec4& accent, bool active) {
@@ -287,6 +291,17 @@ bool Dropdown(const char* id,
     return changed;
 }
 
+static ImVec4 dimForAccent(const ImVec4& accent) {
+    using namespace tokens;
+    if (accent.x == Cyan.x && accent.y == Cyan.y)       return CyanDim;
+    if (accent.x == Magenta.x && accent.y == Magenta.y) return MagentaDim;
+    if (accent.x == Lime.x && accent.y == Lime.y)       return LimeDim;
+    if (accent.x == Amber.x && accent.y == Amber.y)     return AmberDim;
+    if (accent.x == Red.x && accent.y == Red.y)         return WithAlpha(Red, 0.5f);
+    if (accent.x == Violet.x && accent.y == Violet.y)   return WithAlpha(Violet, 0.5f);
+    return WithAlpha(accent, 0.5f);
+}
+
 bool Slider(const char* label,
             float* v,
             float vMin,
@@ -296,15 +311,11 @@ bool Slider(const char* label,
     using namespace tokens;
     ImGui::PushID(label);
 
-    // Two-row layout: top label + mono right-aligned value, bottom 6 px track
-    // with accent fill from min to current value. Click/drag the track to
-    // change value (matches ImGui::SliderFloat behavior under the hood).
     const ImVec2 origin = ImGui::GetCursorScreenPos();
     const float fullW = ImGui::GetContentRegionAvail().x;
     ImDrawList* dl = ImGui::GetWindowDrawList();
     const float rowH    = ImGui::GetTextLineHeight();
 
-    // Label row.
     if (label && *label && label[0] != '#') {
         dl->AddText(origin, ToU32(TextMid), label);
         char buf[48];
@@ -312,22 +323,19 @@ bool Slider(const char* label,
             snprintf(buf, sizeof(buf), "%.2f%s", *v, suffix);
         else
             snprintf(buf, sizeof(buf), "%.2f", *v);
-        const float bw = ImGui::CalcTextSize(buf).x;
-        ImFont* mono = s_monoFont ? s_monoFont : ImGui::GetFont();
-        dl->AddText(mono, ImGui::GetFontSize(),
-                    {origin.x + fullW - bw, origin.y},
+        ImFont* mono = fonts.mono ? fonts.mono : ImGui::GetFont();
+        const float monoSize = mono->FontSize;
+        ImVec2 bsz = mono->CalcTextSizeA(monoSize, FLT_MAX, 0.f, buf);
+        dl->AddText(mono, monoSize,
+                    {origin.x + fullW - bsz.x, origin.y + (rowH - monoSize) * 0.5f},
                     ToU32(TextHi), buf);
     }
 
-    // Track.
     const float trackY = origin.y + rowH + 4.f;
-    const float trackH = 6.f;
+    const float trackH = 4.f;
     const ImVec2 trackMin = {origin.x, trackY};
     const ImVec2 trackMax = {origin.x + fullW, trackY + trackH};
 
-    // Hit area covers a wider zone so the slider is comfortable to grab.
-    const ImVec2 hitMin = {origin.x, trackY - 5.f};
-    const ImVec2 hitMax = {origin.x + fullW, trackY + trackH + 5.f};
     ImGui::SetCursorScreenPos({origin.x, origin.y});
     ImGui::InvisibleButton("##slider", {fullW, rowH + 4.f + trackH + 8.f});
     const bool hovered = ImGui::IsItemHovered();
@@ -340,21 +348,23 @@ bool Slider(const char* label,
         if (nv != *v) { *v = nv; changed = true; }
     }
 
-    // Draw track + accent fill + thumb.
     dl->AddRectFilled(trackMin, trackMax, ToU32(BgPanel3), trackH * 0.5f);
-    dl->AddRect(trackMin, trackMax, ToU32(Border), trackH * 0.5f);
     const float pct = (vMax > vMin) ? std::max(0.f, std::min(1.f,
         (*v - vMin) / (vMax - vMin))) : 0.f;
     const float fillEnd = trackMin.x + fullW * pct;
     if (fillEnd > trackMin.x + 0.5f) {
-        dl->AddRectFilled(trackMin, {fillEnd, trackMax.y},
-                          ToU32(accent), trackH * 0.5f);
+        const ImVec4 dimAccent = dimForAccent(accent);
+        dl->AddRectFilled(
+            {trackMin.x, trackMin.y - 1.f},
+            {fillEnd, trackMax.y + 1.f},
+            ToU32(WithAlpha(accent, 0.12f)), trackH);
+        dl->AddRectFilledMultiColor(trackMin, {fillEnd, trackMax.y},
+            ToU32(dimAccent), ToU32(accent), ToU32(accent), ToU32(dimAccent));
     }
+
     const ImVec2 thumb = {fillEnd, (trackMin.y + trackMax.y) * 0.5f};
-    const float thumbR = active ? 7.f : (hovered ? 6.f : 5.f);
-    dl->AddCircleFilled(thumb, thumbR + 2.f, ToU32(WithAlpha(accent, 0.25f)));
+    const float thumbR = active ? 6.5f : (hovered ? 6.f : 5.f);
     dl->AddCircleFilled(thumb, thumbR, IM_COL32(255, 255, 255, 255));
-    dl->AddCircle(thumb, thumbR, ToU32(accent), 0, 1.5f);
 
     ImGui::PopID();
     return changed;
@@ -418,35 +428,31 @@ bool SegBar(const char* id,
 float TopBar(std::initializer_list<const char*> crumbs,
              std::function<void()> rightSlot) {
     using namespace tokens;
-    const float toolbarH = 56.f;
+    const float toolbarH = 44.f;
     const ImVec2 origin = ImGui::GetCursorScreenPos();
     const float fullW   = ImGui::GetContentRegionAvail().x;
     ImDrawList* dl = ImGui::GetWindowDrawList();
 
-    // Pure-black bar — let the void window underneath show through. Only
-    // the thin bottom rule separates it from the body chrome below.
     dl->AddLine({origin.x, origin.y + toolbarH},
                 {origin.x + fullW, origin.y + toolbarH},
                 ToU32(Border), 1.f);
 
-    // Solid gradient `M` tile (28x28) at left.
-    const ImVec2 tileMin = {origin.x + 14.f, origin.y + 14.f};
-    const ImVec2 tileMax = {tileMin.x + 28.f, tileMin.y + 28.f};
+    // Solid gradient `M` tile (22x22) at left.
+    const ImVec2 tileMin = {origin.x + 11.f, origin.y + 11.f};
+    const ImVec2 tileMax = {tileMin.x + 22.f, tileMin.y + 22.f};
     dl->AddRectFilledMultiColor(tileMin, tileMax,
         ToU32(Cyan), ToU32(Magenta),
         ToU32(Magenta), ToU32(Cyan));
-    dl->AddText(nullptr, ImGui::GetFontSize() * 1.05f,
-                {tileMin.x + 8.f, tileMin.y + 6.f},
+    dl->AddText(nullptr, ImGui::GetFontSize() * 0.95f,
+                {tileMin.x + 6.f, tileMin.y + 4.f},
                 IM_COL32(0, 0, 0, 255), "M");
 
-    // Crumbs — drawn directly with ImDrawList so they're not affected by
-    // ImGui::Item layout / clipping. Last crumb is white, rest are TextLow.
     {
-        float cx = tileMax.x + 14.f;
-        const float cy = origin.y + 18.f;
-        const ImU32 colHi  = IM_COL32(255, 255, 255, 255);
-        const ImU32 colLow = IM_COL32(255, 255, 255, 255);
-        const ImU32 colSep = IM_COL32(255, 255, 255, 255);
+        float cx = tileMax.x + 12.f;
+        const float cy = origin.y + 14.f;
+        const ImU32 colHi  = ToU32(TextHi);
+        const ImU32 colLow = ToU32(TextLow);
+        const ImU32 colSep = ToU32(TextDim);
         int idx = 0;
         int total = (int)crumbs.size();
         for (auto* c : crumbs) {
@@ -468,7 +474,7 @@ float TopBar(std::initializer_list<const char*> crumbs,
     if (rightSlot) {
         const float reserve = std::min(fullW * 0.55f, 540.f);
         const float rightX  = origin.x + fullW - reserve - 12.f;
-        ImGui::SetCursorScreenPos({rightX, origin.y + 12.f});
+        ImGui::SetCursorScreenPos({rightX, origin.y + 8.f});
         ImGui::PushID("##topbar_right");
         rightSlot();
         ImGui::PopID();
@@ -549,6 +555,222 @@ bool TopTestGame() {
 
     ImGui::PopStyleVar(2);
     ImGui::PopStyleColor(4);
+    return clicked;
+}
+
+bool Toggle(const char* label, bool* v, const ImVec4& accent) {
+    using namespace tokens;
+    ImGui::PushID(label);
+
+    const float trackW = 36.f, trackH = 18.f;
+    const float knobR  = 7.f;
+    const ImVec2 origin = ImGui::GetCursorScreenPos();
+
+    bool changed = false;
+    ImGui::InvisibleButton("##toggle", {trackW, trackH});
+    if (ImGui::IsItemClicked()) { *v = !*v; changed = true; }
+
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const float rounding = trackH * 0.5f;
+    const ImVec4 bg = *v ? WithAlpha(accent, 0.35f) : BgPanel3;
+    dl->AddRectFilled(origin, {origin.x + trackW, origin.y + trackH},
+                      ToU32(bg), rounding);
+    dl->AddRect(origin, {origin.x + trackW, origin.y + trackH},
+                ToU32(*v ? accent : Border), rounding);
+
+    const float knobX = *v ? (origin.x + trackW - knobR - 2.f)
+                           : (origin.x + knobR + 2.f);
+    const float knobY = origin.y + trackH * 0.5f;
+    if (*v)
+        dl->AddCircle({knobX, knobY}, knobR + 2.f, ToU32(WithAlpha(accent, 0.25f)), 0, 1.5f);
+    dl->AddCircleFilled({knobX, knobY}, knobR,
+                        ToU32(*v ? accent : TextMid));
+
+    if (label && *label && label[0] != '#') {
+        ImGui::SameLine(0.f, 8.f);
+        ImGui::TextUnformatted(label);
+    }
+
+    ImGui::PopID();
+    return changed;
+}
+
+bool Field(const char* label, char* buf, int bufSize, bool mono) {
+    using namespace tokens;
+    ImGui::PushID(label);
+
+    if (label && *label && label[0] != '#') {
+        if (fonts.label) ImGui::PushFont(fonts.label);
+        ImGui::PushStyleColor(ImGuiCol_Text, TextMid);
+        ImGui::TextUnformatted(label);
+        ImGui::PopStyleColor();
+        if (fonts.label) ImGui::PopFont();
+    }
+
+    ImGui::PushStyleColor(ImGuiCol_FrameBg,        BgPanel3);
+    ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, WithAlpha(Cyan, 0.12f));
+    ImGui::PushStyleColor(ImGuiCol_FrameBgActive,  WithAlpha(Cyan, 0.20f));
+    ImGui::PushStyleColor(ImGuiCol_Border,         Border);
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1.f);
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding,   5.f);
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding,    {8.f, 5.f});
+
+    ImFont* inputFont = mono ? (fonts.monoSm ? fonts.monoSm : s_monoFont) : nullptr;
+    if (inputFont) ImGui::PushFont(inputFont);
+    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
+    bool changed = ImGui::InputText("##field", buf, bufSize);
+    if (inputFont) ImGui::PopFont();
+
+    ImGui::PopStyleVar(3);
+    ImGui::PopStyleColor(4);
+    ImGui::PopID();
+    return changed;
+}
+
+bool FieldFloat(const char* label, float* v, const char* format, bool mono) {
+    using namespace tokens;
+    ImGui::PushID(label);
+
+    if (label && *label && label[0] != '#') {
+        if (fonts.label) ImGui::PushFont(fonts.label);
+        ImGui::PushStyleColor(ImGuiCol_Text, TextMid);
+        ImGui::TextUnformatted(label);
+        ImGui::PopStyleColor();
+        if (fonts.label) ImGui::PopFont();
+    }
+
+    ImGui::PushStyleColor(ImGuiCol_FrameBg,        BgPanel3);
+    ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, WithAlpha(Cyan, 0.12f));
+    ImGui::PushStyleColor(ImGuiCol_FrameBgActive,  WithAlpha(Cyan, 0.20f));
+    ImGui::PushStyleColor(ImGuiCol_Border,         Border);
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1.f);
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding,   5.f);
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding,    {8.f, 5.f});
+
+    ImFont* inputFont = mono ? (fonts.monoSm ? fonts.monoSm : s_monoFont) : nullptr;
+    if (inputFont) ImGui::PushFont(inputFont);
+    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
+    bool changed = ImGui::InputFloat("##field", v, 0.f, 0.f, format);
+    if (inputFont) ImGui::PopFont();
+
+    ImGui::PopStyleVar(3);
+    ImGui::PopStyleColor(4);
+    ImGui::PopID();
+    return changed;
+}
+
+void Placeholder(const char* label, float height, const ImVec4& accent) {
+    using namespace tokens;
+    const ImVec2 origin = ImGui::GetCursorScreenPos();
+    const float w = ImGui::GetContentRegionAvail().x;
+    ImGui::Dummy({w, height});
+
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const ImVec2 pMin = origin;
+    const ImVec2 pMax = {origin.x + w, origin.y + height};
+
+    const ImU32 stripeCol = ToU32(WithAlpha(accent, 0.06f));
+    const float step = 12.f;
+    dl->PushClipRect(pMin, pMax, true);
+    for (float x = -height; x < w + height; x += step) {
+        dl->AddLine({pMin.x + x, pMax.y},
+                    {pMin.x + x + height, pMin.y},
+                    stripeCol, 1.f);
+    }
+    dl->PopClipRect();
+
+    dl->AddRect(pMin, pMax, ToU32(WithAlpha(accent, 0.25f)), 5.f, 0, 1.f);
+
+    if (label && *label) {
+        const ImVec2 ts = ImGui::CalcTextSize(label);
+        dl->AddText({origin.x + (w - ts.x) * 0.5f,
+                     origin.y + (height - ts.y) * 0.5f},
+                    ToU32(WithAlpha(accent, 0.45f)), label);
+    }
+}
+
+// ── Letter-spacing text helpers ──────────────────────────────────────────────
+
+void DrawSpacedText(ImDrawList* dl, ImFont* font, float fontSize,
+                    ImVec2 pos, ImU32 col, const char* text, float extraSpacing) {
+    if (!font) font = ImGui::GetFont();
+    if (fontSize <= 0.f) fontSize = font->FontSize;
+    const float scale = fontSize / font->FontSize;
+    float x = pos.x;
+    const char* p = text;
+    while (*p) {
+        unsigned int c = (unsigned int)*p;
+        const ImFontGlyph* glyph = font->FindGlyph((ImWchar)c);
+        if (glyph) {
+            dl->AddText(font, fontSize, {x, pos.y}, col, p, p + 1);
+            x += glyph->AdvanceX * scale + extraSpacing;
+        }
+        ++p;
+    }
+}
+
+float CalcSpacedTextWidth(ImFont* font, float fontSize, const char* text, float extraSpacing) {
+    if (!font) font = ImGui::GetFont();
+    if (fontSize <= 0.f) fontSize = font->FontSize;
+    const float scale = fontSize / font->FontSize;
+    float w = 0.f;
+    int len = 0;
+    for (const char* p = text; *p; ++p, ++len) {
+        const ImFontGlyph* glyph = font->FindGlyph((ImWchar)(unsigned char)*p);
+        if (glyph) w += glyph->AdvanceX * scale;
+    }
+    if (len > 1) w += extraSpacing * (float)(len - 1);
+    return w;
+}
+
+// ── Button style helpers ────────────────────────────────────────────────────
+
+bool PrimaryButton(const char* label, const ImVec4& accent, ImVec2 size) {
+    using namespace tokens;
+    ImGui::PushStyleColor(ImGuiCol_Button,        WithAlpha(accent, 0.85f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered,  accent);
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive,   accent);
+    ImGui::PushStyleColor(ImGuiCol_Text,           ImVec4(0, 0.05f, 0.08f, 1));
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 5.f);
+    bool clicked = ImGui::Button(label, size);
+    ImGui::PopStyleVar();
+    ImGui::PopStyleColor(4);
+    return clicked;
+}
+
+bool GhostButton(const char* label, ImVec2 size) {
+    using namespace tokens;
+    ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0, 0, 0, 0));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered,  BgPanel2);
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive,   BgPanel3);
+    ImGui::PushStyleColor(ImGuiCol_Text,           TextMid);
+    ImGui::PushStyleColor(ImGuiCol_Border,         BorderHi);
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1.f);
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding,   5.f);
+    bool clicked = ImGui::Button(label, size);
+    ImGui::PopStyleVar(2);
+    ImGui::PopStyleColor(5);
+    return clicked;
+}
+
+bool IconButton(const char* id, ImVec2 size,
+                std::function<void(ImDrawList*, ImVec2, float, ImU32)> drawIcon) {
+    using namespace tokens;
+    ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0, 0, 0, 0));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered,  WithAlpha(TextMid, 0.10f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive,   WithAlpha(TextMid, 0.18f));
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 0.f);
+    bool clicked = ImGui::Button(id, size);
+    ImGui::PopStyleVar();
+    ImGui::PopStyleColor(3);
+    if (drawIcon) {
+        ImVec2 rMin = ImGui::GetItemRectMin();
+        ImVec2 rMax = ImGui::GetItemRectMax();
+        ImVec2 center = {(rMin.x + rMax.x) * 0.5f, (rMin.y + rMax.y) * 0.5f};
+        float sz = std::min(size.x, size.y) * 0.4f;
+        ImU32 col = ToU32(ImGui::IsItemHovered() ? TextHi : TextMid);
+        drawIcon(ImGui::GetWindowDrawList(), center, sz, col);
+    }
     return clicked;
 }
 

@@ -39,10 +39,11 @@ using json = nlohmann::json;
 // drop zones (background, logo image, audio).
 static void drawEmptyDropPlaceholder(ImDrawList* dl, ImVec2 pos, ImVec2 size,
                                      const char* caption) {
-    const ImU32 bgCol     = IM_COL32(8, 14, 18, 255);
-    const ImU32 stripeCol = IM_COL32(34, 230, 255, 60);
-    const ImU32 edgeCol   = IM_COL32(34, 230, 255, 255);
-    const ImU32 textCol   = IM_COL32(34, 230, 255, 255);
+    using namespace ui::tokens;
+    const ImU32 bgCol     = ToU32(BgBase);
+    const ImU32 stripeCol = ToU32(WithAlpha(Cyan, 0.24f));
+    const ImU32 edgeCol   = ToU32(Cyan);
+    const ImU32 textCol   = ToU32(Cyan);
     const ImVec2 maxPt(pos.x + size.x, pos.y + size.y);
 
     dl->AddRectFilled(pos, maxPt, bgCol, 4.f);
@@ -530,7 +531,7 @@ void StartScreenEditor::render(Engine* engine) {
 
     if (engine) {
         engine->songEditor().setOverlayBottomReserve(assetsH + assetsSplitH);
-        engine->songEditor().setOverlayTopReserve(56.f);  // ui::TopBar height
+        engine->songEditor().setOverlayTopReserve(44.f);  // ui::TopBar height
     }
 
     // The mock renders all three editor columns on the same pure-black
@@ -1126,18 +1127,18 @@ void StartScreenEditor::renderProperties() {
         ImGui::InvisibleButton("##bgzone", ImVec2(zoneW, zoneH));
         ImDrawList* dlBg = ImGui::GetWindowDrawList();
         ImU32 borderCol = ImGui::IsItemHovered()
-            ? IM_COL32(100, 160, 255, 255) : IM_COL32(100, 100, 120, 180);
+            ? ui::tokens::ToU32(ui::tokens::Cyan) : ui::tokens::ToU32(ui::tokens::WithAlpha(ui::tokens::TextLow, 0.70f));
         if (m_bgType == BgType::Image && m_bgDesc) {
             dlBg->AddImage((ImTextureID)(uint64_t)m_bgDesc, zonePos,
                            ImVec2(zonePos.x + zoneW, zonePos.y + zoneH));
         } else if (m_bgFile[0] != '\0') {
             dlBg->AddRectFilled(zonePos, ImVec2(zonePos.x + zoneW, zonePos.y + zoneH),
-                                IM_COL32(30, 30, 45, 255), 4.f);
+                                ui::tokens::ToU32(ui::tokens::BgPanel2), 4.f);
             std::string fname = fs::path(m_bgFile).filename().string();
             ImVec2 tsz = ImGui::CalcTextSize(fname.c_str());
             dlBg->AddText(ImVec2(zonePos.x + zoneW * 0.5f - tsz.x * 0.5f,
                                  zonePos.y + zoneH * 0.5f - tsz.y * 0.5f),
-                          IM_COL32(200, 200, 200, 255), fname.c_str());
+                          ui::tokens::ToU32(ui::tokens::TextMid), fname.c_str());
         } else {
             drawEmptyDropPlaceholder(dlBg, zonePos, ImVec2(zoneW, zoneH),
                                      "BG.PNG  -  DROP IMAGE OR VIDEO");
@@ -1211,18 +1212,18 @@ void StartScreenEditor::renderProperties() {
             ImGui::InvisibleButton("##logozone", ImVec2(lzoneW, lzoneH));
             ImDrawList* dlLogo = ImGui::GetWindowDrawList();
             ImU32 lborderCol = ImGui::IsItemHovered()
-                ? IM_COL32(100, 160, 255, 255) : IM_COL32(100, 100, 120, 180);
+                ? ui::tokens::ToU32(ui::tokens::Cyan) : ui::tokens::ToU32(ui::tokens::WithAlpha(ui::tokens::TextLow, 0.70f));
             if (m_logoDesc) {
                 dlLogo->AddImage((ImTextureID)(uint64_t)m_logoDesc, lzonePos,
                                  ImVec2(lzonePos.x + lzoneW, lzonePos.y + lzoneH));
             } else if (m_logoImageFile[0] != '\0') {
                 dlLogo->AddRectFilled(lzonePos, ImVec2(lzonePos.x + lzoneW, lzonePos.y + lzoneH),
-                                     IM_COL32(30, 30, 45, 255), 4.f);
+                                     ui::tokens::ToU32(ui::tokens::BgPanel2), 4.f);
                 std::string fname = fs::path(m_logoImageFile).filename().string();
                 ImVec2 tsz = ImGui::CalcTextSize(fname.c_str());
                 dlLogo->AddText(ImVec2(lzonePos.x + lzoneW * 0.5f - tsz.x * 0.5f,
                                       lzonePos.y + lzoneH * 0.5f - tsz.y * 0.5f),
-                                IM_COL32(200, 200, 200, 255), fname.c_str());
+                                ui::tokens::ToU32(ui::tokens::TextMid), fname.c_str());
             } else {
                 drawEmptyDropPlaceholder(dlLogo, lzonePos,
                                          ImVec2(lzoneW, lzoneH),
@@ -1332,15 +1333,15 @@ void StartScreenEditor::renderProperties() {
             ImGui::InvisibleButton(label, ImVec2(azW, azH));
             ImDrawList* dl = ImGui::GetWindowDrawList();
             ImU32 border = ImGui::IsItemHovered()
-                ? IM_COL32(100, 160, 255, 255) : IM_COL32(100, 100, 120, 180);
+                ? ui::tokens::ToU32(ui::tokens::Cyan) : ui::tokens::ToU32(ui::tokens::WithAlpha(ui::tokens::TextLow, 0.70f));
             if (buf[0] != '\0') {
                 dl->AddRectFilled(azPos, ImVec2(azPos.x + azW, azPos.y + azH),
-                                  IM_COL32(25, 30, 40, 220), 4.f);
+                                  ui::tokens::ToU32(ui::tokens::BgPanel2), 4.f);
                 std::string fname = fs::path(buf).filename().string();
                 std::string display = "[BGM]  " + fname;
                 ImVec2 adtsz = ImGui::CalcTextSize(display.c_str());
                 dl->AddText(ImVec2(azPos.x + 8.f, azPos.y + azH * 0.5f - adtsz.y * 0.5f),
-                            IM_COL32(180, 220, 255, 255), display.c_str());
+                            ui::tokens::ToU32(ui::tokens::WithAlpha(ui::tokens::Cyan, 0.90f)), display.c_str());
                 dl->AddRect(azPos, ImVec2(azPos.x + azW, azPos.y + azH),
                             border, 4.f, 0, 1.5f);
             } else {
@@ -2185,12 +2186,12 @@ void StartScreenEditor::renderAssets() {
         ImVec2 p  = ImGui::GetCursorScreenPos();
         ImVec2 sz = ImGui::GetContentRegionAvail();
         dl->AddRect(p, ImVec2(p.x + sz.x, p.y + sz.y - 4),
-                    IM_COL32(120, 120, 120, 100), 4.f, 0, 1.5f);
+                    ui::tokens::ToU32(ui::tokens::WithAlpha(ui::tokens::TextLow, 0.39f)), 4.f, 0, 1.5f);
         const char* hint = "Drop image / GIF / video files here, or click Open File...";
         ImVec2 tsz = ImGui::CalcTextSize(hint);
         dl->AddText(ImVec2(p.x + sz.x * 0.5f - tsz.x * 0.5f,
                            p.y + sz.y * 0.5f - tsz.y * 0.5f),
-                    IM_COL32(150, 150, 150, 200), hint);
+                    ui::tokens::ToU32(ui::tokens::TextLow), hint);
         return;
     }
 
@@ -2229,15 +2230,15 @@ void StartScreenEditor::renderAssets() {
                              ImVec2(thumbPos.x + thumbSize, thumbPos.y + thumbSize));
             } else {
                 dl->AddRectFilled(thumbPos, ImVec2(thumbPos.x + thumbSize, thumbPos.y + thumbSize),
-                                  IM_COL32(50, 50, 70, 255), 4.f);
+                                  ui::tokens::ToU32(ui::tokens::BgPanel3), 4.f);
                 ImVec2 isz = ImGui::CalcTextSize("...");
                 dl->AddText(ImVec2(thumbPos.x + thumbSize * 0.5f - isz.x * 0.5f,
                                    thumbPos.y + thumbSize * 0.5f - isz.y * 0.5f),
-                            IM_COL32(160, 160, 180, 200), "...");
+                            ui::tokens::ToU32(ui::tokens::TextLow), "...");
             }
             if (ImGui::IsItemHovered()) {
                 dl->AddRect(thumbPos, ImVec2(thumbPos.x + thumbSize, thumbPos.y + thumbSize),
-                            IM_COL32(100, 160, 255, 200), 4.f, 0, 2.f);
+                            ui::tokens::ToU32(ui::tokens::WithAlpha(ui::tokens::Cyan, 0.78f)), 4.f, 0, 2.f);
                 // Large texture preview so the user can see detail that the
                 // 80px thumbnail collapses away.
                 if (thumb) {
@@ -2288,15 +2289,15 @@ void StartScreenEditor::renderAssets() {
         ImGui::InvisibleButton("##a", ImVec2(thumbSize, thumbSize));
         ImDrawList* dl = ImGui::GetWindowDrawList();
         dl->AddRectFilled(thumbPos, ImVec2(thumbPos.x + thumbSize, thumbPos.y + thumbSize),
-                          IM_COL32(30, 40, 60, 255), 4.f);
+                          ui::tokens::ToU32(ui::tokens::WithAlpha(ui::tokens::CyanDim, 0.40f)), 4.f);
         const char* icon = "MUS";
         ImVec2 aisz = ImGui::CalcTextSize(icon);
         dl->AddText(ImVec2(thumbPos.x + thumbSize * 0.5f - aisz.x * 0.5f,
                            thumbPos.y + thumbSize * 0.5f - aisz.y * 0.5f),
-                    IM_COL32(100, 180, 255, 220), icon);
+                    ui::tokens::ToU32(ui::tokens::Cyan), icon);
         if (ImGui::IsItemHovered()) {
             dl->AddRect(thumbPos, ImVec2(thumbPos.x + thumbSize, thumbPos.y + thumbSize),
-                        IM_COL32(100, 160, 255, 200), 4.f, 0, 2.f);
+                        ui::tokens::ToU32(ui::tokens::WithAlpha(ui::tokens::Cyan, 0.78f)), 4.f, 0, 2.f);
             ImGui::SetTooltip("%s", shortenForTooltip(name).c_str());
         }
         if (ImGui::BeginDragDropSource()) {
@@ -2343,16 +2344,16 @@ void StartScreenEditor::renderAssets() {
         } else {
             dl->AddRectFilled(thumbPos,
                               ImVec2(thumbPos.x + thumbSize, thumbPos.y + thumbSize),
-                              IM_COL32(50, 30, 70, 255), 4.f);
+                              ui::tokens::ToU32(ui::tokens::WithAlpha(ui::tokens::MagentaDim, 0.40f)), 4.f);
             const char* icon = "MAT";
             ImVec2 mizs = ImGui::CalcTextSize(icon);
             dl->AddText(ImVec2(thumbPos.x + thumbSize * 0.5f - mizs.x * 0.5f,
                                thumbPos.y + thumbSize * 0.5f - mizs.y * 0.5f),
-                        IM_COL32(220, 180, 255, 220), icon);
+                        ui::tokens::ToU32(ui::tokens::Magenta), icon);
         }
         if (ImGui::IsItemHovered()) {
             dl->AddRect(thumbPos, ImVec2(thumbPos.x + thumbSize, thumbPos.y + thumbSize),
-                        IM_COL32(200, 140, 255, 200), 4.f, 0, 2.f);
+                        ui::tokens::ToU32(ui::tokens::WithAlpha(ui::tokens::Violet, 0.78f)), 4.f, 0, 2.f);
             // Render a live material preview in the tooltip so the user can
             // judge the material without entering the editor.
             const MaterialAsset* ma = m_engine

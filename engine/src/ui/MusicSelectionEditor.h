@@ -74,6 +74,7 @@ private:
     // ── Panel rendering ──────────────────────────────────────────────────────
     void renderPreview(float width, float height);
     void renderHierarchy(float width, float height);
+    void renderProperties(float width, float height);
 
     // ── Preview sub-elements ─────────────────────────────────────────────────
     void renderSetWheel(ImVec2 origin, float width, float height);

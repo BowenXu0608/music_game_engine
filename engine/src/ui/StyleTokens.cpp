@@ -3,13 +3,13 @@
 void ApplyMusicGameStyle(ImGuiStyle& style) {
     using namespace ui::tokens;
 
-    style.FrameRounding     = 4.f;
-    style.GrabRounding      = 4.f;
+    style.FrameRounding     = 5.f;
+    style.GrabRounding      = 5.f;
     style.WindowRounding    = 6.f;
     style.PopupRounding     = 6.f;
     style.ScrollbarRounding = 6.f;
-    style.TabRounding       = 4.f;
-    style.ChildRounding     = 4.f;
+    style.TabRounding       = 5.f;
+    style.ChildRounding     = 6.f;
     style.FrameBorderSize   = 0.f;
     style.WindowBorderSize  = 1.f;
     style.PopupBorderSize   = 1.f;

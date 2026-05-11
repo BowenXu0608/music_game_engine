@@ -753,6 +753,7 @@ void SongEditor::render(Engine* engine) {
     ImVec2 contentSize = ImGui::GetContentRegionAvail();
     const float splitterThick = 5.f;
     const float navH      = 32.f;
+    const float transportH = 44.f;
     const float waveformH = 100.f;
     const float minSidebarW = 220.f;
     const float maxSidebarW = contentSize.x * 0.4f;
@@ -775,7 +776,7 @@ void SongEditor::render(Engine* engine) {
     float assetsStripH = m_assetsBarOpen
         ? std::clamp(m_assetsBarH, 80.f, contentSize.y * 0.5f)
         : assetsHeaderH;
-    float bodyH = std::max(100.f, contentSize.y - navH - 4.f - assetsStripH - 4.f);
+    float bodyH = std::max(100.f, contentSize.y - navH - transportH - 4.f - assetsStripH - 4.f);
 
     // ══════════════════════════════════════════════════════════════════════════
     // LEFT SIDEBAR — Properties, Game Mode Config, Assets (scrollable)
@@ -1113,92 +1114,136 @@ void SongEditor::render(Engine* engine) {
     // Persist hover time for Scene view
     if (m_hoverTime >= 0.f) m_sceneTime = m_hoverTime;
 
-    // ── Nav bar ──────────────────────────────────────────────────────────────
-    if (ImGui::Button("< Back")) {
-        if (engine) engine->switchLayer(EditorLayer::MusicSelection);
-    }
-    ImGui::SameLine();
-    if (ImGui::Button("Save")) {
-        if (engine) {
-            exportAllCharts();
-            engine->musicSelectionEditor().save();
-            m_statusMsg   = "Saved!";
-            m_statusTimer = 2.f;
-        }
-    }
-    ImGui::SameLine();
+    // ══════════════════════════════════════════════════════════════════════════
+    // TRANSPORT BAR — 44px band with playback controls + timecode
+    // ══════════════════════════════════════════════════════════════════════════
+    {
+        using namespace ui::tokens;
+        const float transportH = 44.f;
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        const ImVec2 tOrigin = ImGui::GetCursorScreenPos();
+        const float tW = contentSize.x;
 
-    // ── Test Game button ────────────────────────────────────────────────────
-    ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.15f, 0.55f, 0.2f, 1.0f));
-    ImGui::PushStyleColor(ImGuiCol_ButtonHovered,  ImVec4(0.2f, 0.65f, 0.25f, 1.0f));
-    ImGui::PushStyleColor(ImGuiCol_ButtonActive,   ImVec4(0.1f, 0.45f, 0.15f, 1.0f));
-    if (ImGui::Button("Test Game", ImVec2(90, 0))) {
-        if (m_song && engine) {
-            bool anyNotes = false;
-            for (int d = 0; d < 3; d++) {
-                if (!m_diffNotes[d].empty()) { anyNotes = true; break; }
-            }
-            if (!anyNotes) {
-                m_testErrorMsg = "Cannot start test game!\n\n"
-                                 "At least one difficulty must have notes.\n"
-                                 "Place some notes in the timeline first.";
-                m_showTestError = true;
-            } else if (notes().empty()) {
-                const char* diffNames[] = {"Easy", "Medium", "Hard"};
-                m_testErrorMsg = std::string("No notes in the current difficulty (")
-                                 + diffNames[(int)m_currentDifficulty] + ").\n\n"
-                                 "Select a difficulty that has notes,\n"
-                                 "or add notes to this difficulty first.";
-                m_showTestError = true;
-            } else {
-                exportAllCharts();
-                engine->musicSelectionEditor().save();
-                launchTestProcess();
-            }
-        }
-    }
-    ImGui::PopStyleColor(3);
+        dl->AddRectFilled(tOrigin, {tOrigin.x + tW, tOrigin.y + transportH}, ToU32(BgPanel));
+        dl->AddLine(tOrigin, {tOrigin.x + tW, tOrigin.y}, ToU32(Border));
+        dl->AddLine({tOrigin.x, tOrigin.y + transportH},
+                    {tOrigin.x + tW, tOrigin.y + transportH}, ToU32(Border));
 
-    // ── Audio playback controls ────────────────────────────────────────────
-    ImGui::SameLine(0.f, 20.f);
-    if (engine && m_song && !m_song->audioFile.empty()) {
-        bool playing = engine->audio().isPlaying();
+        ImGui::SetCursorScreenPos({tOrigin.x + 8.f, tOrigin.y + 6.f});
+
+        // Transport icon buttons: skip-start, play/pause, stop, skip-end
+        auto drawSkipStart = [](ImDrawList* d, ImVec2 c, float sz, ImU32 col) {
+            d->AddLine({c.x - sz * 0.6f, c.y - sz}, {c.x - sz * 0.6f, c.y + sz}, col, 1.5f);
+            d->AddTriangleFilled({c.x + sz * 0.6f, c.y - sz}, {c.x + sz * 0.6f, c.y + sz},
+                                 {c.x - sz * 0.3f, c.y}, col);
+        };
+        auto drawPlay = [](ImDrawList* d, ImVec2 c, float sz, ImU32 col) {
+            d->AddTriangleFilled({c.x - sz * 0.5f, c.y - sz}, {c.x - sz * 0.5f, c.y + sz},
+                                 {c.x + sz * 0.7f, c.y}, col);
+        };
+        auto drawPause = [](ImDrawList* d, ImVec2 c, float sz, ImU32 col) {
+            d->AddRectFilled({c.x - sz * 0.6f, c.y - sz * 0.8f}, {c.x - sz * 0.1f, c.y + sz * 0.8f}, col);
+            d->AddRectFilled({c.x + sz * 0.1f, c.y - sz * 0.8f}, {c.x + sz * 0.6f, c.y + sz * 0.8f}, col);
+        };
+        auto drawStop = [](ImDrawList* d, ImVec2 c, float sz, ImU32 col) {
+            d->AddRectFilled({c.x - sz * 0.6f, c.y - sz * 0.6f}, {c.x + sz * 0.6f, c.y + sz * 0.6f}, col);
+        };
+        auto drawSkipEnd = [](ImDrawList* d, ImVec2 c, float sz, ImU32 col) {
+            d->AddTriangleFilled({c.x - sz * 0.6f, c.y - sz}, {c.x - sz * 0.6f, c.y + sz},
+                                 {c.x + sz * 0.3f, c.y}, col);
+            d->AddLine({c.x + sz * 0.6f, c.y - sz}, {c.x + sz * 0.6f, c.y + sz}, col, 1.5f);
+        };
+
+        const ImVec2 btnSz = {32.f, 32.f};
+        bool hasAudio = engine && m_song && !m_song->audioFile.empty();
+        bool playing = hasAudio && engine->audio().isPlaying();
+
+        if (ui::IconButton("##skip_start", btnSz, drawSkipStart)) {
+            if (hasAudio) { engine->audio().stop(); m_sceneTime = 0.f; }
+        }
+        ImGui::SameLine(0.f, 2.f);
         if (playing) {
-            if (ImGui::Button("Pause", ImVec2(50, 0))) {
+            if (ui::IconButton("##pause", btnSz, drawPause)) {
                 engine->audio().pause();
             }
         } else {
-            if (ImGui::Button("Play", ImVec2(50, 0))) {
-                std::string fullPath = m_projectPath + "/" + m_song->audioFile;
-                if (engine->audio().positionSeconds() < 0) {
-                    engine->audio().load(fullPath);
+            if (ui::IconButton("##play", btnSz, drawPlay)) {
+                if (hasAudio) {
+                    std::string fullPath = m_projectPath + "/" + m_song->audioFile;
+                    if (engine->audio().positionSeconds() < 0)
+                        engine->audio().load(fullPath);
+                    engine->audio().play();
                 }
-                engine->audio().play();
             }
         }
-        ImGui::SameLine();
-        if (ImGui::Button("Stop", ImVec2(40, 0))) {
-            engine->audio().stop();
+        ImGui::SameLine(0.f, 2.f);
+        if (ui::IconButton("##stop", btnSz, drawStop)) {
+            if (hasAudio) engine->audio().stop();
         }
-        ImGui::SameLine();
-        // Show current position
-        double pos = engine->audio().positionSeconds();
-        if (pos >= 0) {
-            int m = (int)pos / 60, s = (int)pos % 60;
-            ImGui::TextDisabled("%d:%02d", m, s);
+        ImGui::SameLine(0.f, 2.f);
+        if (ui::IconButton("##skip_end", btnSz, drawSkipEnd)) {
+            if (hasAudio) {
+                double dur = engine->audio().durationSeconds();
+                if (dur > 0) m_sceneTime = (float)dur;
+            }
         }
+
+        // Center: timecode in monoLg
+        ImGui::SameLine(0.f, 20.f);
+        {
+            double pos = hasAudio ? engine->audio().positionSeconds() : (double)m_sceneTime;
+            if (pos < 0) pos = 0;
+            int mins = (int)pos / 60;
+            int secs = (int)pos % 60;
+            int ms   = (int)((pos - (int)pos) * 1000.0) % 1000;
+            char tcBuf[32];
+            snprintf(tcBuf, sizeof(tcBuf), "%02d:%02d.%03d", mins, secs, ms);
+
+            ImFont* tcFont = ui::fonts.monoLg ? ui::fonts.monoLg : ImGui::GetFont();
+            float tcFontSz = tcFont->FontSize;
+            ImVec2 tcSz = tcFont->CalcTextSizeA(tcFontSz, FLT_MAX, 0.f, tcBuf);
+            float tcY = tOrigin.y + (transportH - tcFontSz) * 0.5f;
+            dl->AddText(tcFont, tcFontSz,
+                {ImGui::GetCursorScreenPos().x, tcY},
+                ToU32(Cyan), tcBuf);
+            ImGui::Dummy({tcSz.x + 8.f, transportH - 12.f});
+        }
+
+        // Right side: snap + BPM info + auto-save status
+        ImGui::SameLine(0.f, 20.f);
+        if (m_statusTimer > 0.f) {
+            ImGui::TextColored(Lime, "%s", m_statusMsg.c_str());
+            ImGui::SameLine(0.f, 12.f);
+        }
+        if (engine && engine->autoSaveStatusActive()) {
+            ImFont* monoSm = ui::fonts.monoSm ? ui::fonts.monoSm : ImGui::GetFont();
+            float aY = tOrigin.y + (transportH - monoSm->FontSize) * 0.5f;
+            dl->AddCircleFilled(
+                {ImGui::GetCursorScreenPos().x + 4.f, aY + monoSm->FontSize * 0.5f},
+                3.f, ToU32(Lime));
+            ImVec2 atPos = {ImGui::GetCursorScreenPos().x + 12.f, aY};
+            dl->AddText(monoSm, monoSm->FontSize, atPos,
+                ToU32(TextLow), engine->autoSaveStatusMsg().c_str());
+        }
+
+        ImGui::SetCursorScreenPos({tOrigin.x, tOrigin.y + transportH});
     }
 
-    if (m_statusTimer > 0.f) {
-        ImGui::SameLine();
-        ImGui::TextColored(ImVec4(0.4f, 1.f, 0.4f, 1.f), "%s", m_statusMsg.c_str());
-    }
-    // Auto-save toast: muted blue so it doesn't visually compete with the
-    // foreground green "Saved!" / "Beats analyzed!" status messages.
-    if (engine && engine->autoSaveStatusActive()) {
-        ImGui::SameLine();
-        ImGui::TextColored(ImVec4(0.6f, 0.85f, 1.f, 1.f),
-                           "%s", engine->autoSaveStatusMsg().c_str());
+    // ── Nav bar ──────────────────────────────────────────────────────────────
+    {
+        using namespace ui::tokens;
+        if (ui::GhostButton("< Back")) {
+            if (engine) engine->switchLayer(EditorLayer::MusicSelection);
+        }
+        ImGui::SameLine(0.f, 8.f);
+        if (ui::GhostButton("Save")) {
+            if (engine) {
+                exportAllCharts();
+                engine->musicSelectionEditor().save();
+                m_statusMsg   = "Saved!";
+                m_statusTimer = 2.f;
+            }
+        }
     }
 
     // ── Error popup ─────────────────────────────────────────────────────────
@@ -5359,12 +5404,12 @@ void SongEditor::renderAssets() {
         ImVec2 p  = ImGui::GetCursorScreenPos();
         ImVec2 sz = ImGui::GetContentRegionAvail();
         dl->AddRect(p, ImVec2(p.x + sz.x, p.y + sz.y - 4),
-                    IM_COL32(120, 120, 120, 100), 4.f, 0, 1.5f);
+                    ui::tokens::ToU32(ui::tokens::WithAlpha(ui::tokens::TextLow, 0.39f)), 4.f, 0, 1.5f);
         const char* hint = "Drop files here, or click Open File...";
         ImVec2 tsz = ImGui::CalcTextSize(hint);
         dl->AddText(ImVec2(p.x + sz.x * 0.5f - tsz.x * 0.5f,
                            p.y + sz.y * 0.5f - tsz.y * 0.5f),
-                    IM_COL32(150, 150, 150, 200), hint);
+                    ui::tokens::ToU32(ui::tokens::TextLow), hint);
         return;
     }
 
@@ -5422,15 +5467,15 @@ void SongEditor::renderAssets() {
                              ImVec2(thumbPos.x + thumbSize, thumbPos.y + thumbSize));
             } else {
                 dl->AddRectFilled(thumbPos, ImVec2(thumbPos.x + thumbSize, thumbPos.y + thumbSize),
-                                  IM_COL32(50, 50, 70, 255), 4.f);
+                                  ui::tokens::ToU32(ui::tokens::BgPanel3), 4.f);
                 ImVec2 isz = ImGui::CalcTextSize("...");
                 dl->AddText(ImVec2(thumbPos.x + thumbSize * 0.5f - isz.x * 0.5f,
                                    thumbPos.y + thumbSize * 0.5f - isz.y * 0.5f),
-                            IM_COL32(160, 160, 180, 200), "...");
+                            ui::tokens::ToU32(ui::tokens::TextLow), "...");
             }
             if (ImGui::IsItemHovered()) {
                 dl->AddRect(thumbPos, ImVec2(thumbPos.x + thumbSize, thumbPos.y + thumbSize),
-                            IM_COL32(100, 160, 255, 200), 4.f, 0, 2.f);
+                            ui::tokens::ToU32(ui::tokens::WithAlpha(ui::tokens::Cyan, 0.78f)), 4.f, 0, 2.f);
                 ImGui::SetTooltip("%s", shortenForTooltip(name).c_str());
             }
             if (ImGui::BeginDragDropSource()) {
@@ -5474,15 +5519,15 @@ void SongEditor::renderAssets() {
             ImGui::InvisibleButton("##a", ImVec2(thumbSize, thumbSize));
             ImDrawList* dl = ImGui::GetWindowDrawList();
             dl->AddRectFilled(thumbPos, ImVec2(thumbPos.x + thumbSize, thumbPos.y + thumbSize),
-                              IM_COL32(30, 40, 60, 255), 4.f);
+                              ui::tokens::ToU32(ui::tokens::WithAlpha(ui::tokens::CyanDim, 0.40f)), 4.f);
             const char* icon = "MUS";
             ImVec2 aisz = ImGui::CalcTextSize(icon);
             dl->AddText(ImVec2(thumbPos.x + thumbSize * 0.5f - aisz.x * 0.5f,
                                thumbPos.y + thumbSize * 0.5f - aisz.y * 0.5f),
-                        IM_COL32(100, 180, 255, 220), icon);
+                        ui::tokens::ToU32(ui::tokens::Cyan), icon);
             if (ImGui::IsItemHovered()) {
                 dl->AddRect(thumbPos, ImVec2(thumbPos.x + thumbSize, thumbPos.y + thumbSize),
-                            IM_COL32(100, 160, 255, 200), 4.f, 0, 2.f);
+                            ui::tokens::ToU32(ui::tokens::WithAlpha(ui::tokens::Cyan, 0.78f)), 4.f, 0, 2.f);
                 ImGui::SetTooltip("%s", shortenForTooltip(name).c_str());
             }
             if (ImGui::BeginDragDropSource()) {
@@ -5557,17 +5602,17 @@ void SongEditor::renderAssets() {
             } else {
                 dl->AddRectFilled(thumbPos,
                                   ImVec2(thumbPos.x + thumbSize, thumbPos.y + thumbSize),
-                                  IM_COL32(50, 30, 70, 255), 4.f);
+                                  ui::tokens::ToU32(ui::tokens::WithAlpha(ui::tokens::MagentaDim, 0.40f)), 4.f);
                 const char* icon = "MAT";
                 ImVec2 mizs = ImGui::CalcTextSize(icon);
                 dl->AddText(ImVec2(thumbPos.x + thumbSize * 0.5f - mizs.x * 0.5f,
                                    thumbPos.y + thumbSize * 0.5f - mizs.y * 0.5f),
-                            IM_COL32(220, 180, 255, 220), icon);
+                            ui::tokens::ToU32(ui::tokens::Magenta), icon);
             }
             if (ImGui::IsItemHovered()) {
                 dl->AddRect(thumbPos,
                             ImVec2(thumbPos.x + thumbSize, thumbPos.y + thumbSize),
-                            IM_COL32(200, 140, 255, 200), 4.f, 0, 2.f);
+                            ui::tokens::ToU32(ui::tokens::WithAlpha(ui::tokens::Violet, 0.78f)), 4.f, 0, 2.f);
                 if (matPtr && m_engineCached) {
                     ImGui::BeginTooltip();
                     ImGui::TextUnformatted(shortenForTooltip(name).c_str());

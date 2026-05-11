@@ -224,12 +224,12 @@ private:
     Engine*        m_engineCached = nullptr;  // refreshed each frame in render()
 
     // ── Panel split ──────────────────────────────────────────────────────────
-    float m_sidebarW  = 280.f;  // Left sidebar width in pixels (draggable)
+    float m_sidebarW  = 240.f;  // Left sidebar width in pixels (draggable)
     float m_sceneSplit = 0.35f; // Scene / Timeline vertical split in center area
     bool  m_assetsBarOpen = true;  // Bottom Assets strip expanded?
     float m_assetsBarH   = 200.f;  // Height when expanded
     bool  m_copilotBarOpen = true; // Right Copilot sidebar expanded?
-    float m_copilotBarW   = 300.f; // Width when expanded (draggable)
+    float m_copilotBarW   = 280.f; // Width when expanded (draggable)
 
     // Right-sidebar page selector. Copilot is the default; Audit hosts the
     // chart-audit metrics + issue list that used to live in a toolbar popup.

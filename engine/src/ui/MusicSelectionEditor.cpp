@@ -648,44 +648,54 @@ void MusicSelectionEditor::render(Engine* engine) {
     const float copilotW = engine ? engine->songEditor().copilotOverlayWidth() : 0.f;
     const float copilotSplitW = (copilotW > 0.f) ? splitterThick : 0.f;
     const float bodyW    = std::max(200.f, contentSize.x - copilotW - copilotSplitW);
-    // Bottom Assets panel: zero footprint when closed; horizontal splitter
-    // when open (toggle lives in renderHierarchy header).
     float assetsH = m_assetsBarOpen
         ? std::clamp(m_assetsBarH, 80.f, contentSize.y * 0.7f)
         : 0.f;
     const float assetsSplitH = m_assetsBarOpen ? splitterThick : 0.f;
     float totalH   = std::max(100.f, contentSize.y - navH - 8.f - assetsH - assetsSplitH);
     float topH     = totalH;
-    float previewW = bodyW * m_hSplit - splitterThick * 0.5f;
-    float hierW    = bodyW * (1.f - m_hSplit) - splitterThick * 0.5f;
 
-    // Tell the overlay how many pixels to leave free at the bottom so the
-    // Copilot sidebar stops above the Assets strip + nav bar.
+    // 3-column layout: LEFT hierarchy (240px) | CENTER preview | RIGHT properties (280px)
+    const float hierW  = 240.f;
+    const float propsW = 280.f;
+    float previewW = std::max(200.f, bodyW - hierW - propsW - splitterThick * 2.f);
+
     if (engine) {
         engine->songEditor().setOverlayBottomReserve(navH + 8.f + assetsH + assetsSplitH);
-        engine->songEditor().setOverlayTopReserve(56.f);  // ui::TopBar height
+        engine->songEditor().setOverlayTopReserve(44.f);  // ui::TopBar height
     }
 
-    // ── Top row: Preview | vsplitter | Hierarchy ─────────────────────────────
+    // ── Left: Hierarchy ──────────────────────────────────────────────────────
+    ImGui::BeginChild("MSHierarchy", ImVec2(hierW, topH), true);
+    renderHierarchy(hierW, topH);
+    ImGui::EndChild();
+
+    ImGui::SameLine(0.f, 0.f);
+
+    // Vertical splitter (left)
+    ImGui::InvisibleButton("ms_vsplit_l", ImVec2(splitterThick, topH));
+    if (ImGui::IsItemHovered() || ImGui::IsItemActive())
+        ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
+
+    ImGui::SameLine(0.f, 0.f);
+
+    // ── Center: Preview ──────────────────────────────────────────────────────
     ImGui::BeginChild("MSPreview", ImVec2(previewW, topH), true);
     renderPreview(previewW, topH);
     ImGui::EndChild();
 
     ImGui::SameLine(0.f, 0.f);
 
-    // Vertical splitter
-    ImGui::InvisibleButton("ms_vsplit", ImVec2(splitterThick, topH));
-    if (ImGui::IsItemActive()) {
-        m_hSplit += ImGui::GetIO().MouseDelta.x / std::max(1.f, bodyW);
-        m_hSplit = std::clamp(m_hSplit, 0.4f, 0.85f);
-    }
+    // Vertical splitter (right)
+    ImGui::InvisibleButton("ms_vsplit_r", ImVec2(splitterThick, topH));
     if (ImGui::IsItemHovered() || ImGui::IsItemActive())
         ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
 
     ImGui::SameLine(0.f, 0.f);
 
-    ImGui::BeginChild("MSHierarchy", ImVec2(hierW, topH), true);
-    renderHierarchy(hierW, topH);
+    // ── Right: Properties ────────────────────────────────────────────────────
+    ImGui::BeginChild("MSProperties", ImVec2(propsW, topH), true);
+    renderProperties(propsW, topH);
     ImGui::EndChild();
 
     // ── Vertical splitter between body and Copilot column ────────────────
@@ -701,7 +711,7 @@ void MusicSelectionEditor::render(Engine* engine) {
             ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
         ImDrawList* dl = ImGui::GetWindowDrawList();
         dl->AddRectFilled(ImGui::GetItemRectMin(), ImGui::GetItemRectMax(),
-                          IM_COL32(60, 60, 70, 255));
+                          ui::tokens::ToU32(ui::tokens::BgPanel3));
     }
 
     // ── Bottom Assets panel + horizontal splitter (only when open) ──────────
@@ -717,7 +727,7 @@ void MusicSelectionEditor::render(Engine* engine) {
             ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeNS);
         ImDrawList* dl = ImGui::GetWindowDrawList();
         dl->AddRectFilled(ImGui::GetItemRectMin(), ImGui::GetItemRectMax(),
-                          IM_COL32(60, 60, 70, 255));
+                          ui::tokens::ToU32(ui::tokens::BgPanel3));
 
         ImGui::BeginChild("MSAssets", ImVec2(contentSize.x, assetsH), true);
         renderAssets();
@@ -1422,69 +1432,48 @@ void MusicSelectionEditor::renderCoverPhoto(ImVec2 origin, float size) {
 
 // ── Difficulty buttons ───────────────────────────────────────────────────────
 
-void MusicSelectionEditor::renderDifficultyButtons(ImVec2 origin, float width) {
-    using namespace ui::tokens;
+void MusicSelectionEditor::renderDifficultyButtons(ImVec2 origin, float /*width*/) {
     ImDrawList* dl = ImGui::GetWindowDrawList();
 
-    // Mock palette: EZ lime / NM cyan / HD magenta. Active = solid + glow,
-    // inactive = outline pill with low-alpha fill.
     struct DiffInfo {
         const char* label;
-        const char* shortLabel;
         Difficulty  diff;
-        ImVec4      accent;
+        ImU32       color;
+        ImU32       activeColor;
     };
     DiffInfo diffs[] = {
-        { "EZ", "5.0",  Difficulty::Easy,   Lime    },
-        { "NM", "7.4",  Difficulty::Medium, Cyan    },
-        { "HD", "9.7",  Difficulty::Hard,   Magenta },
+        { "EASY",   Difficulty::Easy,   IM_COL32(60, 160, 80, 200),  IM_COL32(80, 220, 100, 255) },
+        { "MEDIUM", Difficulty::Medium, IM_COL32(180, 160, 40, 200), IM_COL32(240, 210, 50, 255)  },
+        { "HARD",   Difficulty::Hard,   IM_COL32(180, 50, 50, 200),  IM_COL32(240, 60, 60, 255)   },
     };
 
-    const float btnW = 88.f;
-    const float btnH = 56.f;
-    const float gap  = 12.f;
-    const float totalW = 3.f * btnW + 2.f * gap;
-    const float startX = origin.x - totalW * 0.5f;
+    float btnW = 90.f;
+    float btnH = 32.f;
+    float gap  = 16.f;
+    float totalW = 3.f * btnW + 2.f * gap;
+    float startX = origin.x - totalW * 0.5f;
 
     for (int i = 0; i < 3; ++i) {
-        const float bx = startX + (float)i * (btnW + gap);
-        const float by = origin.y;
-        const bool active = (m_selectedDifficulty == diffs[i].diff);
-        const ImVec4 a    = diffs[i].accent;
+        float bx = startX + (float)i * (btnW + gap);
+        float by = origin.y;
+        bool active = (m_selectedDifficulty == diffs[i].diff);
 
-        // Outer glow on active.
+        ImU32 col = active ? diffs[i].activeColor : diffs[i].color;
+        dl->AddRectFilled(ImVec2(bx, by), ImVec2(bx + btnW, by + btnH), col, 6.f);
+
         if (active) {
-            dl->AddRectFilled(ImVec2(bx - 4.f, by - 4.f),
-                              ImVec2(bx + btnW + 4.f, by + btnH + 4.f),
-                              ToU32(WithAlpha(a, 0.30f)), 8.f);
+            dl->AddRect(ImVec2(bx, by), ImVec2(bx + btnW, by + btnH),
+                        IM_COL32(255, 255, 255, 200), 6.f, 0, 2.f);
         }
 
-        const ImU32 fill   = active ? ToU32(a)
-                                    : ToU32(WithAlpha(a, 0.15f));
-        const ImU32 border = ToU32(a);
-        dl->AddRectFilled({bx, by}, {bx + btnW, by + btnH}, fill, 6.f);
-        dl->AddRect      ({bx, by}, {bx + btnW, by + btnH}, border, 6.f, 0,
-                          active ? 2.f : 1.f);
+        ImVec2 textSz = ImGui::CalcTextSize(diffs[i].label);
+        dl->AddText(ImVec2(bx + (btnW - textSz.x) * 0.5f, by + (btnH - textSz.y) * 0.5f),
+                    IM_COL32(255, 255, 255, 255), diffs[i].label);
 
-        const ImU32 textCol = active ? IM_COL32(0, 0, 0, 255)
-                                     : ToU32(a);
-        const ImVec2 lbSz = ImGui::CalcTextSize(diffs[i].label);
-        dl->AddText({bx + (btnW - lbSz.x) * 0.5f, by + 8.f},
-                    textCol, diffs[i].label);
-
-        ImFont* mono = ui::s_monoFont ? ui::s_monoFont : ImGui::GetFont();
-        const float ratingFontSize = ImGui::GetFontSize() * 1.4f;
-        const ImVec2 rtSz = mono->CalcTextSizeA(ratingFontSize, FLT_MAX, 0.f,
-                                                diffs[i].shortLabel);
-        dl->AddText(mono, ratingFontSize,
-                    {bx + (btnW - rtSz.x) * 0.5f, by + btnH - rtSz.y - 6.f},
-                    textCol, diffs[i].shortLabel);
-
-        // Clickable
-        ImGui::SetCursorScreenPos({bx, by});
+        ImGui::SetCursorScreenPos(ImVec2(bx, by));
         char id[32];
         snprintf(id, sizeof(id), "##diff_%d", i);
-        if (ImGui::InvisibleButton(id, {btnW, btnH})) {
+        if (ImGui::InvisibleButton(id, ImVec2(btnW, btnH))) {
             m_selectedDifficulty = diffs[i].diff;
         }
     }
@@ -1557,10 +1546,10 @@ void MusicSelectionEditor::renderPlayButton(ImVec2 origin, float width) {
     float aby = by + btnH + 8.f;
 
     using namespace ui::tokens;
-    const ImU32 amberSolid    = ToU32(Amber);
-    const ImU32 amberHover    = ToU32(WithAlpha(Amber, 0.85f));
-    const ImU32 amberDimSolid = ToU32(WithAlpha(Amber, 0.18f));
-    const ImU32 amberDimHover = ToU32(WithAlpha(Amber, 0.32f));
+    const ImU32 amberSolid    = ToU32(NAmber);
+    const ImU32 amberHover    = ToU32(WithAlpha(NAmber, 0.85f));
+    const ImU32 amberDimSolid = ToU32(WithAlpha(NAmber, 0.18f));
+    const ImU32 amberDimHover = ToU32(WithAlpha(NAmber, 0.32f));
     const ImU32 borderC       = ToU32(BorderHi);
     const ImU32 textOn        = IM_COL32(0, 0, 0, 255);
     const ImU32 textOff       = ToU32(TextMid);
@@ -1620,18 +1609,18 @@ void MusicSelectionEditor::renderHierarchy(float width, float height) {
         VkDescriptorSet bgDesc = m_pageBackground.empty()
             ? VK_NULL_HANDLE : getThumb(m_pageBackground);
         ImU32 border = ImGui::IsItemHovered()
-            ? IM_COL32(100, 160, 255, 255) : IM_COL32(100, 100, 120, 180);
+            ? ui::tokens::ToU32(ui::tokens::Cyan) : ui::tokens::ToU32(ui::tokens::WithAlpha(ui::tokens::TextLow, 0.70f));
         if (bgDesc) {
             dlBg->AddImage((ImTextureID)(uint64_t)bgDesc, zonePos,
                            ImVec2(zonePos.x + zoneW, zonePos.y + zoneH));
         } else {
             dlBg->AddRectFilled(zonePos, ImVec2(zonePos.x + zoneW, zonePos.y + zoneH),
-                                IM_COL32(30, 30, 45, 180), 4.f);
+                                ui::tokens::ToU32(ui::tokens::BgPanel2), 4.f);
             const char* hint = "Drop background image here";
             ImVec2 tsz = ImGui::CalcTextSize(hint);
             dlBg->AddText(ImVec2(zonePos.x + zoneW * 0.5f - tsz.x * 0.5f,
                                  zonePos.y + zoneH * 0.5f - tsz.y * 0.5f),
-                          IM_COL32(120, 120, 140, 200), hint);
+                          ui::tokens::ToU32(ui::tokens::TextLow), hint);
         }
         dlBg->AddRect(zonePos, ImVec2(zonePos.x + zoneW, zonePos.y + zoneH),
                       border, 4.f, 0, 1.5f);
@@ -1668,11 +1657,11 @@ void MusicSelectionEditor::renderHierarchy(float width, float height) {
             VkDescriptorSet thumb = outPath.empty()
                 ? VK_NULL_HANDLE : getThumb(outPath);
             ImU32 border = ImGui::IsItemHovered()
-                ? IM_COL32(100, 160, 255, 255) : IM_COL32(100, 100, 120, 180);
+                ? ui::tokens::ToU32(ui::tokens::Cyan) : ui::tokens::ToU32(ui::tokens::WithAlpha(ui::tokens::TextLow, 0.70f));
             // Backing panel
             dl->AddRectFilled(zonePos,
                               ImVec2(zonePos.x + zoneSide, zonePos.y + zoneSide),
-                              IM_COL32(30, 30, 45, 220), 4.f);
+                              ui::tokens::ToU32(ui::tokens::BgPanel2), 4.f);
             if (thumb) {
                 // Aspect-fit the image inside the square so it isn't stretched.
                 ImVec2 imgSz(64.f, 64.f);
@@ -1694,7 +1683,7 @@ void MusicSelectionEditor::renderHierarchy(float width, float height) {
                 ImVec2 tsz = ImGui::CalcTextSize(hint);
                 dl->AddText(ImVec2(zonePos.x + zoneSide * 0.5f - tsz.x * 0.5f,
                                    zonePos.y + zoneSide * 0.5f - tsz.y * 0.5f),
-                            IM_COL32(120, 120, 140, 200), hint);
+                            ui::tokens::ToU32(ui::tokens::TextLow), hint);
             }
             dl->AddRect(zonePos,
                         ImVec2(zonePos.x + zoneSide, zonePos.y + zoneSide),
@@ -1715,8 +1704,8 @@ void MusicSelectionEditor::renderHierarchy(float width, float height) {
             ImGui::PopID();
         };
 
-        ImGui::TextUnformatted("Achievement Badges:");
-        ImGui::TextDisabled("Shown on the results screen when a chart clears FC / AP.");
+        ui::SectionHeader("Achievement Badges");
+        ImGui::TextDisabled("Shown on results screen for FC / AP clears.");
         ImGui::Spacing();
         badgeDropZone("Full Combo (FC)",  "fcbadge", m_fcImage);
         ImGui::Spacing();
@@ -1842,18 +1831,75 @@ void MusicSelectionEditor::renderHierarchy(float width, float height) {
         }
     }
 
-    ImGui::Spacing();
-    ImGui::Separator();
+    // Dialogs live here (inside hierarchy child) because they are popups
+    // triggered from hierarchy context menus.
 
-    // ── Properties for selected item ─────────────────────────────────────────
+    // ── Add Set Dialog ───────────────────────────────────────────────────────
+    if (m_showAddSetDialog) {
+        ImGui::OpenPopup("Add Music Set");
+        m_showAddSetDialog = false;
+    }
+    if (ImGui::BeginPopupModal("Add Music Set", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::InputText("Set Name", m_newSetName, 128);
+        ImGui::Spacing();
+        if (ImGui::Button("Create", ImVec2(120, 0))) {
+            if (m_newSetName[0] != '\0') {
+                MusicSetInfo newSet;
+                newSet.name = m_newSetName;
+                m_sets.push_back(std::move(newSet));
+                m_selectedSet = (int)m_sets.size() - 1;
+                m_setScrollTarget = (float)m_selectedSet;
+                m_selectedSong = -1;
+                ImGui::CloseCurrentPopup();
+            }
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel", ImVec2(120, 0))) {
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
+    }
+
+    // ── Add Song Dialog ──────────────────────────────────────────────────────
+    if (m_showAddSongDialog) {
+        ImGui::OpenPopup("Add Song");
+        m_showAddSongDialog = false;
+    }
+    if (ImGui::BeginPopupModal("Add Song", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::InputText("Song Name", m_newSongName, 128);
+        ImGui::InputText("Artist", m_newSongArtist, 128);
+        ImGui::Spacing();
+        if (ImGui::Button("Create", ImVec2(120, 0))) {
+            if (m_newSongName[0] != '\0' && m_selectedSet >= 0 &&
+                m_selectedSet < (int)m_sets.size()) {
+                SongInfo newSong;
+                newSong.name   = m_newSongName;
+                newSong.artist = m_newSongArtist;
+                m_sets[m_selectedSet].songs.push_back(std::move(newSong));
+                m_selectedSong = (int)m_sets[m_selectedSet].songs.size() - 1;
+                m_songScrollTarget = (float)m_selectedSong;
+                ImGui::CloseCurrentPopup();
+            }
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel", ImVec2(120, 0))) {
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
+    }
+}
+
+// ── renderProperties ────────────────────────────────────────────────────────
+
+void MusicSelectionEditor::renderProperties(float width, float height) {
     if (m_selectedSet >= 0 && m_selectedSet < (int)m_sets.size()) {
         auto& set = m_sets[m_selectedSet];
 
         if (m_selectedSong >= 0 && m_selectedSong < (int)set.songs.size()) {
             // Song properties (slim: name, artist, cover only)
             auto& song = set.songs[m_selectedSong];
-            ImGui::Text("Song Properties");
-            ImGui::Separator();
+            ui::SectionHeader("Song");
+            ImGui::Spacing();
 
             char nameBuf[128];
             strncpy(nameBuf, song.name.c_str(), 127); nameBuf[127] = '\0';
@@ -1875,11 +1921,11 @@ void MusicSelectionEditor::renderHierarchy(float width, float height) {
                 ImVec2 pos = ImGui::GetCursorScreenPos();
                 ImDrawList* dl = ImGui::GetWindowDrawList();
                 dl->AddRectFilled(pos, ImVec2(pos.x + thumbSz, pos.y + thumbSz),
-                                  IM_COL32(50, 50, 70, 255), 4.f);
+                                  ui::tokens::ToU32(ui::tokens::BgPanel3), 4.f);
                 ImVec2 textSz = ImGui::CalcTextSize("No Cover");
                 dl->AddText(ImVec2(pos.x + (thumbSz - textSz.x) * 0.5f,
                                    pos.y + (thumbSz - textSz.y) * 0.5f),
-                            IM_COL32(140, 140, 160, 200), "No Cover");
+                            ui::tokens::ToU32(ui::tokens::TextLow), "No Cover");
                 ImGui::Dummy(ImVec2(thumbSz, thumbSz));
             }
             // Drag-drop target on the cover zone
@@ -2075,11 +2121,11 @@ void MusicSelectionEditor::renderHierarchy(float width, float height) {
                 ImVec2 pos = ImGui::GetCursorScreenPos();
                 ImDrawList* dl = ImGui::GetWindowDrawList();
                 dl->AddRectFilled(pos, ImVec2(pos.x + thumbSz, pos.y + thumbSz),
-                                  IM_COL32(50, 50, 70, 255), 4.f);
+                                  ui::tokens::ToU32(ui::tokens::BgPanel3), 4.f);
                 ImVec2 textSz = ImGui::CalcTextSize("No Cover");
                 dl->AddText(ImVec2(pos.x + (thumbSz - textSz.x) * 0.5f,
                                    pos.y + (thumbSz - textSz.y) * 0.5f),
-                            IM_COL32(140, 140, 160, 200), "No Cover");
+                            ui::tokens::ToU32(ui::tokens::TextLow), "No Cover");
                 ImGui::Dummy(ImVec2(thumbSz, thumbSz));
             }
             if (ImGui::BeginDragDropTarget()) {
@@ -2129,60 +2175,6 @@ void MusicSelectionEditor::renderHierarchy(float width, float height) {
 
             ImGui::Text("Songs: %d", (int)set.songs.size());
         }
-    }
-
-    // ── Add Set Dialog ───────────────────────────────────────────────────────
-    if (m_showAddSetDialog) {
-        ImGui::OpenPopup("Add Music Set");
-        m_showAddSetDialog = false;
-    }
-    if (ImGui::BeginPopupModal("Add Music Set", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
-        ImGui::InputText("Set Name", m_newSetName, 128);
-        ImGui::Spacing();
-        if (ImGui::Button("Create", ImVec2(120, 0))) {
-            if (m_newSetName[0] != '\0') {
-                MusicSetInfo newSet;
-                newSet.name = m_newSetName;
-                m_sets.push_back(std::move(newSet));
-                m_selectedSet = (int)m_sets.size() - 1;
-                m_setScrollTarget = (float)m_selectedSet;
-                m_selectedSong = -1;
-                ImGui::CloseCurrentPopup();
-            }
-        }
-        ImGui::SameLine();
-        if (ImGui::Button("Cancel", ImVec2(120, 0))) {
-            ImGui::CloseCurrentPopup();
-        }
-        ImGui::EndPopup();
-    }
-
-    // ── Add Song Dialog ──────────────────────────────────────────────────────
-    if (m_showAddSongDialog) {
-        ImGui::OpenPopup("Add Song");
-        m_showAddSongDialog = false;
-    }
-    if (ImGui::BeginPopupModal("Add Song", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
-        ImGui::InputText("Song Name", m_newSongName, 128);
-        ImGui::InputText("Artist", m_newSongArtist, 128);
-        ImGui::Spacing();
-        if (ImGui::Button("Create", ImVec2(120, 0))) {
-            if (m_newSongName[0] != '\0' && m_selectedSet >= 0 &&
-                m_selectedSet < (int)m_sets.size()) {
-                SongInfo newSong;
-                newSong.name   = m_newSongName;
-                newSong.artist = m_newSongArtist;
-                m_sets[m_selectedSet].songs.push_back(std::move(newSong));
-                m_selectedSong = (int)m_sets[m_selectedSet].songs.size() - 1;
-                m_songScrollTarget = (float)m_selectedSong;
-                ImGui::CloseCurrentPopup();
-            }
-        }
-        ImGui::SameLine();
-        if (ImGui::Button("Cancel", ImVec2(120, 0))) {
-            ImGui::CloseCurrentPopup();
-        }
-        ImGui::EndPopup();
     }
 }
 
@@ -2241,12 +2233,12 @@ void MusicSelectionEditor::renderAssets() {
         ImVec2 p  = ImGui::GetCursorScreenPos();
         ImVec2 sz = ImGui::GetContentRegionAvail();
         dl->AddRect(p, ImVec2(p.x + sz.x, p.y + sz.y - 4),
-                    IM_COL32(120, 120, 120, 100), 4.f, 0, 1.5f);
+                    ui::tokens::ToU32(ui::tokens::WithAlpha(ui::tokens::TextLow, 0.39f)), 4.f, 0, 1.5f);
         const char* hint = "Drop files here, or click Open File...";
         ImVec2 tsz = ImGui::CalcTextSize(hint);
         dl->AddText(ImVec2(p.x + sz.x * 0.5f - tsz.x * 0.5f,
                            p.y + sz.y * 0.5f - tsz.y * 0.5f),
-                    IM_COL32(150, 150, 150, 200), hint);
+                    ui::tokens::ToU32(ui::tokens::TextLow), hint);
         return;
     }
 
@@ -2281,15 +2273,15 @@ void MusicSelectionEditor::renderAssets() {
                              ImVec2(thumbPos.x + thumbSize, thumbPos.y + thumbSize));
             } else {
                 dl->AddRectFilled(thumbPos, ImVec2(thumbPos.x + thumbSize, thumbPos.y + thumbSize),
-                                  IM_COL32(50, 50, 70, 255), 4.f);
+                                  ui::tokens::ToU32(ui::tokens::BgPanel3), 4.f);
                 ImVec2 isz = ImGui::CalcTextSize("...");
                 dl->AddText(ImVec2(thumbPos.x + thumbSize * 0.5f - isz.x * 0.5f,
                                    thumbPos.y + thumbSize * 0.5f - isz.y * 0.5f),
-                            IM_COL32(160, 160, 180, 200), "...");
+                            ui::tokens::ToU32(ui::tokens::TextLow), "...");
             }
             if (ImGui::IsItemHovered()) {
                 dl->AddRect(thumbPos, ImVec2(thumbPos.x + thumbSize, thumbPos.y + thumbSize),
-                            IM_COL32(100, 160, 255, 200), 4.f, 0, 2.f);
+                            ui::tokens::ToU32(ui::tokens::WithAlpha(ui::tokens::Cyan, 0.78f)), 4.f, 0, 2.f);
                 ImGui::SetTooltip("%s", shortenForTooltip(name).c_str());
             }
             if (ImGui::BeginDragDropSource()) {
@@ -2332,15 +2324,15 @@ void MusicSelectionEditor::renderAssets() {
             ImGui::InvisibleButton("##a", ImVec2(thumbSize, thumbSize));
             ImDrawList* dl = ImGui::GetWindowDrawList();
             dl->AddRectFilled(thumbPos, ImVec2(thumbPos.x + thumbSize, thumbPos.y + thumbSize),
-                              IM_COL32(30, 40, 60, 255), 4.f);
+                              ui::tokens::ToU32(ui::tokens::WithAlpha(ui::tokens::CyanDim, 0.40f)), 4.f);
             const char* icon = "MUS";
             ImVec2 aisz = ImGui::CalcTextSize(icon);
             dl->AddText(ImVec2(thumbPos.x + thumbSize * 0.5f - aisz.x * 0.5f,
                                thumbPos.y + thumbSize * 0.5f - aisz.y * 0.5f),
-                        IM_COL32(100, 180, 255, 220), icon);
+                        ui::tokens::ToU32(ui::tokens::Cyan), icon);
             if (ImGui::IsItemHovered()) {
                 dl->AddRect(thumbPos, ImVec2(thumbPos.x + thumbSize, thumbPos.y + thumbSize),
-                            IM_COL32(100, 160, 255, 200), 4.f, 0, 2.f);
+                            ui::tokens::ToU32(ui::tokens::WithAlpha(ui::tokens::Cyan, 0.78f)), 4.f, 0, 2.f);
                 ImGui::SetTooltip("%s", shortenForTooltip(name).c_str());
             }
             if (ImGui::BeginDragDropSource()) {
@@ -2386,17 +2378,17 @@ void MusicSelectionEditor::renderAssets() {
             } else {
                 dl->AddRectFilled(thumbPos,
                                   ImVec2(thumbPos.x + thumbSize, thumbPos.y + thumbSize),
-                                  IM_COL32(50, 30, 70, 255), 4.f);
+                                  ui::tokens::ToU32(ui::tokens::WithAlpha(ui::tokens::MagentaDim, 0.40f)), 4.f);
                 const char* icon = "MAT";
                 ImVec2 mizs = ImGui::CalcTextSize(icon);
                 dl->AddText(ImVec2(thumbPos.x + thumbSize * 0.5f - mizs.x * 0.5f,
                                    thumbPos.y + thumbSize * 0.5f - mizs.y * 0.5f),
-                            IM_COL32(220, 180, 255, 220), icon);
+                            ui::tokens::ToU32(ui::tokens::Magenta), icon);
             }
             if (ImGui::IsItemHovered()) {
                 dl->AddRect(thumbPos,
                             ImVec2(thumbPos.x + thumbSize, thumbPos.y + thumbSize),
-                            IM_COL32(200, 140, 255, 200), 4.f, 0, 2.f);
+                            ui::tokens::ToU32(ui::tokens::WithAlpha(ui::tokens::Violet, 0.78f)), 4.f, 0, 2.f);
                 if (matPtr && m_engine) {
                     ImGui::BeginTooltip();
                     ImGui::TextUnformatted(shortenForTooltip(name).c_str());

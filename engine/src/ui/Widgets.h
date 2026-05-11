@@ -15,6 +15,37 @@ extern ImFont* s_monoFont;
 inline void PushMono() { if (s_monoFont) ImGui::PushFont(s_monoFont); }
 inline void PopMono()  { if (s_monoFont) ImGui::PopFont(); }
 
+// Multi-weight / multi-size font registry. Populated by ImGuiLayer::init.
+// All pointers fall back to ImGui's default font if the .ttf is missing.
+struct Fonts {
+    ImFont* body      = nullptr;  // Inter 13/400 (default body)
+    ImFont* bodyMed   = nullptr;  // Inter 13/500 (project names, nav)
+    ImFont* label     = nullptr;  // Inter 11/600 (section headers, pills)
+    ImFont* heading   = nullptr;  // Inter 16/600 (panel titles)
+    ImFont* title     = nullptr;  // Inter 18/600 (Settings title)
+    ImFont* mono      = nullptr;  // JetBrains Mono 13
+    ImFont* monoSm    = nullptr;  // JetBrains Mono 11 (field values)
+    ImFont* monoLg    = nullptr;  // JetBrains Mono 18 (timecode)
+};
+extern Fonts fonts;
+
+// Draw text with per-character extra spacing (ImGui has no native letter-spacing).
+void DrawSpacedText(ImDrawList* dl, ImFont* font, float fontSize,
+                    ImVec2 pos, ImU32 col, const char* text, float extraSpacing);
+
+// Measure the width of spaced text.
+float CalcSpacedTextWidth(ImFont* font, float fontSize, const char* text, float extraSpacing);
+
+// Primary action button: solid accent fill, dark text.
+bool PrimaryButton(const char* label, const ImVec4& accent, ImVec2 size = {0,0});
+
+// Ghost button: transparent bg, BorderHi outline, TextMid text.
+bool GhostButton(const char* label, ImVec2 size = {0,0});
+
+// Icon-only button via DrawList callback.
+bool IconButton(const char* id, ImVec2 size,
+                std::function<void(ImDrawList*, ImVec2 center, float sz, ImU32 col)> drawIcon);
+
 
 // Uppercase 10px section label with a bullet chevron and optional right-side
 // slot (e.g. a Default reset pill). Replaces inline CollapsingHeader styling
@@ -82,7 +113,7 @@ bool Slider(const char* label,
             const char* suffix,
             const ImVec4& accent);
 
-// Renders the editor-wide 56 px top toolbar matching MIGRATION §3 mock:
+// Renders the editor-wide 44 px top toolbar matching MIGRATION §3 mock:
 // gradient cyan→magenta `M` tile + crumbs (joined with `>`). The right slot
 // (lambda) is rendered right-aligned. Returns the y-coordinate of the line
 // directly below the bar.
@@ -116,5 +147,19 @@ float DefaultPillWidth();
 // Top-bar toggle pill (e.g. "Copilot"). Filled cyan when active, hollow
 // otherwise. Returns true on click; caller flips the bound state.
 bool TopToggle(const char* label, bool active);
+
+// Pill-shaped toggle switch (36x18 px). Returns true when the value changes.
+bool Toggle(const char* label, bool* v, const ImVec4& accent = tokens::Cyan);
+
+// Styled input field with label above, BgPanel3 fill, optional mono font.
+bool Field(const char* label, char* buf, int bufSize, bool mono = false);
+
+// Float variant of Field for numeric properties.
+bool FieldFloat(const char* label, float* v, const char* format = "%.2f",
+                bool mono = true);
+
+// Striped placeholder drop-zone for drag-drop targets.
+void Placeholder(const char* label, float height,
+                 const ImVec4& accent = tokens::Cyan);
 
 } // namespace ui
