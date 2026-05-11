@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Music Game Engine — UI</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <style>
+    html, body { margin: 0; padding: 0; background: #050507; height: 100%; overflow: hidden; }
+    body { font-family: "Inter", system-ui, sans-serif; color: #f3f4f7; }
+    #root { width: 100vw; height: 100vh; }
+  </style>
+
+  <script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+  <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+  <script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+</head>
+<body>
+  <div id="root"></div>
+
+  <script src="tokens.js"></script>
+  <script type="text/babel" src="components.jsx"></script>
+  <script type="text/babel" src="design-canvas.jsx"></script>
+  <script type="text/babel" src="tweaks-panel.jsx"></script>
+  <script type="text/babel" src="screens/start-screen.jsx"></script>
+  <script type="text/babel" src="screens/project-hub.jsx"></script>
+  <script type="text/babel" src="screens/music-selection.jsx"></script>
+  <script type="text/babel" src="screens/song-editor.jsx"></script>
+  <script type="text/babel" src="screens/player-settings.jsx"></script>
+
+  <script type="text/babel">
+    const { useState, useEffect } = React;
+
+    const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{
+      "accent": "cyan",
+      "density": "mid",
+      "tool": "tap",
+      "sidebarSide": "left",
+      "showGrid": true,
+      "neonIntensity": 1.0
+    }/*EDITMODE-END*/;
+
+    function App() {
+      const [tweaks, setTweak] = useTweaks(TWEAK_DEFAULTS);
+
+      // Apply neon intensity globally via CSS var
+      useEffect(() => {
+        document.documentElement.style.setProperty('--neon', String(tweaks.neonIntensity));
+        const accentMap = {
+          cyan:    '#22e6ff',
+          magenta: '#ff3df0',
+          lime:    '#7dff5a',
+          violet:  '#a070ff',
+          amber:   '#ffb547',
+        };
+        document.documentElement.style.setProperty('--cyan', accentMap[tweaks.accent] || '#22e6ff');
+      }, [tweaks.accent, tweaks.neonIntensity]);
+
+      return (
+        <div className="mge-app" style={{ width: '100%', height: '100%', background: '#000' }}>
+          <DesignCanvas>
+            <DCSection id="modes" title="Song Editor — by game mode" subtitle="Side-by-side comparison. Check what's mode-specific (note types, sliders, scene, material slots) and what's shared.">
+              <DCArtboard id="se-drop2d" label="Drop 2D · 7 lanes vertical · Click/Hold/Flick" width={1440} height={900}>
+                <SongEditor density={tweaks.density} mode="drop2d" tool={tweaks.tool} sidebarLeft={tweaks.sidebarSide === 'left'} accent={tweaks.accent} projectName="BandoriSandbox" songName="Forest Place" />
+              </DCArtboard>
+              <DCArtboard id="se-drop3d" label="Drop 3D · 4-lane perspective + sky · Click/Hold/Flick/Arc/ArcTap" width={1440} height={900}>
+                <SongEditor density={tweaks.density} mode="drop3d" tool={tweaks.tool} sidebarLeft={tweaks.sidebarSide === 'left'} accent={tweaks.accent} projectName="NeonArc" songName="Vector" />
+              </DCArtboard>
+              <DCArtboard id="se-circle" label="Circle · radial disk + tracks · Click/Hold/Flick · disk FX keyframes" width={1440} height={900}>
+                <SongEditor density={tweaks.density} mode="circle" tool={tweaks.tool} sidebarLeft={tweaks.sidebarSide === 'left'} accent={tweaks.accent} projectName="LanotaCircle" songName="Halcyon" />
+              </DCArtboard>
+              <DCArtboard id="se-scanline" label="Scan Line · lane-less + paginated · Click/Hold/Flick/Slide · note-speed ignored" width={1440} height={900}>
+                <SongEditor density={tweaks.density} mode="scanline" tool={tweaks.tool} sidebarLeft={tweaks.sidebarSide === 'left'} accent={tweaks.accent} projectName="CytusCanon" songName="Holy Knight" />
+              </DCArtboard>
+            </DCSection>
+
+            <DCSection id="flow" title="Player flow" subtitle="What the end-user (player) sees: project hub → start → song select → settings.">
+              <DCArtboard id="hub" label="01 · Project Hub" width={1280} height={800}>
+                <ProjectHub />
+              </DCArtboard>
+              <DCArtboard id="start" label="02 · Start Screen" width={1280} height={800}>
+                <StartScreenEditor accent={tweaks.accent} />
+              </DCArtboard>
+              <DCArtboard id="select" label="03 · Music Selection" width={1280} height={800}>
+                <MusicSelectionEditor accent={tweaks.accent} />
+              </DCArtboard>
+              <DCArtboard id="settings" label="04 · Player Settings" width={1280} height={800}>
+                <PlayerSettings />
+              </DCArtboard>
+            </DCSection>
+          </DesignCanvas>
+
+          <TweaksPanel title="Tweaks">
+            <TweakSection title="Accent">
+              <TweakSelect label="Primary accent" value={tweaks.accent}
+                options={[
+                  { value: 'cyan',    label: 'Cyan' },
+                  { value: 'magenta', label: 'Magenta' },
+                  { value: 'lime',    label: 'Lime' },
+                  { value: 'violet',  label: 'Violet' },
+                  { value: 'amber',   label: 'Amber' },
+                ]}
+                onChange={(v) => setTweak('accent', v)} />
+              <TweakSlider label="Neon intensity" value={tweaks.neonIntensity}
+                min={0} max={1.5} step={0.05}
+                onChange={(v) => setTweak('neonIntensity', v)} />
+            </TweakSection>
+
+            <TweakSection title="Editor">
+              <TweakRadio label="Density" value={tweaks.density}
+                options={[
+                  { value: 'compact',  label: 'Compact' },
+                  { value: 'mid',      label: 'Mid' },
+                  { value: 'spacious', label: 'Spacious' },
+                ]}
+                onChange={(v) => setTweak('density', v)} />
+              <TweakRadio label="Sidebar" value={tweaks.sidebarSide}
+                options={[
+                  { value: 'left',  label: 'Left' },
+                  { value: 'right', label: 'Right' },
+                ]}
+                onChange={(v) => setTweak('sidebarSide', v)} />
+            </TweakSection>
+
+            <TweakSection title="Chart">
+              <TweakRadio label="Active tool" value={tweaks.tool}
+                options={[
+                  { value: 'tap',   label: 'Tap' },
+                  { value: 'hold',  label: 'Hold' },
+                  { value: 'flick', label: 'Flick' },
+                  { value: 'slide', label: 'Slide' },
+                ]}
+                onChange={(v) => setTweak('tool', v)} />
+              <TweakToggle label="Show beat grid" value={tweaks.showGrid}
+                onChange={(v) => setTweak('showGrid', v)} />
+            </TweakSection>
+          </TweaksPanel>
+        </div>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+  </script>
+</body>
+</html>

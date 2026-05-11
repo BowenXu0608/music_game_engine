@@ -120,27 +120,15 @@ public:
     void renderCopilotOverlay(Engine* engine);
 
     // Width (pixels) the Copilot overlay currently occupies on the right side
-    // of the display. Returns 0 when closed (the overlay is now a real layout
-    // column — when folded it leaves no residual strip; the toggle lives in
-    // the page's top bar instead). Pages subtract this + the splitter from
-    // their content width so nothing renders under the sidebar.
+    // of the display. Other editor pages subtract this from their full-width
+    // window so their content never renders underneath the sidebar.
     float copilotOverlayWidth() const;
 
-    // Live open/close state, written by the per-page top-bar toggle button.
-    bool& copilotOverlayOpen()       { return m_overlayOpen; }
-    bool  copilotOverlayOpen() const { return m_overlayOpen; }
-
-    // Set width when the user drags the vertical splitter between body and
-    // copilot column. Clamped to [240, 800] px.
-    void  setCopilotOverlayWidth(float w);
-
     // Each frame, non-SongEditor pages tell the overlay how many pixels of
-    // vertical space to leave free at the top (their TopBar) and bottom
-    // (Assets strip + nav bar) so the overlay behaves like the inline
-    // Copilot on SongEditor: top body column only, never covering the top
-    // bar or the bottom strip.
+    // vertical space to leave free at the bottom (their Assets strip + nav
+    // bar height) so the overlay behaves like the inline Copilot on
+    // SongEditor: top body column only, Assets strip spans full width below.
     void setOverlayBottomReserve(float px) { m_overlayBottomReserve = px; }
-    void setOverlayTopReserve   (float px) { m_overlayTopReserve    = px; }
 
     void initVulkan(VulkanContext& ctx, BufferManager& bufMgr, ImGuiLayer& imgui,
                     GLFWwindow* window = nullptr);
@@ -244,19 +232,13 @@ private:
     bool            m_rightSidebarTabPending = false;
 
     // Overlay (docked sidebar) state - shared across all non-SongEditor pages.
-    // Closed by default — user opts in via the page top-bar toggle. When
-    // closed the overlay occupies zero pixels (no residual strip on the
-    // right edge); m_overlayStripW is retained for backward-compat callers
-    // but no longer drawn.
-    bool  m_overlayOpen   = false;
+    bool  m_overlayOpen   = true;
     float m_overlayFullW  = 320.f;
     float m_overlayStripW = 28.f;
-    // Reserved pixels at the top/bottom of the viewport so the overlay
-    // leaves room for each page's top bar and Assets strip + nav bar. Set
-    // every frame by the active page before Engine.cpp calls
-    // renderCopilotOverlay().
+    // Reserved pixels at the bottom of the viewport so the overlay leaves
+    // room for each page's Assets strip + nav bar. Set every frame by the
+    // active page before Engine.cpp calls renderCopilotOverlay().
     float m_overlayBottomReserve = 0.f;
-    float m_overlayTopReserve    = 0.f;
 
     // ── Chart timeline state ─────────────────────────────────────────────────
     float m_timelineScrollX  = 0.f;    // horizontal scroll offset in seconds
@@ -490,10 +472,6 @@ private:
     void renderArcNotes(ImDrawList* dl, ImVec2 origin, ImVec2 size, float startTime,
                         int trackCount, float trackH, float regionTop);
     void renderArcHeightEditor(ImDrawList* dl, ImVec2 origin, ImVec2 size);
-    // Disk-FX keyframe strip — Circle mode chrome above the scene preview
-    // (per MIGRATION §3.4). Visualizes rot/scale/move keyframe times along
-    // the song duration; double-click jumps to a keyframe edit popup.
-    void renderDiskFxStrip();
     void fixupArcTapParents(int deletedIdx);
     // Evaluate arc position at normalized time t [0..1]. Supports multi-waypoint.
     static glm::vec2 evalArcEditor(const EditorNote& arc, float t);

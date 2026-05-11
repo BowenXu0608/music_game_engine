@@ -10,7 +10,6 @@ void SettingsEditor::render(Engine* engine) {
         // Settings page is a single-column form with no bottom Assets strip;
         // let the overlay fill the full viewport height here.
         engine->songEditor().setOverlayBottomReserve(0.f);
-        engine->songEditor().setOverlayTopReserve(0.f);
     }
 
     // Bind the settings page to the live engine PlayerSettings so changes

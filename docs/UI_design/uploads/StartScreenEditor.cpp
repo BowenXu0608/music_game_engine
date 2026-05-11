@@ -1,5 +1,4 @@
 #include "StartScreenEditor.h"
-#include "Widgets.h"
 #include "engine/Engine.h"
 #include "renderer/vulkan/VulkanContext.h"
 #include "renderer/vulkan/BufferManager.h"
@@ -32,54 +31,6 @@
 
 namespace fs = std::filesystem;
 using json = nlohmann::json;
-
-// Mock-style empty drop placeholder: dark backdrop + diagonal cyan stripes +
-// dashed cyan border + centered uppercase cyan caption ("BG.PNG — DROP IMAGE
-// OR VIDEO" etc.). Drawn directly with ImDrawList so it's identical across
-// drop zones (background, logo image, audio).
-static void drawEmptyDropPlaceholder(ImDrawList* dl, ImVec2 pos, ImVec2 size,
-                                     const char* caption) {
-    const ImU32 bgCol     = IM_COL32(8, 14, 18, 255);
-    const ImU32 stripeCol = IM_COL32(34, 230, 255, 60);
-    const ImU32 edgeCol   = IM_COL32(34, 230, 255, 255);
-    const ImU32 textCol   = IM_COL32(34, 230, 255, 255);
-    const ImVec2 maxPt(pos.x + size.x, pos.y + size.y);
-
-    dl->AddRectFilled(pos, maxPt, bgCol, 4.f);
-
-    dl->PushClipRect(pos, maxPt, true);
-    const float spacing = 10.f;
-    for (float t = -size.y; t < size.x + size.y; t += spacing) {
-        dl->AddLine(ImVec2(pos.x + t,           pos.y),
-                    ImVec2(pos.x + t + size.y,  pos.y + size.y),
-                    stripeCol, 1.f);
-    }
-    dl->PopClipRect();
-
-    auto dashLine = [&](ImVec2 a, ImVec2 b) {
-        const float dash = 6.f, gap = 4.f;
-        float dx = b.x - a.x, dy = b.y - a.y;
-        float len = std::sqrt(dx * dx + dy * dy);
-        if (len < 1.f) return;
-        dx /= len; dy /= len;
-        for (float t = 0.f; t < len; ) {
-            float t2 = std::min(t + dash, len);
-            dl->AddLine(ImVec2(a.x + dx * t,  a.y + dy * t),
-                        ImVec2(a.x + dx * t2, a.y + dy * t2),
-                        edgeCol, 1.5f);
-            t = t2 + gap;
-        }
-    };
-    dashLine(pos,                          ImVec2(maxPt.x, pos.y));
-    dashLine(ImVec2(maxPt.x, pos.y),       maxPt);
-    dashLine(maxPt,                        ImVec2(pos.x, maxPt.y));
-    dashLine(ImVec2(pos.x, maxPt.y),       pos);
-
-    ImVec2 ts = ImGui::CalcTextSize(caption);
-    dl->AddText(ImVec2(pos.x + (size.x - ts.x) * 0.5f,
-                       pos.y + (size.y - ts.y) * 0.5f),
-                textCol, caption);
-}
 
 // ── AI shader-gen state (pimpl) ───────────────────────────────────────────────
 
@@ -467,286 +418,94 @@ void StartScreenEditor::render(Engine* engine) {
         ImGui::SetNextWindowPos(ImVec2(0, 0));
         ImGui::SetNextWindowSize(ImVec2(ds.x, ds.y));
     }
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
-    ImGui::Begin("##start_screen_editor", nullptr,
+    ImGui::Begin("Start Screen Editor", nullptr,
                  ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse |
-                 ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoTitleBar |
-                 ImGuiWindowFlags_NoBringToFrontOnFocus);
-    ImGui::PopStyleVar();
+                 ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoBringToFrontOnFocus);
 
-    // Top bar matching MIGRATION mock — gradient logo + crumbs +
-    // back-to-Hub / forward-to-Music-Selection / Test Game.
-    {
-        std::string projName = m_projectPath;
-        auto slash = projName.find_last_of("/\\");
-        if (slash != std::string::npos) projName = projName.substr(slash + 1);
-        if (projName.empty()) projName = "Start Screen";
-        ui::TopBar({projName.c_str(), "Start Screen"}, [&]{
-            if (ui::TopNavBack("Hub"))
-                if (engine) engine->switchLayer(EditorLayer::ProjectHub);
-            ImGui::SameLine(0.f, 4.f);
-            if (ui::TopNavForward("Music Selection")) {
-                if (engine) {
-                    engine->musicSelectionEditor().load(m_projectPath);
-                    engine->switchLayer(EditorLayer::MusicSelection);
-                }
-            }
-            ImGui::SameLine(0.f, 12.f);
-            if (engine) {
-                bool& open = engine->songEditor().copilotOverlayOpen();
-                if (ui::TopToggle("Copilot", open)) open = !open;
-            }
-            ImGui::SameLine(0.f, 12.f);
-            if (ui::TopTestGame())
-                if (engine) engine->enterTestMode(EditorLayer::StartScreen);
-        });
-    }
-
-    using namespace ui::tokens;
     ImVec2 contentSize = ImGui::GetContentRegionAvail();
     const float splitterThick = 4.f;
+    const float navH  = 36.f;
+    // Copilot sidebar reservation - body row only, Assets strip full width.
     const float copilotW = engine ? engine->songEditor().copilotOverlayWidth() : 0.f;
-    const float copilotSplitW = (copilotW > 0.f) ? splitterThick : 0.f;
-    const float bodyW    = std::max(200.f, contentSize.x - copilotW - copilotSplitW);
-
-    // Bottom Assets panel: zero footprint when closed. When open, the user
-    // can drag a horizontal splitter to resize. Toggle lives in the
-    // Hierarchy panel (under "Audio") rather than as a bottom collapsing
-    // header — see entries[] below.
+    const float bodyW    = std::max(200.f, contentSize.x - copilotW);
+    // Pinned bottom Assets strip - same pattern as SongEditor.
+    const float assetsHeaderH = ImGui::GetFrameHeightWithSpacing();
     float assetsH = m_assetsBarOpen
-        ? std::clamp(m_assetsBarH, 80.f, contentSize.y * 0.7f)
-        : 0.f;
-    const float assetsSplitH = m_assetsBarOpen ? splitterThick : 0.f;
-    float topH    = std::max(100.f, contentSize.y - assetsH - assetsSplitH);
+        ? std::clamp(m_assetsBarH, 80.f, contentSize.y * 0.5f)
+        : assetsHeaderH;
+    float totalH  = std::max(100.f, contentSize.y - navH - 8.f - assetsH - 4.f);
+    float topH    = totalH;
+    float previewW = bodyW * m_hSplit - splitterThick * 0.5f;
+    float propsW   = bodyW * (1.f - m_hSplit) - splitterThick * 0.5f;
 
-    // Three-column layout per MIGRATION §3.2: Hierarchy | Preview | Props.
-    // Properties column is user-resizable via a vertical splitter between
-    // Preview and Properties. Use SameLine(0,0) between columns/splitter so
-    // the math is exact (no ItemSpacing slop).
-    const float hierW  = std::min(220.f, bodyW * 0.20f);
-    const float propsW = std::clamp(m_propertiesW, 200.f, bodyW * 0.6f);
-    const float previewW = std::max(200.f,
-        bodyW - hierW - propsW - splitterThick);
-
+    // Tell the overlay how many pixels to leave free at the bottom. Computed
+    // from stable inputs (no GetCursorScreenPos dependency) so the overlay
+    // height is consistent across page transitions and does not snap when
+    // navigating in or out of this page.
     if (engine) {
-        engine->songEditor().setOverlayBottomReserve(assetsH + assetsSplitH);
-        engine->songEditor().setOverlayTopReserve(56.f);  // ui::TopBar height
+        engine->songEditor().setOverlayBottomReserve(navH + 8.f + assetsH + 4.f);
     }
 
-    // The mock renders all three editor columns on the same pure-black
-    // canvas — only thin borders divide them. Push ChildBg=BgVoid so the
-    // BeginChild calls below don't paint a lifted-gray panel underneath.
-    ImGui::PushStyleColor(ImGuiCol_ChildBg, BgVoid);
-
-    // ── Hierarchy column ─────────────────────────────────────────────────
-    ImGui::BeginChild("##sshier", ImVec2(hierW, topH), true);
-    {
-        // Tab strip (single tab, mirrors mock).
-        if (ImGui::BeginTabBar("##sshier_tabs")) {
-            if (ImGui::BeginTabItem("Hierarchy")) ImGui::EndTabItem();
-            ImGui::EndTabBar();
-        }
-        ImGui::Spacing();
-
-        // Section title + 5 nav items with chevron / icon-dot / label.
-        ImDrawList* dl = ImGui::GetWindowDrawList();
-        ImGui::TextColored(TextLow, "START SCREEN");
-        ImGui::Spacing();
-
-        enum class HierIcon { Image, Text, Sparkle, Audio, Folder };
-        // isToggle rows do NOT change m_hierActive — they flip an external
-        // bool. Used for Assets (bottom panel toggle) below.
-        struct HierEntry { HierItem id; const char* label; HierIcon icon; bool isToggle; };
-        const HierEntry entries[] = {
-            { HierItem::Background, "Background",        HierIcon::Image,   false },
-            { HierItem::Logo,       "Logo",              HierIcon::Text,    false },
-            { HierItem::TapText,    "Tap Text",          HierIcon::Text,    false },
-            { HierItem::Transition, "Transition Effect", HierIcon::Sparkle, false },
-            { HierItem::Audio,      "Audio",             HierIcon::Audio,   false },
-            { HierItem::Background, "Assets",            HierIcon::Folder,  true  },
-        };
-        auto drawHierIcon = [&](HierIcon ic, ImVec2 c, ImU32 col) {
-            // 14 px icons drawn with primitives — keeps the file glyph-clean
-            // (CP936 rejection) and stays sharp at any DPI.
-            switch (ic) {
-                case HierIcon::Image: {
-                    const ImVec2 a{c.x - 7.f, c.y - 5.f}, b{c.x + 7.f, c.y + 5.f};
-                    dl->AddRect(a, b, col, 1.5f, 0, 1.4f);
-                    dl->AddCircleFilled({c.x - 3.f, c.y - 1.5f}, 1.4f, col);
-                    dl->AddTriangleFilled({c.x - 4.f, c.y + 4.f},
-                                          {c.x + 1.f, c.y - 1.f},
-                                          {c.x + 6.f, c.y + 4.f}, col);
-                    break;
-                }
-                case HierIcon::Text: {
-                    // Vertical stroke "I" with serifs.
-                    dl->AddLine({c.x, c.y - 6.f}, {c.x, c.y + 6.f}, col, 1.5f);
-                    dl->AddLine({c.x - 4.f, c.y - 6.f}, {c.x + 4.f, c.y - 6.f}, col, 1.5f);
-                    dl->AddLine({c.x - 4.f, c.y + 6.f}, {c.x + 4.f, c.y + 6.f}, col, 1.5f);
-                    break;
-                }
-                case HierIcon::Sparkle: {
-                    dl->AddLine({c.x, c.y - 7.f}, {c.x, c.y + 7.f}, col, 1.4f);
-                    dl->AddLine({c.x - 7.f, c.y}, {c.x + 7.f, c.y}, col, 1.4f);
-                    dl->AddLine({c.x - 5.f, c.y - 5.f}, {c.x + 5.f, c.y + 5.f}, col, 1.0f);
-                    dl->AddLine({c.x - 5.f, c.y + 5.f}, {c.x + 5.f, c.y - 5.f}, col, 1.0f);
-                    break;
-                }
-                case HierIcon::Audio: {
-                    // Speaker triangle + arcs.
-                    dl->AddTriangleFilled({c.x - 5.f, c.y - 3.f},
-                                          {c.x - 5.f, c.y + 3.f},
-                                          {c.x + 1.f, c.y + 0.f}, col);
-                    dl->AddCircle({c.x + 3.f, c.y}, 4.5f, col, 0, 1.2f);
-                    dl->AddCircle({c.x + 3.f, c.y}, 7.5f, col, 0, 1.0f);
-                    break;
-                }
-                case HierIcon::Folder: {
-                    // Folder tab outline (open-front).
-                    dl->AddRect({c.x - 7.f, c.y - 3.f}, {c.x + 7.f, c.y + 5.f},
-                                col, 1.5f, 0, 1.4f);
-                    dl->AddLine({c.x - 7.f, c.y - 3.f}, {c.x - 2.f, c.y - 3.f}, col, 1.4f);
-                    dl->AddLine({c.x - 2.f, c.y - 3.f}, {c.x,       c.y - 6.f}, col, 1.4f);
-                    dl->AddLine({c.x,       c.y - 6.f}, {c.x + 5.f, c.y - 6.f}, col, 1.4f);
-                    break;
-                }
-            }
-        };
-        int rowIdx = 0;
-        for (const auto& e : entries) {
-            const bool active = e.isToggle ? m_assetsBarOpen
-                                           : (m_hierActive == e.id);
-            const ImVec2 rowMin = ImGui::GetCursorScreenPos();
-            const float  rowW   = ImGui::GetContentRegionAvail().x;
-            const float  rowH   = 28.f;
-            const ImVec2 rowMax = {rowMin.x + rowW, rowMin.y + rowH};
-            if (active) {
-                dl->AddRectFilled(rowMin, rowMax,
-                                  ToU32(WithAlpha(Cyan, 0.10f)), 4.f);
-                dl->AddRectFilled(rowMin, {rowMin.x + 2.f, rowMax.y},
-                                  ToU32(Cyan));
-            }
-            ImGui::PushID(rowIdx++);
-            if (ImGui::InvisibleButton("##hier_row", {rowW, rowH})) {
-                if (e.isToggle) {
-                    m_assetsBarOpen = !m_assetsBarOpen;
-                } else {
-                    m_hierActive = e.id;
-                    m_hierJumpTo = e.id;
-                    m_hierJump   = true;
-                }
-            }
-            const bool hovered = ImGui::IsItemHovered();
-            ImGui::PopID();
-            if (!active && hovered) {
-                dl->AddRectFilled(rowMin, rowMax,
-                                  ToU32(WithAlpha(Cyan, 0.04f)), 4.f);
-            }
-            const ImU32 iconCol = ToU32(active ? Cyan
-                                               : (hovered ? TextMid : TextLow));
-            drawHierIcon(e.icon, {rowMin.x + 18.f, rowMin.y + rowH * 0.5f}, iconCol);
-            const ImU32 textCol = ToU32(active ? TextHi
-                                               : (hovered ? TextMid : TextLow));
-            dl->AddText({rowMin.x + 36.f,
-                         rowMin.y + (rowH - ImGui::GetFontSize()) * 0.5f},
-                        textCol, e.label);
-        }
-    }
-    ImGui::EndChild();
-    ImGui::SameLine(0.f, 0.f);
-
-    // ── Preview column ───────────────────────────────────────────────────
-    ImGui::BeginChild("##sspreview", ImVec2(previewW, topH), true);
+    // ── Top row: Preview | vsplitter | Properties ─────────────────────────────
+    ImGui::BeginChild("Preview", ImVec2(previewW, topH), true);
     renderPreview();
     ImGui::EndChild();
-    ImGui::SameLine(0.f, 0.f);
 
-    // ── Vertical splitter between Preview and Properties ────────────────
-    ImGui::InvisibleButton("##ss_props_split", ImVec2(splitterThick, topH));
+    ImGui::SameLine();
+
+    // Vertical splitter
+    ImGui::InvisibleButton("vsplit", ImVec2(splitterThick, topH));
     if (ImGui::IsItemActive()) {
-        // Drag right shrinks Properties, expands Preview.
-        m_propertiesW = std::clamp(
-            m_propertiesW - ImGui::GetIO().MouseDelta.x,
-            200.f, bodyW * 0.6f);
+        m_hSplit += ImGui::GetIO().MouseDelta.x / std::max(1.f, bodyW);
+        m_hSplit = std::clamp(m_hSplit, 0.2f, 0.8f);
     }
     if (ImGui::IsItemHovered() || ImGui::IsItemActive())
         ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
-    {
-        ImDrawList* dl = ImGui::GetWindowDrawList();
-        dl->AddRectFilled(ImGui::GetItemRectMin(), ImGui::GetItemRectMax(),
-                          ToU32(Border));
-    }
-    ImGui::SameLine(0.f, 0.f);
 
-    // ── Properties / Materials column ────────────────────────────────────
-    ImGui::BeginChild("##ssprops", ImVec2(propsW, topH), true);
+    ImGui::SameLine();
+
+    ImGui::BeginChild("Properties", ImVec2(propsW, topH), true);
+    // Material builder moved to the SongEditor (gameplay) page — this
+    // panel is purely start-screen properties now.
+    renderProperties();
+    // Request flag is obsolete; swallow any stale true so the click on a
+    // MAT tile no longer tries to open a non-existent tab.
+    m_materialsTabRequested = false;
+    ImGui::EndChild();
+
+    // ── Bottom strip: pinned Assets (always docked, collapsible) ────────────
+    ImGui::BeginChild("Assets", ImVec2(contentSize.x, assetsH), true);
     {
-        if (ImGui::BeginTabBar("##ssprops_tabs",
-                               ImGuiTabBarFlags_NoCloseWithMiddleMouseButton)) {
-            ImGuiTabItemFlags propsFlags = ImGuiTabItemFlags_None;
-            ImGuiTabItemFlags matsFlags  = ImGuiTabItemFlags_None;
-            if (m_materialsTabRequested) {
-                matsFlags |= ImGuiTabItemFlags_SetSelected;
-                m_materialsTabRequested = false;
-            }
-            if (ImGui::BeginTabItem("Properties", nullptr, propsFlags)) {
-                m_rightTab = RightTab::Properties;
-                renderProperties();
-                ImGui::EndTabItem();
-            }
-            if (ImGui::BeginTabItem("Materials", nullptr, matsFlags)) {
-                m_rightTab = RightTab::Materials;
-                renderMaterials(engine, /*hideSelector=*/false);
-                ImGui::EndTabItem();
-            }
-            ImGui::EndTabBar();
-        }
+        ImGui::SetNextItemOpen(m_assetsBarOpen, ImGuiCond_Always);
+        bool open = ImGui::CollapsingHeader("Assets##ssbottom");
+        m_assetsBarOpen = open;
+        if (open)
+            renderAssets();
     }
     ImGui::EndChild();
 
-    // ── Vertical splitter between body and Copilot column ────────────────
-    if (copilotW > 0.f && engine) {
-        ImGui::SameLine(0.f, 0.f);
-        ImGui::InvisibleButton("##ss_copilot_split",
-                               ImVec2(splitterThick, topH));
-        if (ImGui::IsItemActive()) {
-            engine->songEditor().setCopilotOverlayWidth(
-                copilotW - ImGui::GetIO().MouseDelta.x);
-        }
-        if (ImGui::IsItemHovered() || ImGui::IsItemActive())
-            ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
-        ImDrawList* dl = ImGui::GetWindowDrawList();
-        ImVec2 sMin = ImGui::GetItemRectMin();
-        ImVec2 sMax = ImGui::GetItemRectMax();
-        dl->AddRectFilled(sMin, sMax, ToU32(Border));
+    // ── Nav bar ───────────────────────────────────────────────────────────────
+    if (ImGui::Button("< Back")) {
+        if (engine) engine->switchLayer(EditorLayer::ProjectHub);
     }
-
-    // ── Bottom Assets panel + horizontal splitter (only when open) ────────
-    if (m_assetsBarOpen) {
-        ImGui::InvisibleButton("##ss_assets_split",
-                               ImVec2(contentSize.x, splitterThick));
-        if (ImGui::IsItemActive()) {
-            m_assetsBarH = std::clamp(
-                m_assetsBarH - ImGui::GetIO().MouseDelta.y,
-                80.f, contentSize.y * 0.7f);
-        }
-        if (ImGui::IsItemHovered() || ImGui::IsItemActive())
-            ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeNS);
-        ImDrawList* dl = ImGui::GetWindowDrawList();
-        ImVec2 sMin = ImGui::GetItemRectMin();
-        ImVec2 sMax = ImGui::GetItemRectMax();
-        dl->AddRectFilled(sMin, sMax, ToU32(Border));
-
-        ImGui::BeginChild("Assets", ImVec2(contentSize.x, assetsH), true);
-        renderAssets();
-        ImGui::EndChild();
+    ImGui::SameLine();
+    if (ImGui::Button("Save")) {
+        save();
+        m_statusMsg   = "Saved!";
+        m_statusTimer = 2.f;
     }
-
     if (m_statusTimer > 0.f) {
-        ImGui::TextColored(Lime, "%s", m_statusMsg.c_str());
+        ImGui::SameLine();
+        ImGui::TextColored(ImVec4(0.4f, 1.f, 0.4f, 1.f), "%s", m_statusMsg.c_str());
     }
-
-    ImGui::PopStyleColor();   // ChildBg = BgVoid
+    ImGui::SameLine();
+    ImGui::SetCursorPosX(contentSize.x - 200.f);
+    if (ImGui::Button("Next: Music Selection >")) {
+        if (engine) {
+            engine->musicSelectionEditor().load(m_projectPath);
+            engine->switchLayer(EditorLayer::MusicSelection);
+        }
+    }
 
     ImGui::End();
 }
@@ -754,31 +513,16 @@ void StartScreenEditor::render(Engine* engine) {
 // ── renderPreview ─────────────────────────────────────────────────────────────
 
 void StartScreenEditor::renderPreview() {
-    using namespace ui::tokens;
 
-    // Paint the full preview region pure black before drawing anything else,
-    // so the chrome edges (around the aspect-controls row and the letterbox
-    // bars) match the BgVoid of the surrounding columns rather than the
-    // lifted-gray default ChildBg / FrameBg blend.
-    {
-        ImVec2 fillMin = ImGui::GetCursorScreenPos();
-        ImVec2 avail   = ImGui::GetContentRegionAvail();
-        ImGui::GetWindowDrawList()->AddRectFilled(
-            fillMin, ImVec2(fillMin.x + avail.x, fillMin.y + avail.y),
-            ToU32(BgVoid));
-    }
-
-    // Aspect-ratio controls — original engine widget (preserves preset combo
-    // + W:H numeric inputs). Per user request, the canvas ratio handling
-    // stays exactly as it was before the layout pass.
+    // Aspect-ratio controls row. Device frame follows the author's choice so
+    // what they see here matches what ships on the target phone/tablet.
     if (m_engine)
         previewAspect::renderControls(m_engine->previewAspect());
     ImGui::Spacing();
 
     ImVec2 previewSize = ImGui::GetContentRegionAvail();
     previewAspect::FitResult fit = m_engine
-        ? previewAspect::fitAndLetterbox(m_engine->previewAspect(), previewSize,
-                                         IM_COL32(0, 0, 0, 255))
+        ? previewAspect::fitAndLetterbox(m_engine->previewAspect(), previewSize)
         : previewAspect::FitResult{ImGui::GetCursorScreenPos(), previewSize};
     ImDrawList* dl = ImGui::GetWindowDrawList();
     ImVec2 p = fit.origin;
@@ -814,35 +558,9 @@ void StartScreenEditor::renderPreview() {
                         IM_COL32(180, 180, 180, 200), label.c_str());
             break;
         }
-        default: {
-            // Hero gradient backdrop matching React mock — radial dark cyan
-            // top-left, vertical fade to black, plus two soft glow blobs.
-            const ImVec2 br = {p.x + pw, p.y + ph};
-            dl->AddRectFilledMultiColor(p, br,
-                IM_COL32(10, 5, 24, 255),  IM_COL32(10, 5, 24, 255),
-                IM_COL32(0, 0, 0, 255),    IM_COL32(0, 0, 0, 255));
-            const float blobR1 = pw * 0.30f;
-            const ImVec2 blob1{p.x + pw * 0.18f, p.y + ph * 0.22f};
-            for (int i = 8; i > 0; --i) {
-                const float r = blobR1 * (i / 8.f);
-                dl->AddCircleFilled(blob1, r,
-                    IM_COL32(34, 230, 255, 6 + i * 3));
-            }
-            const float blobR2 = pw * 0.28f;
-            const ImVec2 blob2{p.x + pw * 0.85f, p.y + ph * 0.78f};
-            for (int i = 8; i > 0; --i) {
-                const float r = blobR2 * (i / 8.f);
-                dl->AddCircleFilled(blob2, r,
-                    IM_COL32(255, 61, 240, 5 + i * 2));
-            }
-            const ImU32 gridCol = IM_COL32(34, 230, 255, 12);
-            const float gridStep = std::max(28.f, pw / 30.f);
-            for (float x = p.x; x < br.x; x += gridStep)
-                dl->AddLine({x, p.y}, {x, br.y}, gridCol, 1.f);
-            for (float y = p.y; y < br.y; y += gridStep)
-                dl->AddLine({p.x, y}, {br.x, y}, gridCol, 1.f);
+        default:
+            dl->AddRectFilled(p, ImVec2(p.x + pw, p.y + ph), IM_COL32(40, 40, 50, 255));
             break;
-        }
     }
 
     // Logo
@@ -921,90 +639,6 @@ void StartScreenEditor::renderPreview() {
                 IM_COL32(255, 255, 255, 255), m_tapText);
 
     dl->PopClipRect();
-
-    // ── Overlay chrome (matches MIGRATION mock §3.2) ─────────────────────
-    using namespace ui::tokens;
-
-    // Aspect/resolution badge — top-left.
-    char aspectLabel[48] = "16:9 - 1920x1080";
-    if (m_engine) {
-        const auto& a = m_engine->previewAspect();
-        snprintf(aspectLabel, sizeof(aspectLabel),
-                 "%d:%d - %dx%d", a.w, a.h, (int)pw, (int)ph);
-    }
-    {
-        ui::PushMono();
-        ImVec2 sz = ImGui::CalcTextSize(aspectLabel);
-        const ImVec2 bMin{p.x + 8.f, p.y + 8.f};
-        const ImVec2 bMax{bMin.x + sz.x + 12.f, bMin.y + sz.y + 6.f};
-        dl->AddRectFilled(bMin, bMax, IM_COL32(0, 0, 0, 160), 4.f);
-        dl->AddRect(bMin, bMax, ToU32(BorderHi), 4.f);
-        dl->AddText({bMin.x + 6.f, bMin.y + 3.f},
-                    ToU32(TextMid), aspectLabel);
-        ui::PopMono();
-    }
-
-    // Zoom % readout — top-right.
-    {
-        char zoom[24];
-        snprintf(zoom, sizeof(zoom), "%d%%", (int)(m_previewZoom * 100.f));
-        ui::PushMono();
-        ImVec2 sz = ImGui::CalcTextSize(zoom);
-        const ImVec2 bMax{p.x + pw - 8.f, p.y + 8.f + sz.y + 6.f};
-        const ImVec2 bMin{bMax.x - sz.x - 12.f, p.y + 8.f};
-        dl->AddRectFilled(bMin, bMax, IM_COL32(0, 0, 0, 160), 4.f);
-        dl->AddRect(bMin, bMax, ToU32(BorderHi), 4.f);
-        dl->AddText({bMin.x + 6.f, bMin.y + 3.f},
-                    ToU32(TextHi), zoom);
-        ui::PopMono();
-    }
-
-    // Selection box around the active hierarchy item — dashed cyan with
-    // 4 corner dots. Matches mock's logo-selected look.
-    auto drawSelBox = [&](float ax, float ay, float bx, float by) {
-        const ImU32 sel  = ToU32(Cyan);
-        const ImU32 selH = ToU32(WithAlpha(Cyan, 0.30f));
-        dl->AddRect({ax - 1.f, ay - 1.f}, {bx + 1.f, by + 1.f}, selH, 0.f, 0, 3.f);
-        const float step = 6.f;
-        for (float x = ax; x < bx; x += step * 2.f) {
-            dl->AddLine({std::min(x + step, bx), ay}, {std::min(x + step * 2.f, bx), ay}, sel, 1.f);
-            dl->AddLine({std::min(x + step, bx), by}, {std::min(x + step * 2.f, bx), by}, sel, 1.f);
-        }
-        for (float y = ay; y < by; y += step * 2.f) {
-            dl->AddLine({ax, std::min(y + step, by)}, {ax, std::min(y + step * 2.f, by)}, sel, 1.f);
-            dl->AddLine({bx, std::min(y + step, by)}, {bx, std::min(y + step * 2.f, by)}, sel, 1.f);
-        }
-        const float d = 6.f;
-        for (auto& c : {ImVec2{ax, ay}, ImVec2{bx, ay},
-                        ImVec2{ax, by}, ImVec2{bx, by}}) {
-            dl->AddRectFilled({c.x - d * 0.5f, c.y - d * 0.5f},
-                              {c.x + d * 0.5f, c.y + d * 0.5f}, sel);
-        }
-    };
-    switch (m_hierActive) {
-        case HierItem::Background:
-            drawSelBox(p.x + 4.f, p.y + 4.f, p.x + pw - 4.f, p.y + ph - 4.f);
-            break;
-        case HierItem::Logo: {
-            float lx = p.x + pw * m_logoPos[0];
-            float ly = p.y + ph * m_logoPos[1];
-            float boxW = std::max(80.f, pw * 0.40f * m_logoScale);
-            float boxH = std::max(48.f, ph * 0.18f * m_logoScale);
-            drawSelBox(lx - boxW * 0.5f, ly - boxH * 0.5f,
-                       lx + boxW * 0.5f, ly + boxH * 0.5f);
-            break;
-        }
-        case HierItem::TapText: {
-            float tx = p.x + pw * m_tapTextPos[0];
-            float ty = p.y + ph * m_tapTextPos[1];
-            float boxW = pw * 0.40f;
-            float boxH = (float)m_tapTextSize + 12.f;
-            drawSelBox(tx - boxW * 0.5f, ty - boxH * 0.5f,
-                       tx + boxW * 0.5f, ty + boxH * 0.5f);
-            break;
-        }
-        default: break; // Transition / Audio aren't visually framed.
-    }
 }
 
 // ── renderGamePreview ─────────────────────────────────────────────────────────
@@ -1095,33 +729,31 @@ void StartScreenEditor::renderGamePreview(ImVec2 p, ImVec2 size) {
 // ── renderProperties ──────────────────────────────────────────────────────────
 
 void StartScreenEditor::renderProperties() {
-    // The right column tab strip already shows "Properties / Materials" — no
-    // additional title needed here. Each section uses ui::SectionHeader's
-    // right-slot to render a clickable Default pill matching the React mock.
+    ImGui::Text("Properties");
+    ImGui::Separator();
 
-    auto sectionDefault = [&](const char* label,
-                              std::function<void()> reset) -> bool {
-        return ui::SectionHeader(label, [&]{
-            if (ui::DefaultPill(label)) reset();
-        });
-    };
-
-    // Show only the section matching the currently-selected Hierarchy item.
-    auto sectionFor = [&](HierItem item) -> bool {
-        return m_hierActive == item;
+    // Small inline "Default" pill — drawn inside each section body (first
+    // line) so it's fully inside the content region (no scrollbar clipping)
+    // and its click cannot be stolen by the CollapsingHeader's hit area.
+    auto renderDefaultBtn = [&](const char* id, std::function<void()> reset) {
+        ImGui::PushID(id);
+        if (ImGui::SmallButton("Default")) reset();
+        ImGui::PopID();
+        ImGui::SameLine();
+        ImGui::TextDisabled("(reset this section)");
+        ImGui::Spacing();
     };
 
     // ── Background ────────────────────────────────────────────────────────────
-    if (sectionFor(HierItem::Background) && sectionDefault("Background", [&]{
+    if (ImGui::CollapsingHeader("Background", ImGuiTreeNodeFlags_DefaultOpen)) {
+        renderDefaultBtn("bgdef", [&]() {
             m_bgFile[0] = '\0';
             if (m_ctx) unloadBackground(*m_ctx, *m_bufMgr);
             m_bgType = BgType::None;
-        })) {
-        // Drop zone — drag a thumbnail from the asset panel below. Full width
-        // (no Clear button reserve); reset is done via the "Default" pill in
-        // the section header to match the prototype.
-        const float zoneW = ImGui::GetContentRegionAvail().x;
-        const float zoneH = 90.f;
+        });
+        // Drop zone — drag a thumbnail from the asset panel below onto this area
+        const float zoneW = ImGui::GetContentRegionAvail().x - 74.f;
+        const float zoneH = 54.f;
         ImVec2 zonePos = ImGui::GetCursorScreenPos();
         ImGui::InvisibleButton("##bgzone", ImVec2(zoneW, zoneH));
         ImDrawList* dlBg = ImGui::GetWindowDrawList();
@@ -1139,16 +771,16 @@ void StartScreenEditor::renderProperties() {
                                  zonePos.y + zoneH * 0.5f - tsz.y * 0.5f),
                           IM_COL32(200, 200, 200, 255), fname.c_str());
         } else {
-            drawEmptyDropPlaceholder(dlBg, zonePos, ImVec2(zoneW, zoneH),
-                                     "BG.PNG  -  DROP IMAGE OR VIDEO");
+            dlBg->AddRectFilled(zonePos, ImVec2(zonePos.x + zoneW, zonePos.y + zoneH),
+                                IM_COL32(30, 30, 45, 180), 4.f);
+            const char* hint = "Drop background here";
+            ImVec2 tsz = ImGui::CalcTextSize(hint);
+            dlBg->AddText(ImVec2(zonePos.x + zoneW * 0.5f - tsz.x * 0.5f,
+                                 zonePos.y + zoneH * 0.5f - tsz.y * 0.5f),
+                          IM_COL32(120, 120, 140, 200), hint);
         }
-        if (m_bgType == BgType::Image && m_bgDesc) {
-            dlBg->AddRect(zonePos, ImVec2(zonePos.x + zoneW, zonePos.y + zoneH),
-                          borderCol, 4.f, 0, 1.5f);
-        } else if (m_bgFile[0] != '\0') {
-            dlBg->AddRect(zonePos, ImVec2(zonePos.x + zoneW, zonePos.y + zoneH),
-                          borderCol, 4.f, 0, 1.5f);
-        }
+        dlBg->AddRect(zonePos, ImVec2(zonePos.x + zoneW, zonePos.y + zoneH),
+                      borderCol, 4.f, 0, 1.5f);
         if (ImGui::BeginDragDropTarget()) {
             if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("ASSET_PATH")) {
                 std::string rel(static_cast<const char*>(payload->Data), payload->DataSize - 1);
@@ -1157,12 +789,21 @@ void StartScreenEditor::renderProperties() {
             }
             ImGui::EndDragDropTarget();
         }
+        ImGui::SameLine();
+        ImGui::BeginGroup();
+        if (ImGui::Button("Clear##bg")) {
+            m_bgFile[0] = '\0';
+            if (m_ctx) unloadBackground(*m_ctx, *m_bufMgr);
+            m_bgType = BgType::None;
+        }
+        ImGui::EndGroup();
     }
 
     ImGui::Spacing();
 
     // ── Logo ──────────────────────────────────────────────────────────────────
-    if (sectionFor(HierItem::Logo) && sectionDefault("Logo", [&]{
+    if (ImGui::CollapsingHeader("Logo", ImGuiTreeNodeFlags_DefaultOpen)) {
+        renderDefaultBtn("logodef", [&]() {
             m_logoType = LogoType::Text;
             m_logoText[0] = '\0';
             m_logoColor[0] = m_logoColor[1] = m_logoColor[2] = m_logoColor[3] = 1.f;
@@ -1176,12 +817,11 @@ void StartScreenEditor::renderProperties() {
             m_logoGlowRadius = 8.f;
             m_logoImageFile[0] = '\0';
             if (m_ctx) unloadLogoImage(*m_ctx, *m_bufMgr);
-        })) {
-        ImGui::TextDisabled("TYPE");
+        });
+        const char* logoTypes[] = {"Text", "Image"};
         int lt = static_cast<int>(m_logoType);
-        if (ui::SegBar("##logoType", {"Text", "Image"}, &lt))
+        if (ImGui::Combo("Logo Type", &lt, logoTypes, 2))
             m_logoType = static_cast<LogoType>(lt);
-        ImGui::Spacing();
 
         // Hard limits on anything that controls rendered text size. Kept
         // here (not at load/save) so even programmatic edits or stale
@@ -1196,17 +836,16 @@ void StartScreenEditor::renderProperties() {
         if (m_logoType == LogoType::Text) {
             ImGui::InputText("Text##logo", m_logoText, 256);
             // Font Size + Bold on one row; Color on its own row.
-            ui::Slider("Font size", &m_logoFontSize, 12.f, kLogoFontMax, " px",
-                       ui::tokens::Cyan);
-            ImGui::Spacing();
+            ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 80.f);
+            ImGui::SliderFloat("##fsize", &m_logoFontSize, 12.f, kLogoFontMax, "%.0f px");
+            ImGui::SameLine();
             ImGui::Checkbox("Bold", &m_logoBold);
             ImGui::ColorEdit4("Color##logo", m_logoColor,
                               ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_AlphaBar);
         } else {
-            // Image logo — drag from asset panel. Full width; reset via the
-            // section's Default pill (matching prototype).
-            const float lzoneW = ImGui::GetContentRegionAvail().x;
-            const float lzoneH = 90.f;
+            // Image logo — drag from asset panel
+            const float lzoneW = ImGui::GetContentRegionAvail().x - 74.f;
+            const float lzoneH = 54.f;
             ImVec2 lzonePos = ImGui::GetCursorScreenPos();
             ImGui::InvisibleButton("##logozone", ImVec2(lzoneW, lzoneH));
             ImDrawList* dlLogo = ImGui::GetWindowDrawList();
@@ -1224,15 +863,16 @@ void StartScreenEditor::renderProperties() {
                                       lzonePos.y + lzoneH * 0.5f - tsz.y * 0.5f),
                                 IM_COL32(200, 200, 200, 255), fname.c_str());
             } else {
-                drawEmptyDropPlaceholder(dlLogo, lzonePos,
-                                         ImVec2(lzoneW, lzoneH),
-                                         "LOGO.PNG  -  DROP IMAGE OR VIDEO");
+                dlLogo->AddRectFilled(lzonePos, ImVec2(lzonePos.x + lzoneW, lzonePos.y + lzoneH),
+                                     IM_COL32(30, 30, 45, 180), 4.f);
+                const char* hint = "Drop logo image here";
+                ImVec2 tsz = ImGui::CalcTextSize(hint);
+                dlLogo->AddText(ImVec2(lzonePos.x + lzoneW * 0.5f - tsz.x * 0.5f,
+                                      lzonePos.y + lzoneH * 0.5f - tsz.y * 0.5f),
+                                IM_COL32(120, 120, 140, 200), hint);
             }
-            if (m_logoDesc || m_logoImageFile[0] != '\0') {
-                dlLogo->AddRect(lzonePos,
-                                ImVec2(lzonePos.x + lzoneW, lzonePos.y + lzoneH),
-                                lborderCol, 4.f, 0, 1.5f);
-            }
+            dlLogo->AddRect(lzonePos, ImVec2(lzonePos.x + lzoneW, lzonePos.y + lzoneH),
+                            lborderCol, 4.f, 0, 1.5f);
             if (ImGui::BeginDragDropTarget()) {
                 if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("ASSET_PATH")) {
                     std::string rel(static_cast<const char*>(payload->Data), payload->DataSize - 1);
@@ -1241,16 +881,18 @@ void StartScreenEditor::renderProperties() {
                 }
                 ImGui::EndDragDropTarget();
             }
+            ImGui::SameLine();
+            ImGui::BeginGroup();
+            if (ImGui::Button("Clear##logo")) {
+                m_logoImageFile[0] = '\0';
+                if (m_ctx) unloadLogoImage(*m_ctx, *m_bufMgr);
+            }
+            ImGui::EndGroup();
         }
 
         // Position + Scale on compact rows.
-        ui::Slider("X", &m_logoPos[0], 0.f, 1.f, "", ui::tokens::Cyan);
-        ImGui::Spacing();
-        ui::Slider("Y", &m_logoPos[1], 0.f, 1.f, "", ui::tokens::Cyan);
-        ImGui::Spacing();
-        ui::Slider("Scale", &m_logoScale, 0.1f, kLogoScaleMax, "x",
-                   ui::tokens::Cyan);
-        ImGui::Spacing();
+        ImGui::SliderFloat2("Position##logo", m_logoPos, 0.f, 1.f, "%.2f");
+        ImGui::SliderFloat("Scale##logo", &m_logoScale, 0.1f, kLogoScaleMax, "%.2fx");
         // Glow: single-line toggle with compact color + radius beneath.
         ImGui::Checkbox("Glow / Outline", &m_logoGlow);
         if (m_logoGlow) {
@@ -1258,9 +900,7 @@ void StartScreenEditor::renderProperties() {
             ImGui::ColorEdit4("##glowcol", m_logoGlowColor,
                               ImGuiColorEditFlags_NoInputs |
                               ImGuiColorEditFlags_NoLabel);
-            ui::Slider("Glow radius", &m_logoGlowRadius, 1.f, 32.f, "",
-                       ui::tokens::Amber);
-            ImGui::Spacing();
+            ImGui::SliderFloat("Glow Radius", &m_logoGlowRadius, 1.f, 32.f, "%.0f");
         }
     }
 
@@ -1269,42 +909,31 @@ void StartScreenEditor::renderProperties() {
     // ── Tap Text ──────────────────────────────────────────────────────────────
     // Per user request: only size is editable here. Position + content are
     // fixed (centered, "Tap to Start") so the start screen stays uniform.
-    if (sectionFor(HierItem::TapText) && sectionDefault("Tap Text", [&]{
+    if (ImGui::CollapsingHeader("Tap Text", ImGuiTreeNodeFlags_DefaultOpen)) {
+        renderDefaultBtn("tapdef", [&]() {
             std::strcpy(m_tapText, "Tap to Start");
             m_tapTextPos[0] = 0.5f; m_tapTextPos[1] = 0.8f;
             m_tapTextSize = 24;
-        })) {
+        });
         constexpr int kTapMax = 72;
         if (m_tapTextSize > kTapMax) m_tapTextSize = kTapMax;
-        float sz = (float)m_tapTextSize;
-        if (ui::Slider("Size", &sz, 12.f, (float)kTapMax, " px", ui::tokens::Cyan))
-            m_tapTextSize = (int)(sz + 0.5f);
-        ImGui::Spacing();
+        ImGui::SliderInt("Size##tap", &m_tapTextSize, 12, kTapMax, "%d px");
     }
 
     ImGui::Spacing();
 
     // ── Transition ────────────────────────────────────────────────────────────
-    if (sectionFor(HierItem::Transition) && sectionDefault("Transition Effect", [&]{
+    if (ImGui::CollapsingHeader("Transition Effect", ImGuiTreeNodeFlags_DefaultOpen)) {
+        renderDefaultBtn("transdef", [&]() {
             m_transition    = TransitionEffect::Fade;
             m_transitionDur = 0.5f;
             m_customScript[0] = '\0';
-        })) {
-        static const char* fxItems[][2] = {
-            {"fade",   "Fade to Black"},
-            {"slide",  "Slide Left"},
-            {"zoom",   "Zoom In"},
-            {"ripple", "Ripple"},
-            {"custom", "Custom"},
-        };
-        const char* curId = fxItems[static_cast<int>(m_transition)][0];
-        if (ui::Dropdown("##fx", fxItems, 5, &curId)) {
-            for (int i = 0; i < 5; ++i)
-                if (std::strcmp(fxItems[i][0], curId) == 0)
-                    m_transition = static_cast<TransitionEffect>(i);
-        }
-        ui::Slider("Duration", &m_transitionDur, 0.1f, 2.f, " s",
-                   ui::tokens::Magenta);
+        });
+        const char* effects[] = {"Fade to Black", "Slide Left", "Zoom In", "Ripple", "Custom"};
+        int eff = static_cast<int>(m_transition);
+        ImGui::Combo("Effect", &eff, effects, 5);
+        m_transition = static_cast<TransitionEffect>(eff);
+        ImGui::SliderFloat("Duration (s)", &m_transitionDur, 0.1f, 2.f);
         if (m_transition == TransitionEffect::Custom) {
             ImGui::InputText("Script Path", m_customScript, 256);
             ImGui::TextDisabled("Lua script receives: progress, tap_x, tap_y");
@@ -1314,39 +943,40 @@ void StartScreenEditor::renderProperties() {
     ImGui::Spacing();
 
     // ── Audio ─────────────────────────────────────────────────────────────────
-    if (sectionFor(HierItem::Audio) && sectionDefault("Audio", [&]{
+    if (ImGui::CollapsingHeader("Audio", ImGuiTreeNodeFlags_DefaultOpen)) {
+        renderDefaultBtn("audiodef", [&]() {
             m_bgMusic[0]     = '\0';
             m_tapSfx[0]      = '\0';
             m_bgMusicVolume  = 1.f;
             m_bgMusicLoop    = true;
             m_tapSfxVolume   = 1.f;
-        })) {
+        });
         // helper to draw a small audio drop zone
         auto audioZone = [&](const char* label, char* buf, float& vol, bool* loop) {
             ImGui::TextDisabled("%s", label);
-            // Full width — Clear button removed; reset via the section's
-            // Default pill at the top.
-            const float azW = ImGui::GetContentRegionAvail().x;
-            const float azH = 50.f;
+            const float azW = ImGui::GetContentRegionAvail().x - 74.f;
+            const float azH = 36.f;
             ImVec2 azPos = ImGui::GetCursorScreenPos();
             ImGui::InvisibleButton(label, ImVec2(azW, azH));
             ImDrawList* dl = ImGui::GetWindowDrawList();
             ImU32 border = ImGui::IsItemHovered()
                 ? IM_COL32(100, 160, 255, 255) : IM_COL32(100, 100, 120, 180);
+            dl->AddRectFilled(azPos, ImVec2(azPos.x + azW, azPos.y + azH),
+                              IM_COL32(25, 30, 40, 220), 4.f);
             if (buf[0] != '\0') {
-                dl->AddRectFilled(azPos, ImVec2(azPos.x + azW, azPos.y + azH),
-                                  IM_COL32(25, 30, 40, 220), 4.f);
                 std::string fname = fs::path(buf).filename().string();
                 std::string display = "[BGM]  " + fname;
                 ImVec2 adtsz = ImGui::CalcTextSize(display.c_str());
                 dl->AddText(ImVec2(azPos.x + 8.f, azPos.y + azH * 0.5f - adtsz.y * 0.5f),
                             IM_COL32(180, 220, 255, 255), display.c_str());
-                dl->AddRect(azPos, ImVec2(azPos.x + azW, azPos.y + azH),
-                            border, 4.f, 0, 1.5f);
             } else {
-                drawEmptyDropPlaceholder(dl, azPos, ImVec2(azW, azH),
-                    "DROP AUDIO FILE HERE");
+                const char* hint = "Drop audio file here";
+                ImVec2 adtsz2 = ImGui::CalcTextSize(hint);
+                dl->AddText(ImVec2(azPos.x + azW * 0.5f - adtsz2.x * 0.5f,
+                                   azPos.y + azH * 0.5f - adtsz2.y * 0.5f),
+                            IM_COL32(120, 120, 140, 200), hint);
             }
+            dl->AddRect(azPos, ImVec2(azPos.x + azW, azPos.y + azH), border, 4.f, 0, 1.5f);
             if (ImGui::BeginDragDropTarget()) {
                 if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("ASSET_PATH")) {
                     std::string rel(static_cast<const char*>(payload->Data), payload->DataSize - 1);
@@ -1354,8 +984,12 @@ void StartScreenEditor::renderProperties() {
                 }
                 ImGui::EndDragDropTarget();
             }
-            ui::Slider("Volume", &vol, 0.f, 1.f, "", ui::tokens::Cyan);
-            ImGui::Spacing();
+            ImGui::SameLine();
+            ImGui::BeginGroup();
+            std::string clearId = std::string("Clear##") + label;
+            if (ImGui::Button(clearId.c_str())) buf[0] = '\0';
+            ImGui::EndGroup();
+            ImGui::SliderFloat((std::string("Volume##") + label).c_str(), &vol, 0.f, 1.f);
             if (loop) ImGui::Checkbox((std::string("Loop##") + label).c_str(), loop);
             ImGui::Spacing();
         };

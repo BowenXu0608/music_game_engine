@@ -8,84 +8,99 @@ namespace ui {
 bool SectionHeader(const char* label, std::function<void()> rightSlot) {
     using namespace tokens;
 
-    ImGuiStorage* storage = ImGui::GetStateStorage();
-    const ImGuiID stateId = ImGui::GetID(label);
-    bool open = storage->GetBool(stateId, true);
-
+    // Sections are always expanded — the right Hierarchy filter already
+    // limits the panel to a single section, so there is no fold/unfold
+    // affordance to expose. No chevron either.
     const ImGuiStyle& style = ImGui::GetStyle();
     const float lineH = ImGui::GetTextLineHeight() + style.FramePadding.y * 2.f;
     const float fullW = ImGui::GetContentRegionAvail().x;
+    // Right slot is measured (font + style derived) rather than reserved by
+    // a hardcoded pixel count, so the pill stays fully visible at any DPI
+    // scale or font size. Margin = one ItemSpacing.x — also style-relative.
+    const float pillMargin  = style.ItemSpacing.x;
+    const float rightReserve = rightSlot ? (DefaultPillWidth() + pillMargin) : 0.f;
 
     ImGui::PushID(label);
-    ImVec2 cursor = ImGui::GetCursorScreenPos();
+    const ImVec2 cursorScreen = ImGui::GetCursorScreenPos();
+    const float  startX = ImGui::GetCursorPosX();
+    const float  startY = ImGui::GetCursorPosY();
 
-    // Invisible button covers the chevron + label area only (not the right slot)
-    // so a Default-pill click doesn't toggle the section.
-    const float rightReserve = rightSlot ? 60.f : 0.f;
-    const float toggleW = fullW - rightReserve;
-    if (ImGui::InvisibleButton("##hdr_toggle", {toggleW, lineH})) {
-        open = !open;
-        storage->SetBool(stateId, open);
-    }
-    const bool hovered = ImGui::IsItemHovered();
+    // Reserve the row's vertical space.
+    ImGui::Dummy(ImVec2(fullW, lineH));
 
-    ImDrawList* dl = ImGui::GetWindowDrawList();
-
-    // Chevron.
-    const float chevSize = 6.f;
-    const ImVec2 chevCenter{cursor.x + 6.f, cursor.y + lineH * 0.5f};
-    const ImU32 chevColor = ToU32(hovered ? TextMid : TextLow);
-    if (open) {
-        // Down-pointing chevron.
-        dl->AddTriangleFilled(
-            ImVec2(chevCenter.x - chevSize, chevCenter.y - chevSize * 0.5f),
-            ImVec2(chevCenter.x + chevSize, chevCenter.y - chevSize * 0.5f),
-            ImVec2(chevCenter.x,            chevCenter.y + chevSize * 0.6f),
-            chevColor);
-    } else {
-        // Right-pointing chevron.
-        dl->AddTriangleFilled(
-            ImVec2(chevCenter.x - chevSize * 0.5f, chevCenter.y - chevSize),
-            ImVec2(chevCenter.x - chevSize * 0.5f, chevCenter.y + chevSize),
-            ImVec2(chevCenter.x + chevSize * 0.6f, chevCenter.y),
-            chevColor);
-    }
-
-    // Uppercase label, with letter-spacing approximated by extra char width.
+    // Uppercase label flush-left.
     std::string upper;
     upper.reserve(std::strlen(label));
     for (const char* p = label; *p; ++p)
         upper += static_cast<char>((*p >= 'a' && *p <= 'z') ? (*p - 32) : *p);
-    const ImU32 textColor = ToU32(hovered ? TextMid : TextLow);
-    dl->AddText(nullptr, ImGui::GetFontSize() * 0.85f,
-                {chevCenter.x + 12.f, cursor.y + style.FramePadding.y * 0.5f + 2.f},
-                textColor, upper.c_str());
+    ImGui::GetWindowDrawList()->AddText(
+        nullptr, ImGui::GetFontSize() * 0.85f,
+        {cursorScreen.x + 4.f,
+         cursorScreen.y + style.FramePadding.y * 0.5f + 2.f},
+        ToU32(TextLow), upper.c_str());
 
-    // Right slot: render on the same row, right-aligned.
+    // Right slot inline with the label row — set cursor back onto the row,
+    // anchored rightReserve px from the right edge.
     if (rightSlot) {
-        ImGui::SameLine(0.f, 0.f);
-        ImGui::SetCursorPosX(ImGui::GetCursorPosX() + (fullW - rightReserve));
-        ImGui::SetCursorPosY(ImGui::GetCursorPosY() - lineH);
+        ImGui::SetCursorPos(ImVec2(startX + fullW - rightReserve, startY));
         rightSlot();
+        // Restore cursor below the header so subsequent widgets flow
+        // normally, regardless of how tall the right-slot widget is.
+        ImGui::SetCursorPos(ImVec2(startX, startY + lineH + style.ItemSpacing.y));
     }
 
     ImGui::PopID();
-    return open;
+    return true;
+}
+
+namespace {
+constexpr float kDefaultPillFontScale = 0.72f;
+constexpr float kDefaultPillSpacingEm = 0.08f;
+constexpr const char* kDefaultPillLabel = "DEFAULT";
+
+inline ImVec2 measureDefaultPillText() {
+    ImFont* font = ImGui::GetFont();
+    const float fontSize = ImGui::GetFontSize() * kDefaultPillFontScale;
+    ImVec2 textSz = font->CalcTextSizeA(fontSize, FLT_MAX, 0.f, kDefaultPillLabel);
+    const int   nGaps = (int)std::strlen(kDefaultPillLabel) - 1;
+    const float spacing = kDefaultPillSpacingEm * fontSize * (float)std::max(0, nGaps);
+    return ImVec2(textSz.x + spacing, fontSize);
+}
+}
+
+float DefaultPillWidth() {
+    const ImVec2 t = measureDefaultPillText();
+    return t.x;
 }
 
 bool DefaultPill(const char* id) {
     using namespace tokens;
-    ImGui::PushStyleColor(ImGuiCol_Button,        WithAlpha(Cyan, 0.0f));
-    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, WithAlpha(Cyan, 0.18f));
-    ImGui::PushStyleColor(ImGuiCol_ButtonActive,  WithAlpha(Cyan, 0.36f));
-    ImGui::PushStyleColor(ImGuiCol_Text,          Cyan);
-    ImGui::PushStyleColor(ImGuiCol_Border,        BorderHi);
-    ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1.f);
-    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding,  {6.f, 1.f});
-    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 3.f);
-    const bool clicked = ImGui::Button((std::string("DEFAULT##") + id).c_str());
-    ImGui::PopStyleVar(3);
-    ImGui::PopStyleColor(5);
+
+    const ImVec2 t = measureDefaultPillText();
+    const float pillW = t.x;
+    const float pillH = ImGui::GetTextLineHeight();
+
+    ImGui::PushID(id);
+    const ImVec2 origin = ImGui::GetCursorScreenPos();
+    const bool clicked = ImGui::InvisibleButton("##defpill", ImVec2(pillW, pillH));
+    const bool hovered = ImGui::IsItemHovered();
+    ImGui::PopID();
+
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+
+    const ImU32 textCol = hovered ? ToU32(WithAlpha(Cyan, 0.75f)) : ToU32(Cyan);
+    ImFont* font = ImGui::GetFont();
+    const float fontSize = ImGui::GetFontSize() * kDefaultPillFontScale;
+    const float gap = kDefaultPillSpacingEm * fontSize;
+    float cx = origin.x;
+    const float cy = origin.y + (pillH - fontSize) * 0.5f;
+    for (const char* p = kDefaultPillLabel; *p; ++p) {
+        const char ch[2] = {*p, 0};
+        dl->AddText(font, fontSize, ImVec2(cx, cy), textCol, ch);
+        ImVec2 cs = font->CalcTextSizeA(fontSize, FLT_MAX, 0.f, ch);
+        cx += cs.x + gap;
+    }
+
     return clicked;
 }
 
@@ -487,6 +502,30 @@ static bool topNavBtn(const char* label, bool leftChevron, bool rightChevron) {
 
 bool TopNavBack(const char* label)    { return topNavBtn(label, true,  false); }
 bool TopNavForward(const char* label) { return topNavBtn(label, false, true ); }
+
+bool TopToggle(const char* label, bool active) {
+    using namespace tokens;
+    const ImVec4 bg     = active ? WithAlpha(Cyan, 0.22f) : ImVec4(0, 0, 0, 0);
+    const ImVec4 bgHov  = active ? WithAlpha(Cyan, 0.32f) : WithAlpha(Cyan, 0.10f);
+    const ImVec4 bgAct  = WithAlpha(Cyan, 0.40f);
+    const ImVec4 fg     = active ? Cyan : TextMid;
+    const ImVec4 border = active ? Cyan : Border;
+
+    ImGui::PushStyleColor(ImGuiCol_Button,        bg);
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, bgHov);
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive,  bgAct);
+    ImGui::PushStyleColor(ImGuiCol_Text,          fg);
+    ImGui::PushStyleColor(ImGuiCol_Border,        border);
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1.f);
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding,    {10.f, 6.f});
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding,   4.f);
+
+    const bool clicked = ImGui::Button(label);
+
+    ImGui::PopStyleVar(3);
+    ImGui::PopStyleColor(5);
+    return clicked;
+}
 
 bool TopTestGame() {
     using namespace tokens;

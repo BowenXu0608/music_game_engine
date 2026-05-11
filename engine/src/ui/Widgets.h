@@ -107,4 +107,14 @@ bool TopNavForward(const char* label);
 // Returns true on click.
 bool TopTestGame();
 
+// Pre-measured rendered width of a DefaultPill in the current ImGui style.
+// Use this from layout code that needs to right-align the pill — measuring
+// from the font + style avoids hardcoded pixel reserves that break at
+// non-100% DPI scales.
+float DefaultPillWidth();
+
+// Top-bar toggle pill (e.g. "Copilot"). Filled cyan when active, hollow
+// otherwise. Returns true on click; caller flips the bound state.
+bool TopToggle(const char* label, bool active);
+
 } // namespace ui
