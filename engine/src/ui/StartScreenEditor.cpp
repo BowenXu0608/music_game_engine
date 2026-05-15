@@ -1143,6 +1143,32 @@ void StartScreenEditor::renderMaterials(Engine* engine, bool hideSelector) {
 
     ImGui::Separator();
 
+    // PBR is the material system. Effect-class assets are legacy (not created
+    // from this picker any more) but stay editable so existing charts keep
+    // working — their old editor shows only for SpecialEffect.
+    if (m_editingMaterial.cls == MaterialClass::Pbr) {
+        ImGui::ColorEdit4("Base Color", m_editingMaterial.baseColor.data());
+        ImGui::SliderFloat("Metallic",  &m_editingMaterial.metallic,  0.f, 1.f);
+        ImGui::SliderFloat("Roughness", &m_editingMaterial.roughness, 0.f, 1.f);
+        ImGui::ColorEdit3("Emissive",   m_editingMaterial.emissiveColor.data());
+        ImGui::DragFloat("Emissive Intensity",
+                         &m_editingMaterial.emissiveIntensity, 0.05f, 0.f, 64.f);
+
+        char baseBuf[256] = {};
+        std::snprintf(baseBuf, sizeof(baseBuf), "%s",
+                      m_editingMaterial.baseColorTexPath.c_str());
+        if (ImGui::InputText("Base Color Texture", baseBuf, sizeof(baseBuf)))
+            m_editingMaterial.baseColorTexPath = baseBuf;
+
+        ImGui::Checkbox("Use normal map", &m_editingMaterial.useNormalMap);
+        if (m_editingMaterial.useNormalMap) {
+            char nrmBuf[256] = {};
+            std::snprintf(nrmBuf, sizeof(nrmBuf), "%s",
+                          m_editingMaterial.normalTexPath.c_str());
+            if (ImGui::InputText("Normal Map", nrmBuf, sizeof(nrmBuf)))
+                m_editingMaterial.normalTexPath = nrmBuf;
+        }
+    } else {
     const char* kindLabels = "Unlit\0Glow\0Scroll\0Pulse\0Gradient\0Custom\0\0";
     int kindIdx = (int)m_editingMaterial.kind;
     if (ImGui::Combo("Kind", &kindIdx, kindLabels))
@@ -1224,7 +1250,9 @@ void StartScreenEditor::renderMaterials(Engine* engine, bool hideSelector) {
             if (!fs::exists(target, ec)) {
                 std::ofstream f(target);
                 f << "#version 450\n"
-                     "layout(set = 0, binding = 0) uniform FrameUBO { mat4 viewProj; float time; } ubo;\n"
+                     "layout(set = 0, binding = 0) uniform FrameUBO {\n"
+                     "    mat4 viewProj; vec4 cameraPos; vec4 lightDir;\n"
+                     "    vec4 lightColor; vec4 ambient; } ubo;  // time = cameraPos.w\n"
                      "layout(set = 1, binding = 0) uniform sampler2D texSampler;\n"
                      "layout(push_constant) uniform PC {\n"
                      "    mat4  model;\n"
@@ -1421,6 +1449,8 @@ void StartScreenEditor::renderMaterials(Engine* engine, bool hideSelector) {
                 ImGuiInputTextFlags_ReadOnly);
         }
     }
+
+    } // end SpecialEffect (legacy) editor
 
     // ── Save / Delete ───────────────────────────────────────────────────────
     ImGui::Separator();

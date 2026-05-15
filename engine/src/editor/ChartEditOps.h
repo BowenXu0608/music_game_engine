@@ -5,6 +5,8 @@
 #include <string>
 #include <variant>
 #include <vector>
+#include <array>
+#include <optional>
 
 class SongEditor;  // forward — extended apply path reaches into its difficulty maps
 
@@ -217,6 +219,27 @@ struct DeleteScanSpeedEventOp {
     float tTo   = 0.f;
 };
 
+// ── PBR material op ─────────────────────────────────────────────────────────
+
+// Set the PBR material for one note slot of the current game mode. `slot` is
+// referenced by its human display name or slug (e.g. "Tap Note", "Hold Body",
+// "tap_note") — resolved to the mode's slot id at apply time. Every property
+// is optional: only the fields the model supplied are written onto the slot's
+// material, the rest keep their current value. Setting `normalTexture` to a
+// non-empty path implies useNormalMap. Applies in every mode (materials are
+// universal); routes through the extended apply path (needs SongEditor for
+// the MaterialAssetLibrary + mode + per-difficulty overrides map).
+struct SetPbrMaterialOp {
+    std::string                       slot;
+    std::optional<std::array<float,4>> baseColor;        // rgba (a defaults 1)
+    std::optional<float>               metallic;         // 0..1
+    std::optional<float>               roughness;        // 0..1
+    std::optional<std::array<float,3>> emissiveColor;    // rgb
+    std::optional<float>               emissiveIntensity;
+    std::optional<std::string>         baseColorTexture; // project-relative
+    std::optional<std::string>         normalTexture;    // project-relative
+};
+
 // Public op type. Add new op structs to the variant when expanding.
 using ChartEditOp = std::variant<
     DeleteRangeOp,
@@ -241,7 +264,8 @@ using ChartEditOp = std::variant<
     DeleteDiskEventOp,
     SetPageSpeedOp,
     AddScanSpeedEventOp,
-    DeleteScanSpeedEventOp
+    DeleteScanSpeedEventOp,
+    SetPbrMaterialOp
 >;
 
 // Returns true if `op` is allowed in the given game-mode name. Mode-gating

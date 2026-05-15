@@ -44,6 +44,10 @@ public:
     glm::mat4 projection()     const { return m_proj; }
     glm::mat4 viewProjection() const { return m_proj * m_view; }
 
+    // World-space eye position — the translation of the inverse view matrix.
+    // Needed by the PBR shaders for the view vector.
+    glm::vec3 eyePosition() const { return glm::vec3(glm::inverse(m_view)[3]); }
+
     bool isPerspective() const { return m_isPerspective; }
 
     Ray unproject(glm::vec2 screenPos, glm::vec2 screenSize) const {

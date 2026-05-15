@@ -35,11 +35,17 @@ const char* shaderNameForKind(MaterialKind k) {
 
 void QuadBatch::init(VulkanContext& ctx, BufferManager& bufMgr,
                      DescriptorManager& descMgr, VkRenderPass renderPass,
-                     const std::string& shaderDir) {
+                     const std::string& shaderDir,
+                     VkImageView whiteView, VkSampler whiteSampler,
+                     VkImageView flatNormalView, VkSampler flatNormalSampler) {
     // Remembered so custom pipelines can be rebuilt lazily with the same
     // layout/render-pass bindings as the built-in kind pipelines.
-    m_renderPass = renderPass;
-    m_shaderDir  = shaderDir;
+    m_renderPass        = renderPass;
+    m_shaderDir         = shaderDir;
+    m_whiteView         = whiteView;
+    m_whiteSampler      = whiteSampler;
+    m_flatNormalView    = flatNormalView;
+    m_flatNormalSampler = flatNormalSampler;
 
     m_vertexBuffers.resize(MAX_FRAMES_IN_FLIGHT);
     m_ubos.resize(MAX_FRAMES_IN_FLIGHT);
@@ -88,6 +94,20 @@ void QuadBatch::init(VulkanContext& ctx, BufferManager& bufMgr,
         cfg.blend            = PipelineConfig::Blend::Alpha;
         m_pipelines[(size_t)k].init(ctx, cfg);
     }
+
+    // PBR pipeline — dedicated vertex stage (quad_pbr.vert) because the shared
+    // quad.vert applies pc.uvTransform, which is the `mrp` byte slot for PBR.
+    {
+        PipelineConfig cfg{};
+        cfg.renderPass       = renderPass;
+        cfg.layout           = m_pipelineLayout;
+        cfg.vertShaderPath   = shaderDir + "/quad_pbr.vert.spv";
+        cfg.fragShaderPath   = shaderDir + "/quad_pbr.frag.spv";
+        cfg.vertexBinding    = binding;
+        cfg.vertexAttributes = {attributes.begin(), attributes.end()};
+        cfg.blend            = PipelineConfig::Blend::Alpha;
+        m_pbrPipeline.init(ctx, cfg);
+    }
 }
 
 void QuadBatch::buildIndexBuffer(VulkanContext& ctx, BufferManager& bufMgr) {
@@ -104,9 +124,61 @@ void QuadBatch::buildIndexBuffer(VulkanContext& ctx, BufferManager& bufMgr) {
                           sizeof(uint32_t) * QUAD_INDICES);
 }
 
+VkDescriptorSet QuadBatch::resolvePbrTexSet(VkImageView baseV, VkSampler baseS,
+                                            VkImageView normV, VkSampler normS,
+                                            VulkanContext& ctx,
+                                            DescriptorManager& descMgr) {
+    VkImageView bv = baseV ? baseV : m_whiteView;
+    VkSampler   bs = baseS ? baseS : m_whiteSampler;
+    VkImageView nv = normV ? normV : m_flatNormalView;
+    VkSampler   ns = normS ? normS : m_flatNormalSampler;
+    auto key = std::make_pair(bv, nv);
+    auto it  = m_pbrTexSetCache.find(key);
+    if (it != m_pbrTexSetCache.end()) return it->second;
+    VkDescriptorSet set = descMgr.allocateTextureSet(ctx, bv, bs, nv, ns);
+    m_pbrTexSetCache[key] = set;
+    return set;
+}
+
 void QuadBatch::pushBatch(const Material& mat, glm::vec4 uvTransform,
                           uint32_t quadIdx,
                           VulkanContext& ctx, DescriptorManager& descMgr) {
+    (void)uvTransform;
+
+    if (mat.cls == MaterialClass::Pbr) {
+        glm::vec4 base = mat.pbr.baseColor;
+        glm::vec4 mrp  = glm::vec4(mat.pbr.metallic, mat.pbr.roughness,
+                                   mat.pbr.emissiveIntensity, mat.pbr.flags);
+        glm::vec4 emis = glm::vec4(mat.pbr.emissiveColor, 0.f);
+
+        bool canCoalesce =
+            !m_batches.empty() &&
+            m_batches.back().cls       == MaterialClass::Pbr &&
+            m_batches.back().texture   == mat.baseColorTex &&
+            m_batches.back().normalTex == mat.normalTex &&
+            m_batches.back().tint        == base &&
+            m_batches.back().uvTransform == mrp  &&
+            m_batches.back().params      == emis;
+        if (canCoalesce) { m_batches.back().indexCount += 6; return; }
+
+        Batch b{};
+        b.cls         = MaterialClass::Pbr;
+        b.texture     = mat.baseColorTex;
+        b.sampler     = mat.baseColorSamp;
+        b.normalTex   = mat.normalTex;
+        b.tint        = base;
+        b.uvTransform = mrp;
+        b.params      = emis;
+        b.indexStart  = quadIdx * 6;
+        b.indexCount  = 6;
+        b.texSet      = resolvePbrTexSet(mat.baseColorTex, mat.baseColorSamp,
+                                         mat.normalTex,    mat.normalSamp,
+                                         ctx, descMgr);
+        m_batches.push_back(b);
+        return;
+    }
+
+    // ── SpecialEffect (legacy) path ─────────────────────────────────────────
     // Resolve custom pipeline up-front so batching/coalescing can key off the
     // VkPipeline handle. Built-in kinds leave this null and fall back to
     // m_pipelines[kind] at flush time.
@@ -116,9 +188,9 @@ void QuadBatch::pushBatch(const Material& mat, glm::vec4 uvTransform,
 
     // Per-vertex tint + uvTransform are baked into vertices, so batching only
     // breaks on (kind, customPipe, texture, params) change.
-    (void)uvTransform;
     bool canCoalesce =
         !m_batches.empty() &&
+        m_batches.back().cls        == MaterialClass::SpecialEffect &&
         m_batches.back().kind       == mat.kind &&
         m_batches.back().customPipe == customPipe &&
         m_batches.back().texture    == mat.texture &&
@@ -131,6 +203,7 @@ void QuadBatch::pushBatch(const Material& mat, glm::vec4 uvTransform,
     }
 
     Batch b{};
+    b.cls         = MaterialClass::SpecialEffect;
     b.kind        = mat.kind;
     b.customPipe  = customPipe;
     b.texture     = mat.texture;
@@ -243,11 +316,16 @@ void QuadBatch::flush(VkCommandBuffer cmd, VulkanContext& ctx, DescriptorManager
     VkDescriptorSet lastTexSet = VK_NULL_HANDLE;
 
     for (auto& batch : m_batches) {
-        VkPipeline pipe = batch.customPipe;
-        if (pipe == VK_NULL_HANDLE) {
-            pipe = m_pipelines[(size_t)batch.kind].handle();
-            if (pipe == VK_NULL_HANDLE)
-                pipe = m_pipelines[(size_t)MaterialKind::Unlit].handle();
+        VkPipeline pipe;
+        if (batch.cls == MaterialClass::Pbr) {
+            pipe = m_pbrPipeline.handle();
+        } else {
+            pipe = batch.customPipe;
+            if (pipe == VK_NULL_HANDLE) {
+                pipe = m_pipelines[(size_t)batch.kind].handle();
+                if (pipe == VK_NULL_HANDLE)
+                    pipe = m_pipelines[(size_t)MaterialKind::Unlit].handle();
+            }
         }
         if (pipe != lastPipe) {
             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
@@ -255,11 +333,18 @@ void QuadBatch::flush(VkCommandBuffer cmd, VulkanContext& ctx, DescriptorManager
         }
 
         QuadPushConstants pc{};
-        pc.model       = glm::mat4(1.f);
-        pc.tint        = glm::vec4(1.f);           // per-vertex tint is live
-        pc.uvTransform = glm::vec4(0.f, 0.f, 1.f, 1.f);
-        pc.params      = batch.params;
-        pc.kind        = (uint32_t)batch.kind;
+        pc.model = glm::mat4(1.f);
+        if (batch.cls == MaterialClass::Pbr) {
+            pc.tint        = batch.tint;        // baseColor
+            pc.uvTransform = batch.uvTransform; // mrp
+            pc.params      = batch.params;      // emissive rgb
+            pc.kind        = PBR_KIND_SENTINEL;
+        } else {
+            pc.tint        = glm::vec4(1.f);    // per-vertex tint is live
+            pc.uvTransform = glm::vec4(0.f, 0.f, 1.f, 1.f);
+            pc.params      = batch.params;
+            pc.kind        = (uint32_t)batch.kind;
+        }
         vkCmdPushConstants(cmd, m_pipelineLayout,
                            VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                            0, sizeof(QuadPushConstants), &pc);
@@ -277,10 +362,7 @@ void QuadBatch::flush(VkCommandBuffer cmd, VulkanContext& ctx, DescriptorManager
     m_currentFrame = (m_currentFrame + 1) % MAX_FRAMES_IN_FLIGHT;
 }
 
-void QuadBatch::updateFrameUBO(const glm::mat4& viewProj, float time, int frameIndex) {
-    FrameUBO ubo{};
-    ubo.viewProj = viewProj;
-    ubo.time     = time;
+void QuadBatch::updateFrameUBO(const FrameUBO& ubo, int frameIndex) {
     memcpy(m_ubos[frameIndex].mapped, &ubo, sizeof(FrameUBO));
 }
 
@@ -322,6 +404,7 @@ VkPipeline QuadBatch::getOrBuildCustomPipeline(VulkanContext& ctx,
 
 void QuadBatch::shutdown(VulkanContext& ctx, BufferManager& bufMgr) {
     for (auto& p : m_pipelines) p.shutdown(ctx);
+    m_pbrPipeline.shutdown(ctx);
     for (auto& [_, p] : m_customPipelines) p.shutdown(ctx);
     m_customPipelines.clear();
     vkDestroyPipelineLayout(ctx.device(), m_pipelineLayout, nullptr);

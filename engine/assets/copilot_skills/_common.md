@@ -73,6 +73,32 @@ Convert every note in `[from, to]` whose type matches `from_type` into
 {"op":"convert_type", "from":4.0, "to":6.0, "from_type":"tap", "to_type":"hold", "duration":0.5}
 ```
 
+### `set_material`
+Set the **PBR material** of one note slot for the current mode. Works in
+every mode. `slot` is the slot's name (see the per-mode "Material slots"
+list); matching is case/space-insensitive so `"Hold Body"`, `"hold_body"`
+all work. Every property is **optional** — emit only the ones the user
+asked to change; omitted fields keep their current value.
+
+- `base_color`: `[r,g,b,a]` floats 0..1 (a optional, defaults 1).
+- `metallic`: 0..1 (0 = dielectric/plastic, 1 = metal).
+- `roughness`: 0..1 (0 = mirror-sharp highlight, 1 = matte).
+- `emissive_color`: `[r,g,b]` 0..1 and `emissive_intensity`: float ≥ 0
+  (self-illumination / glow; needs intensity > 0 to show).
+- `base_color_texture` / `normal_texture`: project-relative image paths
+  (only if the user names a texture file). Setting `normal_texture` turns
+  on normal mapping.
+
+```
+{"op":"set_material", "slot":"Tap Note", "base_color":[1.0,0.84,0.0,1.0], "metallic":1.0, "roughness":0.25}
+{"op":"set_material", "slot":"Hold Body", "emissive_color":[0.2,0.8,1.0], "emissive_intensity":2.0}
+```
+
+Notes/colour requests like "make the tap notes shiny gold" → one
+`set_material` with `metallic≈1`, low `roughness`, gold `base_color`.
+"Make hold notes glow cyan" → `emissive_color` + `emissive_intensity`.
+Material changes take effect the next time the chart is previewed/played.
+
 ## Rules
 
 - Prefer fewer, broader ops. One `mirror_lanes` beats 20 `insert`s.

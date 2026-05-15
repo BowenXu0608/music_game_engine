@@ -1702,6 +1702,15 @@ static MaterialModeKey currentMaterialModeKey(const GameModeConfig& gm) {
     return MaterialModeKey::Bandori;
 }
 
+MaterialAssetLibrary* SongEditor::copilotMatLib() {
+    return m_engineCached ? &m_engineCached->materialLibrary() : nullptr;
+}
+
+MaterialModeKey SongEditor::copilotMatMode() const {
+    return m_song ? currentMaterialModeKey(m_song->gameMode)
+                  : MaterialModeKey::Bandori;
+}
+
 // ── renderMaterialSlotPicker ────────────────────────────────────────────────
 // Renders one "slot name + (default)-or-asset combo" row. Shared between the
 // Basic tab's Materials block and the Note tab's per-type sections.
@@ -8093,10 +8102,14 @@ static std::string buildCopilotSystemPrompt(const SongInfo* song,
             default: ++other; break;
         }
     }
-    const char* modeName = "dropnotes";
+    // Use the skill-file / mode-gate names (bandori/arcaea/cytus/lanota) so
+    // loadCopilotSkill() actually finds the per-mode doc — "circle"/"scanline"
+    // have no skill file and would drop the whole skill prompt (incl. the
+    // shared _common ops like set_material).
+    const char* modeName = "bandori";
     if (song) {
-        if (song->gameMode.type == GameModeType::Circle)   modeName = "circle";
-        else if (song->gameMode.type == GameModeType::ScanLine) modeName = "scanline";
+        if (song->gameMode.type == GameModeType::Circle)            modeName = "lanota";
+        else if (song->gameMode.type == GameModeType::ScanLine)     modeName = "cytus";
         else if (song->gameMode.dimension == DropDimension::ThreeD) modeName = "arcaea";
         else modeName = "bandori";
     }
@@ -8249,6 +8262,20 @@ void SongEditor::renderCopilotPanel() {
                 snap.diskScale = diskScale();
                 snap.scanSpeed = scanSpeed();
                 snap.scanPages = scanPages();
+                // Material undo: the active diff's slot→asset map + pre-edit
+                // copies of the mode's default assets (bounded by slot count).
+                if (auto* mlib = copilotMatLib()) {
+                    snap.matCaptured  = true;
+                    snap.matOverrides = copilotMatOverrides();
+                    MaterialModeKey mk = copilotMatMode();
+                    std::string mn = materialModeName(mk);
+                    for (const auto& s : getMaterialSlotsForMode(mk)) {
+                        std::string an = "default_" + mn + "_"
+                                       + materialSlotSlug(s);
+                        if (const MaterialAsset* ex = mlib->get(an))
+                            snap.matAssets.push_back(*ex);
+                    }
+                }
                 c.undo = std::move(snap);
                 int laneCount = m_song ? m_song->gameMode.trackCount : 7;
                 int totalIns = 0, totalDel = 0, totalMut = 0;
@@ -8361,6 +8388,11 @@ void SongEditor::renderCopilotPanel() {
         diskScale() = c.undo->diskScale;
         scanSpeed() = c.undo->scanSpeed;
         scanPages() = c.undo->scanPages;
+        if (c.undo->matCaptured) {
+            copilotMatOverrides() = c.undo->matOverrides;
+            if (auto* mlib = copilotMatLib())
+                for (const auto& a : c.undo->matAssets) mlib->upsert(a);
+        }
         c.undo.reset();
         m_statusMsg = "Copilot: undo applied";
         m_statusTimer = 3.f;
@@ -8432,10 +8464,14 @@ void SongEditor::pollAudit() {
 
 static std::string buildAuditSystemPrompt(const SongInfo* song,
                                            Difficulty diff) {
-    const char* modeName = "dropnotes";
+    // Use the skill-file / mode-gate names (bandori/arcaea/cytus/lanota) so
+    // loadCopilotSkill() actually finds the per-mode doc — "circle"/"scanline"
+    // have no skill file and would drop the whole skill prompt (incl. the
+    // shared _common ops like set_material).
+    const char* modeName = "bandori";
     if (song) {
-        if (song->gameMode.type == GameModeType::Circle)   modeName = "circle";
-        else if (song->gameMode.type == GameModeType::ScanLine) modeName = "scanline";
+        if (song->gameMode.type == GameModeType::Circle)            modeName = "lanota";
+        else if (song->gameMode.type == GameModeType::ScanLine)     modeName = "cytus";
         else if (song->gameMode.dimension == DropDimension::ThreeD) modeName = "arcaea";
         else modeName = "bandori";
     }

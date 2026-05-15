@@ -1,4 +1,6 @@
 {
+  "version": 2,
+  "class": "effect",
   "name": "default_arcaea_playfield_ground",
   "kind": "gradient",
   "tint": [0.15, 0.15, 0.25, 1],

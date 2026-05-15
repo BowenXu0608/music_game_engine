@@ -623,10 +623,13 @@ Recorded here so the next time someone asks "can it do X" the answer is fast. Ea
   - ✗ *"Re-analyze the audio and place new markers."*
   - ✗ *"Drop a marker at every snare hit."*
   - ✗ *"Thin the markers in the chorus."*
-- **Materials and shaders.** Owned by the Material tab and the asset library. AI shader generation is a separate flow (`ShaderGenClient`). See `sys1_rendering.md` Phase 4 + the Shader Generator memory.
-  - ✗ *"Make the tap notes glow neon pink."*
-  - ✗ *"Generate a custom shader that pulses with the bass."*
-  - ✗ *"Switch the hold material to the new MAT asset."*
+- **PBR materials — NOW SUPPORTED (2026-05-15), see §16.** The Copilot *can*
+  set a note slot's PBR material (`set_material` op). What remains out of scope:
+  - ✓ *"Make the tap notes glow neon pink."* → `set_material` emissive.
+  - ✗ *"Generate a custom shader that pulses with the bass."* (shader authoring
+    is the separate `ShaderGenClient` flow — still out of scope.)
+  - ✗ *"Switch the hold material to a named MAT asset I made."* (the op edits
+    the slot's default PBR material, it does not pick arbitrary library assets.)
 - **HUD layout.** `Pos / Size / Color` from the Basic tab.
   - ✗ *"Move the score readout to the top-left."*
   - ✗ *"Make the combo counter twice as big."*
@@ -651,3 +654,47 @@ Recorded here so the next time someone asks "can it do X" the answer is fast. Ea
   - ✗ *"Style-transfer this chart to look like the Aa_drop3d_hard chart."*
 
 If a user prompt asks for any of the above, the per-mode skill docs prime the LLM to respond with an explanation + empty `ops` array — the preview shows the explanation, no edits land.
+
+---
+
+## 16. Material op addendum — `set_material` (2026-05-15, branch `pbr-material-system`)
+
+Added alongside the PBR material system rework (see `devlog.md` 2026-05-15
+(later) and `sys1_rendering.md` "PBR Material System"). This is **Region G** of
+the capability surface.
+
+### 16.1 Region G — PBR materials (all modes)
+
+| Aspect | Detail |
+|---|---|
+| Op | `set_material` → `SetPbrMaterialOp` |
+| Routing | **Extended op** (`isExtendedOp` true) → `applyChartEditOpExtended(SongEditor&)` — needs the `MaterialAssetLibrary`, mode, and active-difficulty override map |
+| Mode gate | Allowed in **every** mode (materials are universal) |
+| Target | One note slot, referenced by **name** — loose-matched (case/space/`_`/`/`-insensitive) against the mode's slot table `displayName`, `group+displayName`, or slug |
+| Fields | All optional: `base_color [r,g,b,a]`, `metallic`, `roughness`, `emissive_color [r,g,b]`, `emissive_intensity`, `base_color_texture`, `normal_texture`. Only supplied fields are written. |
+| Apply | Resolve slot → `default_<mode>_<slug>` asset; promote legacy effect default to PBR (`migrateAssetV1toV2`); apply fields; `lib->upsert`; point the active difficulty's slot-override map at the asset (same effect as picking it in the slot combo). |
+| Undo | `ChartSnapshot` extended: `matCaptured` flag + `matOverrides` map + pre-edit copies of the mode's default assets; the existing single-level Undo restores them. |
+| Docs | `_common.md` documents the op schema + examples; each per-mode skill doc has a "Material slots" list (lit vs tint-only). |
+
+### 16.2 Side bug fixed
+
+`buildCopilotSystemPrompt` mapped Circle→`"circle"` and ScanLine→`"scanline"`,
+but the skill files are `lanota.md`/`cytus.md`. `loadCopilotSkill` returned
+empty for the missing names, so **Circle and ScanLine charts silently got the
+bare inline fallback prompt** (no arc/disk/scan/material ops at all). Fixed to
+`lanota`/`cytus`, matching the skill files and the apply-path mode-gate.
+
+### 16.3 Limitations
+
+- **Absolute set, not relative.** The model is not shown current material
+  values, so "make it a bit shinier" is a best-effort guess, not a precise
+  delta. "make it metallic gold" works well (fully specified).
+- **Edits the slot's default PBR asset**, not arbitrary named library assets;
+  it cannot create/pick a user-authored `.mat` by name.
+- **Not live.** Material changes show on the next preview/gameplay launch
+  (renderers read materials in `onInit`), consistent with the Materials tab.
+- **Shader authoring** (Custom `.frag`) remains the separate `ShaderGenClient`
+  flow — out of Copilot scope.
+- Cytus/Lanota decorative slots (lines/rings/disks/halo) and Phigros are not
+  PBR-lit (see `sys1_rendering.md`); setting their material still upserts the
+  asset but has no lit effect.

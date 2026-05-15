@@ -34,8 +34,9 @@ Material BandoriRenderer::slotOrFallback(uint16_t slot, const Material& fallback
     auto it = m_chartMaterials.find(slot);
     if (it == m_chartMaterials.end()) return fallback;
     Material m = it->second;
-    // Texture/sampler come from the fallback (texture resolution by path is
-    // Phase 3 work — right now every chart material shares the white texture).
+    if (m.cls == MaterialClass::Pbr)
+        return m;   // PBR keeps its resolved baseColor/normal views
+    // Legacy effect path: texture/sampler come from the fallback.
     m.texture = fallback.texture;
     m.sampler = fallback.sampler;
     return m;
@@ -71,7 +72,9 @@ void BandoriRenderer::onInit(Renderer& renderer, const ChartData& chart,
     // inline legacy fields — resolveMaterial() picks whichever is populated.
     m_chartMaterials.clear();
     for (const auto& md : chart.materials) {
-        m_chartMaterials[md.slot] = resolveMaterial(md, m_materialLibrary);
+        Material m = resolveMaterial(md, m_materialLibrary);
+        renderer.resolvePbrTextures(m);
+        m_chartMaterials[md.slot] = m;
     }
 
     // Apply camera config

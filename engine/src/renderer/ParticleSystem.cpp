@@ -89,10 +89,7 @@ void ParticleSystem::update(float dt) {
     }
 }
 
-void ParticleSystem::updateFrameUBO(const glm::mat4& viewProj, float time, int frameIndex) {
-    FrameUBO ubo{};
-    ubo.viewProj = viewProj;
-    ubo.time     = time;
+void ParticleSystem::updateFrameUBO(const FrameUBO& ubo, int frameIndex) {
     memcpy(m_ubos[frameIndex].mapped, &ubo, sizeof(FrameUBO));
 }
 

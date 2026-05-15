@@ -69,25 +69,47 @@ enum class RenderLayer : uint8_t {
 };
 
 // ── Per-frame UBO (set 0, binding 0) ────────────────────────────────────────
+// v2: 128 B std140-clean. Shared by QuadBatch / LineBatch / MeshRenderer /
+// ParticleSystem. `time` lives in cameraPos.w (it MOVED here from a dedicated
+// field) so the PBR path can also read the camera world position. Every shader
+// that used `ubo.time` now reads `ubo.cameraPos.w`.
 
 struct FrameUBO {
-    glm::mat4 viewProj;
-    float     time;
-    float     _pad[3];
-};
+    glm::mat4 viewProj;     //   0  64
+    glm::vec4 cameraPos;    //  64  16  xyz = eye world pos, w = time
+    glm::vec4 lightDir;     //  80  16  xyz = directional light dir (world, normalized)
+    glm::vec4 lightColor;   //  96  16  rgb = color, w = intensity
+    glm::vec4 ambient;      // 112  16  rgb = ambient color, w = ambient intensity
+};                          // 128 B
 
 // ── Push constants (exactly 128 bytes — Vulkan guaranteed minimum) ───────────
 // WARNING: do not add fields. 128B is the spec floor (maxPushConstantsSize).
 // If more per-draw data is needed, switch to a per-instance SSBO.
+//
+// The PBR pipelines reinterpret this SAME 128 B block (no field add): they bind
+// a distinct pipeline whose GLSL push-constant layout maps the bytes as:
+//   offset 64  tint        -> vec4 baseColor   (rgb + alpha)
+//   offset 80  uvTransform -> vec4 mrp         (x=metallic y=roughness
+//                                               z=emissiveIntensity w=flags)
+//   offset 96  params      -> vec4 emissive    (rgb emissive color)
+//   offset 112 kind        -> uint kind        (PBR sentinel 0xFFFFFFFF)
+// flags bit0 = hasNormalMap. The legacy/effect shaders keep the original
+// interpretation below — the batcher binds the matching pipeline so there is
+// no runtime branch.
 
 struct QuadPushConstants {
     glm::mat4 model;        // 64 B  — first keeps mat4 16-aligned
-    glm::vec4 tint;         // 16 B  — rgba multiplier
-    glm::vec4 uvTransform;  // 16 B  — xy=offset, zw=scale
-    glm::vec4 params;       // 16 B  — meaning depends on material kind
-    uint32_t  kind;         //  4 B  — MaterialKind cast to uint
+    glm::vec4 tint;         // 16 B  — rgba multiplier  (PBR: baseColor)
+    glm::vec4 uvTransform;  // 16 B  — xy=offset, zw=scale  (PBR: mrp)
+    glm::vec4 params;       // 16 B  — meaning depends on material kind (PBR: emissive)
+    uint32_t  kind;         //  4 B  — MaterialKind cast to uint (PBR: 0xFFFFFFFF)
     uint32_t  _pad[3];      // 12 B  → total 128 B
 };
+
+// Sentinel written into QuadPushConstants::kind / MeshPushConstants::kind when
+// the bound pipeline is the PBR pipeline (so the value is unambiguous in
+// captures; the shader does not actually branch on it).
+static constexpr uint32_t PBR_KIND_SENTINEL = 0xFFFFFFFFu;
 
 // Mesh push-constant block — byte-identical to QuadPushConstants so both batchers
 // can share the same shader push-constant declaration. Kept as a distinct type

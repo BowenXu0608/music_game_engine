@@ -99,8 +99,10 @@ if(GLSLC)
         ${SHADER_DIR}/quad_scroll.frag
         ${SHADER_DIR}/quad_pulse.frag
         ${SHADER_DIR}/quad_gradient.frag
+        ${SHADER_DIR}/quad_pbr.vert  ${SHADER_DIR}/quad_pbr.frag
         ${SHADER_DIR}/line.vert      ${SHADER_DIR}/line.frag
         ${SHADER_DIR}/mesh.vert
+        ${SHADER_DIR}/mesh_pbr.frag
         ${SHADER_DIR}/mesh_unlit.frag
         ${SHADER_DIR}/mesh_glow.frag
         ${SHADER_DIR}/mesh_scroll.frag

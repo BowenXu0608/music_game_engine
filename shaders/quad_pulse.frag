@@ -7,7 +7,10 @@
 
 layout(set = 0, binding = 0) uniform FrameUBO {
     mat4  viewProj;
-    float time;
+    vec4  cameraPos;   // .w = time
+    vec4  lightDir;
+    vec4  lightColor;
+    vec4  ambient;
 } ubo;
 
 layout(set = 1, binding = 0) uniform sampler2D texSampler;
@@ -31,7 +34,7 @@ void main() {
     float lastHit    = pc.params.x;
     float decay      = max(pc.params.y, 1e-3);
     float peakMult   = pc.params.z;
-    float elapsed    = max(ubo.time - lastHit, 0.0);
+    float elapsed    = max(ubo.cameraPos.w - lastHit, 0.0);
     float pulseBoost = peakMult * exp(-elapsed / decay);
     outColor = vec4(base.rgb * (1.0 + pulseBoost), base.a);
     if (outColor.a < 0.01) discard;

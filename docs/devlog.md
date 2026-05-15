@@ -1917,3 +1917,49 @@ Four coupled bugs, fixed in order as the user tested:
 1. **"Judged at entry" was the bug, not the design.** I initially framed entry-only scoring as a possible intended model and offered it as an option. The user corrected it firmly: every sample point counts. When a rhythm-game element looks like it "fires once," confirm the *intended* granularity from the genre/user before treating the observed behavior as spec.
 2. **Counting can be right while the feature looks broken.** Autoplay proved combo 11 (all samples scored) two fixes before the user was satisfied — the remaining complaints were *visual* (whole-slide cull, control-point blob, no per-sample particle). Don't declare a scoring bug closed on a combo number; the player judges by what disappears and what flashes.
 3. **Render and scoring must share the same threshold.** Tying node-disappear to the exact `absTime` that `consumeSlideTicks` consumes a tick is what makes "node vanishes as it's scored" feel correct. Two independent timelines for the same event read as a glitch.
+
+---
+
+## 2026-05-15 (later) — PBR material system + Copilot material op (branch `pbr-material-system`)
+
+### Problem
+
+The "material system" was only special-effect fragment shaders (`Unlit/Glow/Scroll/Pulse/Gradient/Custom`) selected per-quad via `MaterialKind`. It did no real lighting — a flat 2D note just got a uniform tint. The user wanted a proper **PBR material system** (Disney metallic-roughness subset) so materials are physically lit by a built-in light and usable on **every note in every game mode**.
+
+### Decisions (locked with the user before coding)
+
+1. Scope: PBR for all note slots in all modes — both the 2D quad path (Bandori/Cytus/Lanota/Phigros via `QuadBatch`) and the 3D mesh path (Arcaea-3D / Circle via `MeshRenderer`).
+2. Lighting: a *preinstalled* fixed directional + ambient light (no UI), so materials are lit without self-illumination; emissive stays optional.
+3. Controls: core set only — base color, metallic, roughness, emissive (color+intensity), + **optional** normal map.
+4. Normal map optional: with → real lit relief on the flat quad; without → smooth, alpha-only (no faked bumps).
+5. PBR *is* the material system; old effect kinds become a separate "special effect" concept — removed from the material picker, **not deleted** (existing charts keep working).
+
+### Approach (the plan that was approved)
+
+Reinterpret the existing **128 B push-constant block** per-pipeline (no field add, no vertex-format change — the two highest-risk options were explicitly avoided). Normal mapping uses a **screen-space derivative TBN** so no tangent attribute is needed. Lighting rides an expanded 128 B `FrameUBO` shared by all batchers (`time` relocated into `cameraPos.w`). `Material` keeps all legacy fields so effect pipelines stay byte-identical; a new `MaterialClass{Pbr, SpecialEffect}` selects the pipeline. `.mat` JSON is versioned v2 with in-memory v1→v2 migration (unlit→plain PBR, glow→emissive PBR, others→effect). Set 1 grew to 2 bindings (baseColor sRGB + normal linear). Full plan retained at `~/.claude/plans/synthetic-humming-cocke.md`.
+
+### What shipped
+
+- **Data/Vulkan:** `RenderTypes.h` FrameUBO v2 + PBR push-constant byte map; `Camera::eyePosition()`; `Material`/`MaterialAsset` PBR fields + `MaterialClass`; `MaterialAsset` v2 schema + `migrateAssetV1toV2` + library seed/resolve PBR branch; `TextureManager` linear-format path + `createFlatNormal1x1()`; `DescriptorManager` Set 1 → 2 bindings (pool 320→512); `Renderer` preinstalled light + `resolvePbrTextures()` cache; `QuadBatch`/`MeshRenderer` PBR pipeline (`quad_pbr.vert`+`quad_pbr.frag`, `mesh_pbr.frag`, Cook-Torrance GGX + Lambert) + widened `updateFrameUBO`.
+- **Game modes:** Bandori/Arcaea note `Material` draws are PBR (slotOrFallback preserves PBR views). Cytus + Lanota got `slotMat()` + a lit `drawNoteQuad`/`mat`-overload path — tap/flick/hold/slide-node (Cytus) and arc-tile/hold-core+head (Lanota) are PBR; scan line, hit ring, slide path, halo, disks, rings, masks stay tint-only by design. Phigros still unwired.
+- **Editor:** `StartScreenEditor::renderMaterials` shows PBR controls (Base Color/Metallic/Roughness/Emissive/Emissive Intensity/Base Color Texture/Use normal map/Normal Map) for PBR assets; the legacy effect editor only shows for SpecialEffect assets.
+- **Copilot:** new `set_material` op (`SetPbrMaterialOp`) — sets one note slot's PBR material by *name* (loose-matched per mode); all fields optional; extended-apply path resolves slot→`default_<mode>_<slug>` asset, applies, upserts, points the active-difficulty override map at it. `ChartSnapshot` extended for material undo. `_common.md` + per-mode skill docs document the op + slot names. Fixed a pre-existing bug: `buildCopilotSystemPrompt` used `"circle"/"scanline"` mode names that have no skill file (those modes were getting the bare fallback prompt) — now `lanota`/`cytus`.
+- **Packaging:** CMake `SHADER_SOURCES` + Android `shaderFiles[]` whitelist updated for the 3 new shaders.
+
+### Verification
+
+Desktop builds clean (only pre-existing CP936 warnings). `ChartRoundtripTest` PASS (incl. "mode gate OK"). Engine runs with Vulkan validation layers enabled (Debug) — **zero validation errors** — across the FrameUBO size change, 2-binding Set 1, and PBR pipelines. Android whitelist + CMake updated; on-device APK run still pending.
+
+### Limitations (deliberate / known)
+
+1. **"Every note lit by default with no chart override" is opt-in**, not automatic. Runtime `Material::cls` defaults to `SpecialEffect` so the ~hundreds of renderer fallback-`Material` sites keep their exact prior look (zero-regression choice); PBR lighting kicks in when a PBR material/asset is assigned to a slot (seeded per-slot defaults + the picker make this easy). Making it automatic would mean rewriting every fallback-construction site.
+2. **Cytus/Lanota:** decorative line/ring/disk/halo elements intentionally stay unlit (lighting them would dim glow/bloom). **Phigros** renderer is still unwired (no `resolveMaterial` loop — pre-existing).
+3. **2D quads need a normal map to look 3D.** Without one a flat camera-facing quad is uniformly shaded under the fixed light (correct PBR, just visually flat) — this is the documented physical limitation that drove the "normal map optional" decision.
+4. **Copilot `set_material` is an absolute *set***, and the model is not shown current material values, so relative requests ("a bit shinier") are best-effort, not precise deltas. Material edits take effect on the next preview/gameplay launch (renderer reads materials in `onInit`), not live. Shader-authoring (Custom `.frag`) ops remain out of Copilot scope.
+5. On-device Android visual verification of PBR not yet done; runtime shader dir `build/Debug/shaders` is synced from `build/shaders` by a `pwsh`-based post-build that fails when pwsh is absent — copy `*.spv` manually after a shader change.
+
+### Lessons
+
+1. **Reinterpreting fixed-size push constants beats growing them.** The 128 B block is the Vulkan floor and was already full; binding a distinct pipeline whose GLSL reads the same bytes differently gave PBR all its per-draw data with zero ABI change and no SSBO.
+2. **Default-value choices are regression policy.** Flipping `Material::cls` default to PBR would have silently whitened every un-overridden note across four renderers. Defaulting to `SpecialEffect` and opting in via `resolveMaterial` was the difference between a safe change and a broad visual regression.
+3. **A "check if X was updated" question is worth answering literally.** The Copilot wasn't just un-updated for PBR — it had *no* material capability and `ChartSnapshot` explicitly excluded materials. Verifying that before building avoided assuming a migration where a net-new feature was needed, and surfaced the unrelated `"circle"/"scanline"` skill-file bug.

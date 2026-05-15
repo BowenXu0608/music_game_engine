@@ -9,6 +9,8 @@
 #include <vector>
 #include <string>
 #include <unordered_map>
+#include <map>
+#include <utility>
 
 class VulkanContext;
 
@@ -26,7 +28,8 @@ public:
     void init(VulkanContext& ctx, BufferManager& bufMgr,
               DescriptorManager& descMgr, VkRenderPass renderPass,
               const std::string& shaderDir,
-              VkImageView whiteView, VkSampler whiteSampler);
+              VkImageView whiteView, VkSampler whiteSampler,
+              VkImageView flatNormalView, VkSampler flatNormalSampler);
     void shutdown(VulkanContext& ctx, BufferManager& bufMgr);
 
     Mesh createMesh(VulkanContext& ctx, BufferManager& bufMgr,
@@ -50,7 +53,7 @@ public:
 
     void flush(VkCommandBuffer cmd, int frameIndex);
 
-    void updateFrameUBO(const glm::mat4& viewProj, float time, int frameIndex,
+    void updateFrameUBO(const FrameUBO& ubo, int frameIndex,
                         BufferManager& bufMgr);
 
     // Compile (if needed) and build a pipeline for a user-authored 3D
@@ -65,18 +68,23 @@ private:
     struct DrawEntry {
         const Mesh*     mesh;
         glm::mat4       model;
+        MaterialClass   cls = MaterialClass::SpecialEffect;
         MaterialKind    kind;
         VkPipeline      customPipe = VK_NULL_HANDLE;   // overrides kind when set
-        glm::vec4       tint;
-        glm::vec4       params;
-        glm::vec4       uvTransform;
+        glm::vec4       tint;        // PBR: baseColor
+        glm::vec4       params;      // PBR: emissive rgb
+        glm::vec4       uvTransform; // PBR: mrp (metallic,roughness,emisInt,flags)
         VkDescriptorSet texSet;
     };
 
     VkDescriptorSet resolveTexSet(VkImageView view, VkSampler sampler,
                                   VulkanContext& ctx, DescriptorManager& descMgr);
+    VkDescriptorSet resolvePbrTexSet(VkImageView baseV, VkSampler baseS,
+                                     VkImageView normV, VkSampler normS,
+                                     VulkanContext& ctx, DescriptorManager& descMgr);
 
     std::array<Pipeline, (size_t)MaterialKind::Count> m_pipelines{};
+    Pipeline         m_pbrPipeline{};
     VkPipelineLayout m_pipelineLayout = VK_NULL_HANDLE;
     std::vector<Buffer>          m_ubos;
     std::vector<VkDescriptorSet> m_frameSets;
@@ -88,12 +96,16 @@ private:
     std::string  m_shaderDir;
     std::unordered_map<std::string, Pipeline> m_customPipelines;
 
-    VkImageView m_whiteView    = VK_NULL_HANDLE;
-    VkSampler   m_whiteSampler = VK_NULL_HANDLE;
+    VkImageView m_whiteView      = VK_NULL_HANDLE;
+    VkSampler   m_whiteSampler   = VK_NULL_HANDLE;
+    VkImageView m_flatNormalView    = VK_NULL_HANDLE;
+    VkSampler   m_flatNormalSampler = VK_NULL_HANDLE;
 
     // Cache of (texture view → descriptor set) so repeated draws with the same
     // texture don't keep allocating. Cleared on shutdown.
     std::unordered_map<VkImageView, VkDescriptorSet> m_texSetCache;
+    // PBR 2-image sets keyed by (baseColor view, normal view).
+    std::map<std::pair<VkImageView, VkImageView>, VkDescriptorSet> m_pbrTexSetCache;
 
     int m_currentFrame = 0;
 };

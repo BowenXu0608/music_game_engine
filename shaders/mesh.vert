@@ -2,7 +2,10 @@
 
 layout(set = 0, binding = 0) uniform FrameUBO {
     mat4  viewProj;
-    float time;
+    vec4  cameraPos;   // xyz = eye, w = time
+    vec4  lightDir;
+    vec4  lightColor;
+    vec4  ambient;
 } ubo;
 
 layout(push_constant) uniform PushConstants {
@@ -22,11 +25,13 @@ layout(location = 3) in vec4 inColor;
 layout(location = 0) out vec2 fragUV;
 layout(location = 1) out vec4 fragColor;
 layout(location = 2) out vec3 fragNormal;
+layout(location = 3) out vec3 fragWorldPos;
 
 void main() {
     vec4 worldPos = pc.model * vec4(inPos, 1.0);
-    gl_Position = ubo.viewProj * worldPos;
-    fragUV     = inUV;
-    fragColor  = inColor * pc.tint;
-    fragNormal = mat3(transpose(inverse(pc.model))) * inNormal;
+    gl_Position  = ubo.viewProj * worldPos;
+    fragUV       = inUV;
+    fragColor    = inColor * pc.tint;
+    fragNormal   = mat3(transpose(inverse(pc.model))) * inNormal;
+    fragWorldPos = worldPos.xyz;
 }

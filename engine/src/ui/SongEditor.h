@@ -354,6 +354,14 @@ public:  // Phase 7: Copilot extended apply path mutates these.
     const std::vector<ScanPageOverride>& scanPages() const {
         return const_cast<SongEditor*>(this)->m_diffScanPages[(int)m_currentDifficulty];
     }
+
+    // Copilot SetPbrMaterialOp reaches the material library + mode + the
+    // active difficulty's slot-override map through these.
+    class MaterialAssetLibrary* copilotMatLib();
+    MaterialModeKey              copilotMatMode() const;
+    std::unordered_map<uint16_t, ChartData::MaterialData>& copilotMatOverrides() {
+        return m_diffMaterials[(int)m_currentDifficulty];
+    }
 private:
 
     int                        m_scanCurrentPage    = 0;

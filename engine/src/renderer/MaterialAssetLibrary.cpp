@@ -91,17 +91,19 @@ void MaterialAssetLibrary::seedDefaultMaterials(MaterialModeKey mode) {
         std::string name = std::string("default_") + modeName + "_" + slug;
         auto it = m_assets.find(name);
         if (it != m_assets.end()) {
-            // Asset exists from an earlier run. Preserve user edits to
-            // kind/tint/params, but backfill target fields if they're empty
-            // (older .mat files pre-date the targetMode/targetSlotSlug
-            // additions). Without backfill those entries would be "universal"
-            // and clutter every slot's picker.
-            bool dirty = false;
+            // Asset exists from an earlier run. Preserve user edits, but
+            // backfill target fields if empty (older .mat files pre-date the
+            // targetMode/targetSlotSlug additions) and rewrite v1 files as v2
+            // so the in-memory migration persists to disk.
+            bool dirty = it->second.wasLegacyV1;
             if (it->second.targetMode.empty())     { it->second.targetMode     = modeName; dirty = true; }
             if (it->second.targetSlotSlug.empty()) { it->second.targetSlotSlug = slug;     dirty = true; }
-            if (dirty) upsert(it->second);
+            if (dirty) { it->second.wasLegacyV1 = false; upsert(it->second); }
             continue;
         }
+        // New default: start from the slot's legacy kind/tint/params and run
+        // the same v1→v2 mapping, so Unlit slots become plain PBR and Glow
+        // slots become emissive PBR. Effect-kind slots stay SpecialEffect.
         MaterialAsset asset;
         asset.name           = name;
         asset.kind           = slot.defaultKind;
@@ -109,6 +111,7 @@ void MaterialAssetLibrary::seedDefaultMaterials(MaterialModeKey mode) {
                                 slot.defaultTint[2],   slot.defaultTint[3]};
         asset.params         = {slot.defaultParams[0], slot.defaultParams[1],
                                 slot.defaultParams[2], slot.defaultParams[3]};
+        migrateAssetV1toV2(asset);
         asset.targetMode     = modeName;
         asset.targetSlotSlug = slug;
         upsert(asset);
@@ -157,6 +160,7 @@ void MaterialAssetLibrary::migrateChartToAssets(ChartData& chart,
             a.tint   = {md.tint[0], md.tint[1], md.tint[2], md.tint[3]};
             a.params = {md.params[0], md.params[1], md.params[2], md.params[3]};
             a.texturePath = md.texturePath;
+            migrateAssetV1toV2(a);
             upsert(a);
             md.assetName = name;
             continue;
@@ -180,6 +184,7 @@ void MaterialAssetLibrary::migrateChartToAssets(ChartData& chart,
             a.tint           = {md.tint[0], md.tint[1], md.tint[2], md.tint[3]};
             a.params         = {md.params[0], md.params[1], md.params[2], md.params[3]};
             a.texturePath    = md.texturePath;
+            migrateAssetV1toV2(a);
             a.targetMode     = modeName;
             a.targetSlotSlug = slug;
             upsert(a);
@@ -224,28 +229,58 @@ void MaterialAssetLibrary::pruneOldCrypticFiles(const std::vector<std::string>& 
     }
 }
 
+namespace {
+// Expand a project-relative path to absolute against the library's project
+// root. Empty stays empty.
+std::string toAbs(const MaterialAssetLibrary* lib, const std::string& rel) {
+    if (rel.empty() || !lib) return rel;
+    return (lib->projectDir() / rel).string();
+}
+
+void fillFromAsset(Material& m, const MaterialAsset& a,
+                   const MaterialAssetLibrary* lib) {
+    m.cls = a.cls;
+    if (a.cls == MaterialClass::Pbr) {
+        m.pbr.baseColor         = {a.baseColor[0], a.baseColor[1],
+                                   a.baseColor[2], a.baseColor[3]};
+        m.pbr.metallic          = a.metallic;
+        m.pbr.roughness         = a.roughness;
+        m.pbr.emissiveColor     = {a.emissiveColor[0], a.emissiveColor[1],
+                                   a.emissiveColor[2]};
+        m.pbr.emissiveIntensity = a.emissiveIntensity;
+        bool hasNormal = a.useNormalMap && !a.normalTexPath.empty();
+        m.pbr.flags = hasNormal ? PBR_FLAG_HAS_NORMAL_MAP : 0.f;
+        m.baseColorTexPath = toAbs(lib, a.baseColorTexPath);
+        m.normalTexPath    = hasNormal ? toAbs(lib, a.normalTexPath) : "";
+    } else {
+        m.kind   = a.kind;
+        m.tint   = {a.tint[0],   a.tint[1],   a.tint[2],   a.tint[3]};
+        m.params = {a.params[0], a.params[1], a.params[2], a.params[3]};
+        if (a.kind == MaterialKind::Custom && !a.customShaderPath.empty())
+            m.customShaderPath = toAbs(lib, a.customShaderPath);
+    }
+}
+} // namespace
+
 Material resolveMaterial(const ChartData::MaterialData& md,
                          const MaterialAssetLibrary* lib) {
     Material m;
     if (!md.assetName.empty() && lib) {
         if (const MaterialAsset* a = lib->get(md.assetName)) {
-            m.kind   = a->kind;
-            m.tint   = {a->tint[0],   a->tint[1],   a->tint[2],   a->tint[3]};
-            m.params = {a->params[0], a->params[1], a->params[2], a->params[3]};
-            // Custom shader path is stored in the asset as project-relative.
-            // Expand to absolute here so the batcher doesn't have to know
-            // where the project root is.
-            if (a->kind == MaterialKind::Custom && !a->customShaderPath.empty()) {
-                m.customShaderPath =
-                    (lib->projectDir() / a->customShaderPath).string();
-            }
+            fillFromAsset(m, *a, lib);
             return m;
         }
         // Asset name referenced but not found — fall through to inline so the
         // visual doesn't silently disappear.
     }
-    m.kind   = parseKind(md.kind);
-    m.tint   = {md.tint[0],   md.tint[1],   md.tint[2],   md.tint[3]};
-    m.params = {md.params[0], md.params[1], md.params[2], md.params[3]};
+    // Legacy inline (no assetName): synthesize an asset and run the same
+    // v1→v2 mapping so inline unlit/glow still becomes lit PBR.
+    MaterialAsset a;
+    a.kind   = parseKind(md.kind);
+    a.tint   = {md.tint[0],   md.tint[1],   md.tint[2],   md.tint[3]};
+    a.params = {md.params[0], md.params[1], md.params[2], md.params[3]};
+    a.texturePath = md.texturePath;
+    migrateAssetV1toV2(a);
+    fillFromAsset(m, a, lib);
     return m;
 }

@@ -15,13 +15,14 @@ void TextureManager::init(VulkanContext&, BufferManager& bufMgr) {
 void TextureManager::shutdown(VulkanContext&) {}
 
 Texture TextureManager::loadFromFile(VulkanContext& ctx, BufferManager& bufMgr,
-                                     const std::string& path) {
+                                     const std::string& path, bool srgb) {
     int w, h, ch;
     stbi_uc* pixels = stbi_load(path.c_str(), &w, &h, &ch, STBI_rgb_alpha);
     if (!pixels) throw std::runtime_error("Failed to load texture: " + path);
 
     Texture tex = createTexture(ctx, bufMgr, pixels,
-                                static_cast<uint32_t>(w), static_cast<uint32_t>(h));
+                                static_cast<uint32_t>(w), static_cast<uint32_t>(h),
+                                srgb);
     stbi_image_free(pixels);
     return tex;
 }
@@ -31,13 +32,24 @@ Texture TextureManager::createWhite1x1(VulkanContext& ctx, BufferManager& bufMgr
     return createTexture(ctx, bufMgr, pixels, 1, 1);
 }
 
+Texture TextureManager::createFlatNormal1x1(VulkanContext& ctx, BufferManager& bufMgr) {
+    // Tangent-space (0,0,1) encoded as (0.5,0.5,1.0) → bytes (128,128,255).
+    // MUST be linear so the shader gets the raw vector back.
+    uint8_t pixels[4] = {128, 128, 255, 255};
+    return createTexture(ctx, bufMgr, pixels, 1, 1, /*srgb=*/false);
+}
+
 Texture TextureManager::createFromPixels(VulkanContext& ctx, BufferManager& bufMgr,
-                                         const uint8_t* rgba, uint32_t w, uint32_t h) {
-    return createTexture(ctx, bufMgr, rgba, w, h);
+                                         const uint8_t* rgba, uint32_t w, uint32_t h,
+                                         bool srgb) {
+    return createTexture(ctx, bufMgr, rgba, w, h, srgb);
 }
 
 Texture TextureManager::createTexture(VulkanContext& ctx, BufferManager& bufMgr,
-                                      const uint8_t* pixels, uint32_t w, uint32_t h) {
+                                      const uint8_t* pixels, uint32_t w, uint32_t h,
+                                      bool srgb) {
+    const VkFormat fmt = srgb ? VK_FORMAT_R8G8B8A8_SRGB
+                              : VK_FORMAT_R8G8B8A8_UNORM;
     VkDeviceSize imageSize = w * h * 4;
 
     // Staging buffer
@@ -51,7 +63,7 @@ Texture TextureManager::createTexture(VulkanContext& ctx, BufferManager& bufMgr,
     ici.extent        = {w, h, 1};
     ici.mipLevels     = 1;
     ici.arrayLayers   = 1;
-    ici.format        = VK_FORMAT_R8G8B8A8_SRGB;
+    ici.format        = fmt;
     ici.tiling        = VK_IMAGE_TILING_OPTIMAL;
     ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
     ici.usage         = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
@@ -110,7 +122,7 @@ Texture TextureManager::createTexture(VulkanContext& ctx, BufferManager& bufMgr,
     vci.sType                           = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
     vci.image                           = tex.image;
     vci.viewType                        = VK_IMAGE_VIEW_TYPE_2D;
-    vci.format                          = VK_FORMAT_R8G8B8A8_SRGB;
+    vci.format                          = fmt;
     vci.subresourceRange.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
     vci.subresourceRange.levelCount     = 1;
     vci.subresourceRange.layerCount     = 1;

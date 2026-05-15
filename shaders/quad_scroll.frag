@@ -5,7 +5,10 @@
 
 layout(set = 0, binding = 0) uniform FrameUBO {
     mat4  viewProj;
-    float time;
+    vec4  cameraPos;   // .w = time
+    vec4  lightDir;
+    vec4  lightColor;
+    vec4  ambient;
 } ubo;
 
 layout(set = 1, binding = 0) uniform sampler2D texSampler;
@@ -27,7 +30,7 @@ layout(location = 0) out vec4 outColor;
 void main() {
     vec2 tile  = vec2(pc.params.z > 0.0 ? pc.params.z : 1.0,
                       pc.params.w > 0.0 ? pc.params.w : 1.0);
-    vec2 uv    = fragUV * tile + ubo.time * pc.params.xy;
+    vec2 uv    = fragUV * tile + ubo.cameraPos.w * pc.params.xy;
     vec4 texC  = texture(texSampler, uv);
     outColor = texC * fragColor;
     if (outColor.a < 0.01) discard;

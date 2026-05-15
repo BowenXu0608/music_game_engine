@@ -31,8 +31,8 @@ Material ArcaeaRenderer::slotOrFallback(uint16_t slot, const Material& fallback)
     auto it = m_chartMaterials.find(slot);
     if (it == m_chartMaterials.end()) return fallback;
     Material m = it->second;
-    // Texture/sampler resolution by path is Phase-later; every chart material
-    // currently rides the white fallback texture.
+    if (m.cls == MaterialClass::Pbr)
+        return m;   // PBR keeps its resolved baseColor/normal views
     m.texture = fallback.texture;
     m.sampler = fallback.sampler;
     return m;
@@ -48,7 +48,9 @@ void ArcaeaRenderer::onInit(Renderer& renderer, const ChartData& chart,
     // picks whichever form the entry uses (asset reference or legacy inline).
     m_chartMaterials.clear();
     for (const auto& md : chart.materials) {
-        m_chartMaterials[md.slot] = resolveMaterial(md, m_materialLibrary);
+        Material m = resolveMaterial(md, m_materialLibrary);
+        renderer.resolvePbrTextures(m);
+        m_chartMaterials[md.slot] = m;
     }
 
     for (auto& note : chart.notes) {

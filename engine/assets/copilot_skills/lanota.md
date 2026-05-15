@@ -152,3 +152,12 @@ User: *"Make all flicks between 48 and 56s into regular taps."*
            "from_type":"flick", "to_type":"tap"}]
 }
 ```
+
+## Material slots (set_material)
+
+Lit PBR note slots — use these names with `set_material`:
+`Click Note / Fill`, `Hold Note / Body`, `Hold Note / Body (Active)`,
+`Hold Note / Head`, `Hold Note / Head (Active)`.
+Tint-only (decorative — avoid `metallic`/`roughness`):
+`Click Note / Shadow`, `Inner Spawn Disk`, `Outer Hit Ring`,
+`Sample Marker`.

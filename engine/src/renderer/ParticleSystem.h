@@ -37,7 +37,7 @@ public:
 
     void update(float dt);
     void flush(VkCommandBuffer cmd, int frameIndex, VkDescriptorSet whiteTexSet);
-    void updateFrameUBO(const glm::mat4& viewProj, float time, int frameIndex);
+    void updateFrameUBO(const FrameUBO& ubo, int frameIndex);
 
 private:
     std::array<Particle, MAX_PARTICLES> m_pool;

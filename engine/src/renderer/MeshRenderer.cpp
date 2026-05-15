@@ -32,11 +32,14 @@ const char* shaderNameForKind(MaterialKind k) {
 void MeshRenderer::init(VulkanContext& ctx, BufferManager& bufMgr,
                         DescriptorManager& descMgr, VkRenderPass renderPass,
                         const std::string& shaderDir,
-                        VkImageView whiteView, VkSampler whiteSampler) {
-    m_whiteView    = whiteView;
-    m_whiteSampler = whiteSampler;
-    m_renderPass   = renderPass;
-    m_shaderDir    = shaderDir;
+                        VkImageView whiteView, VkSampler whiteSampler,
+                        VkImageView flatNormalView, VkSampler flatNormalSampler) {
+    m_whiteView         = whiteView;
+    m_whiteSampler      = whiteSampler;
+    m_flatNormalView    = flatNormalView;
+    m_flatNormalSampler = flatNormalSampler;
+    m_renderPass        = renderPass;
+    m_shaderDir         = shaderDir;
 
     m_ubos.resize(MAX_FRAMES_IN_FLIGHT);
     m_frameSets.resize(MAX_FRAMES_IN_FLIGHT);
@@ -79,9 +82,40 @@ void MeshRenderer::init(VulkanContext& ctx, BufferManager& bufMgr,
         m_pipelines[(size_t)k].init(ctx, cfg);
     }
 
+    // PBR pipeline — same layout/vertex format, depth-tested like the kinds.
+    {
+        PipelineConfig cfg{};
+        cfg.renderPass       = renderPass;
+        cfg.layout           = m_pipelineLayout;
+        cfg.vertShaderPath   = shaderDir + "/mesh.vert.spv";
+        cfg.fragShaderPath   = shaderDir + "/mesh_pbr.frag.spv";
+        cfg.vertexBinding    = binding;
+        cfg.vertexAttributes = {attributes.begin(), attributes.end()};
+        cfg.depthTest        = true;
+        cfg.depthWrite       = true;
+        cfg.blend            = PipelineConfig::Blend::Alpha;
+        m_pbrPipeline.init(ctx, cfg);
+    }
+
     // Pre-register the white fallback so legacy drawMesh() (no texture) and any
     // Material whose texture resolved to null share a single descriptor set.
     m_texSetCache[m_whiteView] = descMgr.allocateTextureSet(ctx, m_whiteView, m_whiteSampler);
+}
+
+VkDescriptorSet MeshRenderer::resolvePbrTexSet(VkImageView baseV, VkSampler baseS,
+                                               VkImageView normV, VkSampler normS,
+                                               VulkanContext& ctx,
+                                               DescriptorManager& descMgr) {
+    VkImageView bv = baseV ? baseV : m_whiteView;
+    VkSampler   bs = baseS ? baseS : m_whiteSampler;
+    VkImageView nv = normV ? normV : m_flatNormalView;
+    VkSampler   ns = normS ? normS : m_flatNormalSampler;
+    auto key = std::make_pair(bv, nv);
+    auto it  = m_pbrTexSetCache.find(key);
+    if (it != m_pbrTexSetCache.end()) return it->second;
+    VkDescriptorSet set = descMgr.allocateTextureSet(ctx, bv, bs, nv, ns);
+    m_pbrTexSetCache[key] = set;
+    return set;
 }
 
 Mesh MeshRenderer::createMesh(VulkanContext& ctx, BufferManager& bufMgr,
@@ -130,6 +164,20 @@ void MeshRenderer::drawMesh(const Mesh& mesh, const glm::mat4& model, const Mate
     DrawEntry e;
     e.mesh        = &mesh;
     e.model       = model;
+    e.cls         = mat.cls;
+
+    if (mat.cls == MaterialClass::Pbr) {
+        e.tint        = mat.pbr.baseColor;
+        e.uvTransform = glm::vec4(mat.pbr.metallic, mat.pbr.roughness,
+                                  mat.pbr.emissiveIntensity, mat.pbr.flags);
+        e.params      = glm::vec4(mat.pbr.emissiveColor, 0.f);
+        e.texSet      = resolvePbrTexSet(mat.baseColorTex, mat.baseColorSamp,
+                                         mat.normalTex,    mat.normalSamp,
+                                         ctx, descMgr);
+        m_queue.push_back(e);
+        return;
+    }
+
     e.kind        = mat.kind;
     // Resolve custom pipeline up-front so compilation failures don't hit
     // the middle of a flush. Null handle means "use the built-in pipeline
@@ -176,11 +224,16 @@ void MeshRenderer::flush(VkCommandBuffer cmd, int frameIndex) {
     VkDescriptorSet lastTexSet = VK_NULL_HANDLE;
 
     for (auto& entry : m_queue) {
-        VkPipeline pipe = entry.customPipe;
-        if (pipe == VK_NULL_HANDLE) {
-            pipe = m_pipelines[(size_t)entry.kind].handle();
-            if (pipe == VK_NULL_HANDLE)
-                pipe = m_pipelines[(size_t)MaterialKind::Unlit].handle();
+        VkPipeline pipe;
+        if (entry.cls == MaterialClass::Pbr) {
+            pipe = m_pbrPipeline.handle();
+        } else {
+            pipe = entry.customPipe;
+            if (pipe == VK_NULL_HANDLE) {
+                pipe = m_pipelines[(size_t)entry.kind].handle();
+                if (pipe == VK_NULL_HANDLE)
+                    pipe = m_pipelines[(size_t)MaterialKind::Unlit].handle();
+            }
         }
         if (pipe != lastPipe) {
             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
@@ -196,10 +249,11 @@ void MeshRenderer::flush(VkCommandBuffer cmd, int frameIndex) {
 
         MeshPushConstants pc{};
         pc.model       = entry.model;
-        pc.tint        = entry.tint;
-        pc.uvTransform = entry.uvTransform;
-        pc.params      = entry.params;
-        pc.kind        = (uint32_t)entry.kind;
+        pc.tint        = entry.tint;        // PBR: baseColor
+        pc.uvTransform = entry.uvTransform; // PBR: mrp
+        pc.params      = entry.params;      // PBR: emissive rgb
+        pc.kind        = entry.cls == MaterialClass::Pbr
+                            ? PBR_KIND_SENTINEL : (uint32_t)entry.kind;
         vkCmdPushConstants(cmd, m_pipelineLayout,
                            VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                            0, sizeof(MeshPushConstants), &pc);
@@ -213,11 +267,8 @@ void MeshRenderer::flush(VkCommandBuffer cmd, int frameIndex) {
     m_queue.clear();
 }
 
-void MeshRenderer::updateFrameUBO(const glm::mat4& viewProj, float time,
-                                   int frameIndex, BufferManager&) {
-    FrameUBO ubo{};
-    ubo.viewProj = viewProj;
-    ubo.time     = time;
+void MeshRenderer::updateFrameUBO(const FrameUBO& ubo, int frameIndex,
+                                   BufferManager&) {
     memcpy(m_ubos[frameIndex].mapped, &ubo, sizeof(FrameUBO));
 }
 
@@ -261,9 +312,11 @@ VkPipeline MeshRenderer::getOrBuildCustomPipeline(VulkanContext& ctx,
 
 void MeshRenderer::shutdown(VulkanContext& ctx, BufferManager& bufMgr) {
     for (auto& p : m_pipelines) p.shutdown(ctx);
+    m_pbrPipeline.shutdown(ctx);
     for (auto& [_, p] : m_customPipelines) p.shutdown(ctx);
     m_customPipelines.clear();
     vkDestroyPipelineLayout(ctx.device(), m_pipelineLayout, nullptr);
     for (auto& b : m_ubos) bufMgr.destroyBuffer(b);
     m_texSetCache.clear();
+    m_pbrTexSetCache.clear();
 }

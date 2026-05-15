@@ -20,3 +20,13 @@ MaterialKind parseKind(const std::string& s) {
     if (s == "custom"   || s == "Custom")   return MaterialKind::Custom;
     return MaterialKind::Unlit;
 }
+
+const char* classToString(MaterialClass c) {
+    return c == MaterialClass::SpecialEffect ? "effect" : "pbr";
+}
+
+MaterialClass parseClass(const std::string& s) {
+    if (s == "effect" || s == "special_effect" || s == "SpecialEffect")
+        return MaterialClass::SpecialEffect;
+    return MaterialClass::Pbr;
+}

@@ -30,7 +30,19 @@ enum LanotaSlot : uint16_t {
 glm::vec4 LanotaRenderer::slotTint(uint16_t slot, glm::vec4 fallbackRGBA) const {
     auto it = m_chartMaterials.find(slot);
     if (it == m_chartMaterials.end()) return fallbackRGBA;
+    if (it->second.cls == MaterialClass::Pbr) return it->second.pbr.baseColor;
     return it->second.tint;
+}
+
+Material LanotaRenderer::slotMat(uint16_t slot, glm::vec4 fallbackRGBA) const {
+    auto it = m_chartMaterials.find(slot);
+    if (it != m_chartMaterials.end() && it->second.cls == MaterialClass::Pbr)
+        return it->second;                 // user-assigned PBR asset wins
+    Material m;
+    m.cls           = MaterialClass::Pbr;
+    m.pbr.baseColor = fallbackRGBA;
+    m.pbr.roughness = 0.6f;
+    return m;
 }
 
 // Project world pos → screen coords (y=0 bottom, y=h top).
@@ -52,7 +64,9 @@ void LanotaRenderer::onInit(Renderer& renderer, const ChartData& chart,
     // asset references and legacy inline entries.
     m_chartMaterials.clear();
     for (const auto& md : chart.materials) {
-        m_chartMaterials[md.slot] = resolveMaterial(md, m_materialLibrary);
+        Material m = resolveMaterial(md, m_materialLibrary);
+        renderer.resolvePbrTextures(m);
+        m_chartMaterials[md.slot] = m;
     }
 
     // Seed disk layout from the per-song config (falls back to defaults).
@@ -406,10 +420,12 @@ void LanotaRenderer::onRender(Renderer& renderer) {
                 ? std::max(0.f, 1.f + timeDiff / 0.3f)
                 : 0.4f + 0.6f * std::max(0.f, 1.f - timeDiff / (APPROACH_SECS / m_noteSpeedMul));
 
-            glm::vec4 baseTint = (note.type == NoteType::Flick)
-                ? slotTint(SlotArcTile, {1.f, 0.35f, 0.35f, 1.f})   // Flick falls back to red
-                : slotTint(SlotArcTile, {1.f, 0.85f, 0.3f,  1.f});
-            glm::vec4 color = {baseTint.r, baseTint.g, baseTint.b, baseTint.a * alpha};
+            Material arcMat = (note.type == NoteType::Flick)
+                ? slotMat(SlotArcTile, {1.f, 0.35f, 0.35f, 1.f})   // Flick falls back to red
+                : slotMat(SlotArcTile, {1.f, 0.85f, 0.3f,  1.f});
+            glm::vec4 bt    = arcMat.pbr.baseColor;
+            glm::vec4 color = {bt.r, bt.g, bt.b, bt.a * alpha};
+            arcMat.pbr.baseColor = color;   // per-note fade folded into baseColor
 
             // ── Curved arc tile, foreshortened by m_perspVP ──────────────────
             // The note is a tile on the disk (a plane parallel to z=0 at z=noteZ)
@@ -487,14 +503,13 @@ void LanotaRenderer::onRender(Renderer& renderer) {
                 }
             }
 
-            // Bright fill on top.
+            // Bright fill on top — lit PBR material.
             for (int i = 0; i < NOTE_ARC_SEGMENTS; ++i) {
                 if (inner[i].x  < -90000.f || inner[i+1].x < -90000.f) continue;
                 renderer.quads().drawQuadCorners(
                     inner[i],  outer[i],
                     outer[i+1], inner[i+1],
-                    color, {0.f, 0.f, 1.f, 1.f},
-                    renderer.whiteView(), renderer.whiteSampler(),
+                    arcMat, {0.f, 0.f, 1.f, 1.f},
                     renderer.context(), renderer.descriptors());
             }
         }
@@ -611,10 +626,10 @@ void LanotaRenderer::drawHoldBodies(Renderer& renderer) {
         // current radius. Adjacent slices connect into a curved sector that
         // follows the ring even when the hold stays in a single lane.
         const bool holdActive = m_activeHoldIds.count(hb.noteId) > 0;
-        // Core: Glow slot when active (brighter + bloom-ready), Unlit otherwise.
-        const glm::vec4 bodyColor = holdActive
-            ? slotTint(SlotHoldBodyActive, {0.4f, 0.9f, 1.f, 0.95f})
-            : slotTint(SlotHoldBody,       {0.85f, 1.05f, 1.35f, 0.95f});
+        // Core body is a lit PBR material (chart asset or default colour).
+        const Material bodyMat = holdActive
+            ? slotMat(SlotHoldBodyActive, {0.4f, 0.9f, 1.f, 0.95f})
+            : slotMat(SlotHoldBody,       {0.85f, 1.05f, 1.35f, 0.95f});
 
         // ── Lanota-style hold body ─────────────────────────────────────────
         // In real Lanota a hold body is a curved 2D track laid out on the
@@ -693,7 +708,10 @@ void LanotaRenderer::drawHoldBodies(Renderer& renderer) {
         }
 
         // Halo pass first (dim/wide), then bright core on top.
-        auto drawRibbon = [&](float halfPx, glm::vec4 baseColor, bool isCore) {
+        // `mat != nullptr` → lit PBR (core body); nullptr → flat colour (halo
+        // glow, kept unlit so it stays bright/bloom-ready).
+        auto drawRibbon = [&](float halfPx, glm::vec4 baseColor,
+                              const Material* mat, bool isCore) {
             (void)halfPx;
             for (int i = 0; i + 1 <= N; ++i) {
                 if (!edges[i].ok || !edges[i + 1].ok) continue;
@@ -707,21 +725,29 @@ void LanotaRenderer::drawHoldBodies(Renderer& renderer) {
                 glm::vec2 outA = isCore ? edges[i].outC    : edges[i].outH;
                 glm::vec2 inB  = isCore ? edges[i + 1].inC : edges[i + 1].inH;
                 glm::vec2 outB = isCore ? edges[i + 1].outC: edges[i + 1].outH;
-                renderer.quads().drawQuadCorners(
-                    inA, outA, outB, inB,
-                    col, {0.f, 0.f, 1.f, 1.f},
-                    renderer.whiteView(), renderer.whiteSampler(),
-                    renderer.context(), renderer.descriptors());
+                if (mat) {
+                    Material m = *mat;
+                    m.pbr.baseColor = col;
+                    renderer.quads().drawQuadCorners(
+                        inA, outA, outB, inB,
+                        m, {0.f, 0.f, 1.f, 1.f},
+                        renderer.context(), renderer.descriptors());
+                } else {
+                    renderer.quads().drawQuadCorners(
+                        inA, outA, outB, inB,
+                        col, {0.f, 0.f, 1.f, 1.f},
+                        renderer.whiteView(), renderer.whiteSampler(),
+                        renderer.context(), renderer.descriptors());
+                }
             }
         };
 
-        // Halo ribbon reuses the hold-body slot alpha at reduced brightness —
-        // same tint family, just the "wide and dim" variant of the beam.
+        // Halo ribbon: wide/dim glow, kept unlit.
         const glm::vec4 haloColor = holdActive
             ? slotTint(SlotHoldBodyActive, {1.0f, 1.0f, 1.0f, 0.85f})
             : slotTint(SlotHoldBody,       {0.55f, 0.80f, 1.0f, 0.85f});
-        drawRibbon(haloHalfPx, haloColor, /*isCore=*/false);
-        drawRibbon(coreHalfPx, bodyColor, /*isCore=*/true);
+        drawRibbon(haloHalfPx, haloColor, nullptr, /*isCore=*/false);
+        drawRibbon(coreHalfPx, bodyMat.pbr.baseColor, &bodyMat, /*isCore=*/true);
 
         // ── Head anchor: a small arc tile sitting on the rim where the
         // beam meets the disk edge. Real Lanota holds keep this lens-shaped
@@ -757,15 +783,14 @@ void LanotaRenderer::drawHoldBodies(Renderer& renderer) {
                 outPts[k] = w2s(wOut, m_perspVP, sw, sh);
             }
             if (headOk) {
-                glm::vec4 headCol = holdActive
-                    ? slotTint(SlotHoldHeadActive, {0.4f, 0.9f, 1.f, 1.f})
-                    : slotTint(SlotHoldHead,       {0.8f, 0.95f, 1.f, 1.f});
+                Material headMat = holdActive
+                    ? slotMat(SlotHoldHeadActive, {0.4f, 0.9f, 1.f, 1.f})
+                    : slotMat(SlotHoldHead,       {0.8f, 0.95f, 1.f, 1.f});
                 for (int k = 0; k < HEAD_SEGS; ++k) {
                     renderer.quads().drawQuadCorners(
                         inPts[k],  outPts[k],
                         outPts[k + 1], inPts[k + 1],
-                        headCol, {0.f, 0.f, 1.f, 1.f},
-                        renderer.whiteView(), renderer.whiteSampler(),
+                        headMat, {0.f, 0.f, 1.f, 1.f},
                         renderer.context(), renderer.descriptors());
                 }
             }

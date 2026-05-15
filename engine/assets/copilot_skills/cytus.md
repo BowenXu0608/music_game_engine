@@ -160,3 +160,12 @@ User: *"Delete every slide between 40 and 48 seconds."*
   "ops": [{"op":"delete_slide", "from":40.0, "to":48.0}]
 }
 ```
+
+## Material slots (set_material)
+
+Lit PBR note slots — use these names with `set_material`:
+`Click Note`, `Hold Note / Body`, `Hold Note / Head`,
+`Hold Note / Tail Cap`, `Flick Note`, `Slide Note / Head`,
+`Slide Note / Node`.
+Tint-only (decorative — avoid `metallic`/`roughness`):
+`Slide Note / Path`, `Scan Line Core`, `Scan Line Glow`, `Hit Ring`.

@@ -1,8 +1,13 @@
 {
+  "version": 2,
+  "class": "pbr",
   "name": "default_arcaea_playfield_side_posts",
-  "kind": "unlit",
-  "tint": [0.8, 0.82, 0.92, 0.5],
-  "params": [0, 0, 0, 0],
+  "baseColor": [0.8, 0.82, 0.92, 0.5],
+  "metallic": 0,
+  "roughness": 1,
+  "emissiveColor": [0, 0, 0],
+  "emissiveIntensity": 0,
+  "useNormalMap": false,
   "targetMode": "arcaea",
   "targetSlot": "playfield_side_posts"
 }

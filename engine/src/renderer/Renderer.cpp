@@ -2,6 +2,36 @@
 #include <stdexcept>
 #include <array>
 
+void Renderer::resolvePbrTextures(Material& m) {
+    if (m.cls != MaterialClass::Pbr) return;
+
+    auto loadCached = [&](const std::string& path, bool srgb,
+                          VkImageView& outView, VkSampler& outSamp,
+                          VkImageView fbView, VkSampler fbSamp) {
+        if (path.empty()) { outView = fbView; outSamp = fbSamp; return; }
+        std::string key = srgb ? path : (path + "|n");
+        auto it = m_pbrTexCache.find(key);
+        if (it == m_pbrTexCache.end()) {
+            try {
+                Texture t = m_texMgr.loadFromFile(m_ctx, m_bufMgr, path, srgb);
+                it = m_pbrTexCache.emplace(key, t).first;
+            } catch (...) {
+                // Missing/unreadable file → fall back, don't crash gameplay.
+                outView = fbView; outSamp = fbSamp; return;
+            }
+        }
+        outView = it->second.view;
+        outSamp = it->second.sampler;
+    };
+
+    loadCached(m.baseColorTexPath, /*srgb=*/true,
+               m.baseColorTex, m.baseColorSamp,
+               m_whiteTexture.view, m_whiteTexture.sampler);
+    loadCached(m.normalTexPath, /*srgb=*/false,
+               m.normalTex, m.normalSamp,
+               m_flatNormalTexture.view, m_flatNormalTexture.sampler);
+}
+
 void Renderer::init(GLFWwindow* window, const std::string& shaderDir, bool validation, bool vsync) {
     m_shaderDir = shaderDir;
     m_vsync     = vsync;
@@ -16,7 +46,8 @@ void Renderer::init(GLFWwindow* window, const std::string& shaderDir, bool valid
     m_cmdMgr.init(m_ctx, MAX_FRAMES_IN_FLIGHT);
     m_sync.init(m_ctx);
 
-    m_whiteTexture = m_texMgr.createWhite1x1(m_ctx, m_bufMgr);
+    m_whiteTexture      = m_texMgr.createWhite1x1(m_ctx, m_bufMgr);
+    m_flatNormalTexture = m_texMgr.createFlatNormal1x1(m_ctx, m_bufMgr);
     m_whiteTexSet  = m_descMgr.allocateTextureSet(m_ctx, m_whiteTexture.view, m_whiteTexture.sampler);
 
     auto ext = m_swapchain.extent();
@@ -24,10 +55,13 @@ void Renderer::init(GLFWwindow* window, const std::string& shaderDir, bool valid
                        VK_FORMAT_R16G16B16A16_SFLOAT, m_renderPass.handle(), shaderDir);
 
     // Batchers use the scene render pass, not the swapchain render pass
-    m_quads.init(m_ctx, m_bufMgr, m_descMgr, m_postProcess.sceneRenderPass(), shaderDir);
+    m_quads.init(m_ctx, m_bufMgr, m_descMgr, m_postProcess.sceneRenderPass(), shaderDir,
+                 m_whiteTexture.view, m_whiteTexture.sampler,
+                 m_flatNormalTexture.view, m_flatNormalTexture.sampler);
     m_lines.init(m_ctx, m_bufMgr, m_descMgr, m_postProcess.sceneRenderPass(), shaderDir);
     m_meshes.init(m_ctx, m_bufMgr, m_descMgr, m_postProcess.sceneRenderPass(), shaderDir,
-                  m_whiteTexture.view, m_whiteTexture.sampler);
+                  m_whiteTexture.view, m_whiteTexture.sampler,
+                  m_flatNormalTexture.view, m_flatNormalTexture.sampler);
     m_particles.init(m_ctx, m_bufMgr, m_descMgr, m_postProcess.sceneRenderPass(), shaderDir);
 
     // Default ortho camera
@@ -38,6 +72,9 @@ void Renderer::init(GLFWwindow* window, const std::string& shaderDir, bool valid
 void Renderer::shutdown() {
     vkDeviceWaitIdle(m_ctx.device());
     m_texMgr.destroyTexture(m_ctx, m_whiteTexture);
+    m_texMgr.destroyTexture(m_ctx, m_flatNormalTexture);
+    for (auto& [_, t] : m_pbrTexCache) m_texMgr.destroyTexture(m_ctx, t);
+    m_pbrTexCache.clear();
     m_quads.shutdown(m_ctx, m_bufMgr);
     m_lines.shutdown(m_ctx, m_bufMgr);
     m_meshes.shutdown(m_ctx, m_bufMgr);
@@ -88,12 +125,20 @@ bool Renderer::beginFrame() {
 void Renderer::endFrame() {
     int frame = m_sync.currentFrame();
 
-    // Update UBOs now — after game mode called setCamera()
-    glm::mat4 vp = m_camera.viewProjection();
-    m_quads.updateFrameUBO(vp, m_time, frame);
-    m_lines.updateFrameUBO(vp, m_time, frame);
-    m_meshes.updateFrameUBO(vp, m_time, frame, m_bufMgr);
-    m_particles.updateFrameUBO(vp, m_time, frame);
+    // Build the shared per-frame UBO now — after the game mode called
+    // setCamera(). All batchers get the same struct (the preinstalled light
+    // travels with it so PBR materials are lit without self-illumination).
+    FrameUBO ubo{};
+    ubo.viewProj   = m_camera.viewProjection();
+    ubo.cameraPos  = glm::vec4(m_camera.eyePosition(), m_time);
+    ubo.lightDir   = glm::vec4(m_lightDir, 0.f);
+    ubo.lightColor = glm::vec4(m_lightColor, m_lightInten);
+    ubo.ambient    = glm::vec4(m_ambientColor, m_ambientInten);
+
+    m_quads.updateFrameUBO(ubo, frame);
+    m_lines.updateFrameUBO(ubo, frame);
+    m_meshes.updateFrameUBO(ubo, frame, m_bufMgr);
+    m_particles.updateFrameUBO(ubo, frame);
 
     // Flush all batchers
     m_quads.flush(m_currentCmd, m_ctx, m_descMgr);

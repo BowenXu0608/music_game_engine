@@ -139,3 +139,12 @@ User: *"Make every hold in the chorus (32..48s) use the rhomboid style."*
   "ops": [{"op":"set_hold_transition", "from":32.0, "to":48.0, "style":"rhomboid"}]
 }
 ```
+
+## Material slots (set_material)
+
+Lit PBR note slots — use these names with `set_material`:
+`Click Note`, `Hold Note / Body`, `Hold Note / Body (Active)`,
+`Hold Note / Head`, `Hold Note / Head (Active)`, `Flick Note`,
+`Playfield / Track Surface`.
+Tint-only (no PBR shading — avoid `metallic`/`roughness` here):
+`Lane Divider`, `Hit Zone Line`, `Hit Zone Glow`.

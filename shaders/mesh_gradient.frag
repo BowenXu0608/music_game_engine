@@ -8,7 +8,10 @@
 
 layout(set = 0, binding = 0) uniform FrameUBO {
     mat4  viewProj;
-    float time;
+    vec4  cameraPos;
+    vec4  lightDir;
+    vec4  lightColor;
+    vec4  ambient;
 } ubo;
 
 layout(set = 1, binding = 0) uniform sampler2D texSampler;

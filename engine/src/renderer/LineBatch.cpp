@@ -98,10 +98,7 @@ void LineBatch::flush(VkCommandBuffer cmd, int frameIndex) {
     m_vertices.clear();
 }
 
-void LineBatch::updateFrameUBO(const glm::mat4& viewProj, float time, int frameIndex) {
-    FrameUBO ubo{};
-    ubo.viewProj = viewProj;
-    ubo.time     = time;
+void LineBatch::updateFrameUBO(const FrameUBO& ubo, int frameIndex) {
     memcpy(m_ubos[frameIndex].mapped, &ubo, sizeof(FrameUBO));
 }
 

@@ -1,7 +1,11 @@
 #include "ChartEditOps.h"
 #include "ui/SongEditor.h"
+#include "renderer/MaterialAssetLibrary.h"
+#include "renderer/MaterialAsset.h"
+#include "renderer/MaterialSlots.h"
 
 #include <nlohmann/json.hpp>
+#include <cctype>
 
 #include <algorithm>
 #include <cstdio>
@@ -330,6 +334,41 @@ ChartEditParseResult parseChartEditOps(const std::string& assistantMsg) {
             readRange(item, op.tFrom, op.tTo);
             out.ops.emplace_back(op);
         }
+        else if (kind == "set_material") {
+            SetPbrMaterialOp op;
+            op.slot = item.value("slot", std::string());
+            if (op.slot.empty()) continue;   // slot is required
+            if (item.contains("base_color") && item["base_color"].is_array()
+                && item["base_color"].size() >= 3) {
+                const auto& a = item["base_color"];
+                op.baseColor = std::array<float,4>{
+                    (float)a[0].get<double>(), (float)a[1].get<double>(),
+                    (float)a[2].get<double>(),
+                    a.size() >= 4 ? (float)a[3].get<double>() : 1.f };
+            }
+            if (item.contains("metallic"))
+                op.metallic = (float)item.value("metallic", 0.0);
+            if (item.contains("roughness"))
+                op.roughness = (float)item.value("roughness", 0.5);
+            if (item.contains("emissive_color")
+                && item["emissive_color"].is_array()
+                && item["emissive_color"].size() >= 3) {
+                const auto& e = item["emissive_color"];
+                op.emissiveColor = std::array<float,3>{
+                    (float)e[0].get<double>(), (float)e[1].get<double>(),
+                    (float)e[2].get<double>() };
+            }
+            if (item.contains("emissive_intensity"))
+                op.emissiveIntensity =
+                    (float)item.value("emissive_intensity", 0.0);
+            if (item.contains("base_color_texture"))
+                op.baseColorTexture =
+                    item.value("base_color_texture", std::string());
+            if (item.contains("normal_texture"))
+                op.normalTexture =
+                    item.value("normal_texture", std::string());
+            out.ops.emplace_back(std::move(op));
+        }
         // Unknown ops silently skipped — the LLM may emit future vocab
         // that isn't wired yet; the per-mode skill docs describe current
         // ops, so anything else is best dropped rather than misapplied.
@@ -467,6 +506,18 @@ std::string describeChartEditOp(const ChartEditOp& op) {
         }
         else if constexpr (std::is_same_v<T, DeleteScanSpeedEventOp>) {
             return "scan_speed_del " + fmtFloat(o.tFrom) + "-" + fmtFloat(o.tTo) + "s";
+        }
+        else if constexpr (std::is_same_v<T, SetPbrMaterialOp>) {
+            std::string s = "set_material  \"" + o.slot + "\"";
+            if (o.baseColor) s += " base=[" + fmtFloat((*o.baseColor)[0]) + ","
+                + fmtFloat((*o.baseColor)[1]) + "," + fmtFloat((*o.baseColor)[2])
+                + "," + fmtFloat((*o.baseColor)[3]) + "]";
+            if (o.metallic)  s += " metal=" + fmtFloat(*o.metallic);
+            if (o.roughness) s += " rough=" + fmtFloat(*o.roughness);
+            if (o.emissiveColor || o.emissiveIntensity) s += " emissive";
+            if (o.baseColorTexture) s += " +baseTex";
+            if (o.normalTexture)    s += " +normalMap";
+            return s;
         }
         else {
             return "(unknown op)";
@@ -824,7 +875,8 @@ bool isExtendedOp(const ChartEditOp& op) {
             || std::is_same_v<T, DeleteDiskEventOp>
             || std::is_same_v<T, SetPageSpeedOp>
             || std::is_same_v<T, AddScanSpeedEventOp>
-            || std::is_same_v<T, DeleteScanSpeedEventOp>;
+            || std::is_same_v<T, DeleteScanSpeedEventOp>
+            || std::is_same_v<T, SetPbrMaterialOp>;
     }, op);
 }
 
@@ -938,6 +990,74 @@ ChartEditApplyStats applyChartEditOpExtended(SongEditor& editor,
                     return e.startTime >= o.tFrom && e.startTime <= o.tTo;
                 }), v.end());
             st.deleted = (int)(before - v.size());
+        }
+        else if constexpr (std::is_same_v<T, SetPbrMaterialOp>) {
+            MaterialAssetLibrary* lib = editor.copilotMatLib();
+            if (!lib) return;
+            MaterialModeKey mode = editor.copilotMatMode();
+            const auto& slots = getMaterialSlotsForMode(mode);
+
+            // Loose match: lowercase, drop spaces/underscores/slashes so
+            // "Hold Body", "hold_body", "Hold Note / Body" all resolve.
+            auto canon = [](std::string s) {
+                std::string r;
+                for (char c : s) {
+                    if (c == ' ' || c == '_' || c == '/' || c == '-') continue;
+                    r += (char)std::tolower((unsigned char)c);
+                }
+                return r;
+            };
+            std::string want = canon(o.slot);
+            const MaterialSlotInfo* found = nullptr;
+            for (const auto& s : slots) {
+                std::string dn  = canon(s.displayName ? s.displayName : "");
+                std::string gdn = canon(std::string(s.group ? s.group : "")
+                                        + (s.displayName ? s.displayName : ""));
+                std::string sl  = canon(materialSlotSlug(s));
+                if (want == dn || want == gdn || want == sl) { found = &s; break; }
+            }
+            if (!found) return;   // unknown slot → no-op (mutated stays 0)
+
+            std::string slug      = materialSlotSlug(*found);
+            std::string modeName  = materialModeName(mode);
+            std::string assetName = "default_" + modeName + "_" + slug;
+
+            MaterialAsset a;
+            if (const MaterialAsset* ex = lib->get(assetName)) a = *ex;
+            a.name = assetName;
+            if (a.cls != MaterialClass::Pbr) {   // promote legacy effect default
+                migrateAssetV1toV2(a);
+                a.cls = MaterialClass::Pbr;
+            }
+            a.targetMode     = modeName;
+            a.targetSlotSlug = slug;
+
+            auto cl01 = [](float v) { return v < 0.f ? 0.f : (v > 1.f ? 1.f : v); };
+            if (o.baseColor)
+                a.baseColor = { (*o.baseColor)[0], (*o.baseColor)[1],
+                                (*o.baseColor)[2], (*o.baseColor)[3] };
+            if (o.metallic)          a.metallic          = cl01(*o.metallic);
+            if (o.roughness)         a.roughness         = cl01(*o.roughness);
+            if (o.emissiveColor)
+                a.emissiveColor = { (*o.emissiveColor)[0], (*o.emissiveColor)[1],
+                                    (*o.emissiveColor)[2] };
+            if (o.emissiveIntensity)
+                a.emissiveIntensity = std::max(0.f, *o.emissiveIntensity);
+            if (o.baseColorTexture)  a.baseColorTexPath  = *o.baseColorTexture;
+            if (o.normalTexture) {
+                a.normalTexPath = *o.normalTexture;
+                a.useNormalMap  = !o.normalTexture->empty();
+            }
+
+            lib->upsert(a);   // persists v2 .mat to disk + in-memory
+
+            // Point the active difficulty's slot at this asset so the renderer
+            // resolves it (same effect as picking it in the slot combo).
+            ChartData::MaterialData md;
+            md.slot      = found->id;
+            md.assetName = assetName;
+            editor.copilotMatOverrides()[found->id] = md;
+            st.mutated = 1;
         }
         // Note-vector ops route here as a no-op — the dispatch above in
         // applyChartEditOp is where they actually execute.

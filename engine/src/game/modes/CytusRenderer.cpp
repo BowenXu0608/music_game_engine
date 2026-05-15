@@ -35,7 +35,22 @@ enum CytusSlot : uint16_t {
 glm::vec4 CytusRenderer::slotTint(uint16_t slot, glm::vec4 fallbackRGBA) const {
     auto it = m_chartMaterials.find(slot);
     if (it == m_chartMaterials.end()) return fallbackRGBA;
+    // PBR materials carry their colour in pbr.baseColor (legacy `tint` stays
+    // white). Cytus draws this slot via the colour-only path, so surface the
+    // base colour here.
+    if (it->second.cls == MaterialClass::Pbr) return it->second.pbr.baseColor;
     return it->second.tint;
+}
+
+Material CytusRenderer::slotMat(uint16_t slot, glm::vec4 fallbackRGBA) const {
+    auto it = m_chartMaterials.find(slot);
+    if (it != m_chartMaterials.end() && it->second.cls == MaterialClass::Pbr)
+        return it->second;                 // user-assigned PBR asset wins
+    Material m;
+    m.cls           = MaterialClass::Pbr;
+    m.pbr.baseColor = fallbackRGBA;
+    m.pbr.roughness = 0.6f;                // soft default for note plastic look
+    return m;
 }
 
 // ── Scan-line schedule ──────────────────────────────────────────────────────
@@ -189,7 +204,9 @@ void CytusRenderer::onInit(Renderer& renderer, const ChartData& chart,
     // resolveMaterial() based on which form the entry populates.
     m_chartMaterials.clear();
     for (const auto& md : chart.materials) {
-        m_chartMaterials[md.slot] = resolveMaterial(md, m_materialLibrary);
+        Material m = resolveMaterial(md, m_materialLibrary);
+        renderer.resolvePbrTextures(m);
+        m_chartMaterials[md.slot] = m;
     }
 
     // Dominant BPM from chart timing (editor always writes at least one
@@ -279,26 +296,35 @@ void CytusRenderer::onRender(Renderer& renderer) {
     renderer.lines().drawLine({0.f, scanY}, {w, scanY}, 24.f, scanGlowTint);
     renderer.lines().drawLine({0.f, scanY}, {w, scanY}, SCAN_THICKNESS, scanCoreTint);
 
-    // Cache per-frame resolved tints for the remaining slots. Alpha is the
-    // slot's own alpha; per-note `alpha` is multiplied in at each call site.
-    const glm::vec4 tapTint       = slotTint(SlotTapNote,     {1.f, 1.f, 1.f, 1.f});
-    const glm::vec4 holdBodyTint  = slotTint(SlotHoldBody,    {0.3f, 0.7f, 1.f, 0.45f});
-    const glm::vec4 holdHeadTint  = slotTint(SlotHoldHead,    {0.3f, 0.7f, 1.f, 1.f});
-    const glm::vec4 holdTailTint  = slotTint(SlotHoldTailCap, {0.3f, 0.7f, 1.f, 0.8f});
-    const glm::vec4 flickTint     = slotTint(SlotFlickNote,   {1.f, 0.75f, 0.35f, 1.f});
-    const glm::vec4 slideHeadTint = slotTint(SlotSlideHead,   {0.85f, 0.5f, 1.f, 1.f});
-    const glm::vec4 slideNodeTint = slotTint(SlotSlideNode,   {1.f, 1.f, 1.f, 1.f});
-    const glm::vec4 slidePathTint = slotTint(SlotSlidePath,   {0.85f, 0.5f, 1.f, 0.55f});
-    const glm::vec4 hitRingTint   = slotTint(SlotHitRing,     {1.f, 1.f, 1.f, 0.85f});
+    // Note slots resolve to lit PBR materials (chart asset or default).
+    // Decorative slots (scan line, hit ring, slide path) stay tint-only.
+    const Material tapMat       = slotMat(SlotTapNote,     {1.f, 1.f, 1.f, 1.f});
+    const Material holdBodyMat  = slotMat(SlotHoldBody,    {0.3f, 0.7f, 1.f, 0.45f});
+    const Material holdHeadMat  = slotMat(SlotHoldHead,    {0.3f, 0.7f, 1.f, 1.f});
+    const Material holdTailMat  = slotMat(SlotHoldTailCap, {0.3f, 0.7f, 1.f, 0.8f});
+    const Material flickMat     = slotMat(SlotFlickNote,   {1.f, 0.75f, 0.35f, 1.f});
+    const Material slideHeadMat = slotMat(SlotSlideHead,   {0.85f, 0.5f, 1.f, 1.f});
+    const Material slideNodeMat = slotMat(SlotSlideNode,   {1.f, 1.f, 1.f, 1.f});
+    const glm::vec4 slidePathTint = slotTint(SlotSlidePath, {0.85f, 0.5f, 1.f, 0.55f});
+    const glm::vec4 hitRingTint   = slotTint(SlotHitRing,   {1.f, 1.f, 1.f, 0.85f});
 
     auto withAlpha = [](const glm::vec4& base, float alphaMul) {
         return glm::vec4{base.r, base.g, base.b, base.a * alphaMul};
     };
 
     const auto whiteTex = std::tuple{renderer.whiteView(), renderer.whiteSampler()};
+    // Decorative / masking quads — flat colour, white texture (unlit).
     auto drawQuadAt = [&](glm::vec2 c, glm::vec2 sz, glm::vec4 col) {
         renderer.quads().drawQuad(c, sz, 0.f, col, {0.f, 0.f, 1.f, 1.f},
                                   std::get<0>(whiteTex), std::get<1>(whiteTex),
+                                  renderer.context(), renderer.descriptors());
+    };
+    // Lit note quads — PBR material; per-note fade modulates baseColor alpha.
+    auto drawNoteQuad = [&](glm::vec2 c, glm::vec2 sz,
+                            const Material& base, float alphaMul) {
+        Material m = base;
+        m.pbr.baseColor = withAlpha(base.pbr.baseColor, alphaMul);
+        renderer.quads().drawQuad(c, sz, 0.f, m, {0.f, 0.f, 1.f, 1.f},
                                   renderer.context(), renderer.descriptors());
     };
 
@@ -382,8 +408,8 @@ void CytusRenderer::onRender(Renderer& renderer) {
                 const glm::vec2 end(scanToScreenX(note.sx), scanToScreenY(note.endY));
                 const float bodyH = std::abs(end.y - head.y);
                 const glm::vec2 mid(head.x, (head.y + end.y) * 0.5f);
-                drawQuadAt(mid, {holdW, bodyH}, withAlpha(holdBodyTint, alpha));
-                drawQuadAt(end, {NOTE_RADIUS, NOTE_RADIUS}, withAlpha(holdTailTint, alpha));
+                drawNoteQuad(mid, {holdW, bodyH}, holdBodyMat, alpha);
+                drawNoteQuad(end, {NOTE_RADIUS, NOTE_RADIUS}, holdTailMat, alpha);
             } else {
                 // Multi-sweep hold: draw body segments through each sweep
                 bool sweepUp = note.goingUpAtTime;
@@ -399,17 +425,17 @@ void CytusRenderer::onRender(Renderer& renderer) {
                     }
                     float bodyH = std::abs(segEndY - segStartY);
                     float midY  = (segStartY + segEndY) * 0.5f;
-                    drawQuadAt({head.x, midY}, {holdW, bodyH},
-                               withAlpha(holdBodyTint, alpha));
+                    drawNoteQuad({head.x, midY}, {holdW, bodyH},
+                                 holdBodyMat, alpha);
                     segStartY = segEndY;
                     sweepUp = !sweepUp;
                 }
                 // Tail cap
                 glm::vec2 end(scanToScreenX(note.sx), scanToScreenY(note.endY));
-                drawQuadAt(end, {NOTE_RADIUS, NOTE_RADIUS}, withAlpha(holdTailTint, alpha));
+                drawNoteQuad(end, {NOTE_RADIUS, NOTE_RADIUS}, holdTailMat, alpha);
             }
             // Head
-            drawQuadAt(head, {sz, sz}, withAlpha(holdHeadTint, alpha));
+            drawNoteQuad(head, {sz, sz}, holdHeadMat, alpha);
             continue;
         }
 
@@ -440,26 +466,26 @@ void CytusRenderer::onRender(Renderer& renderer) {
 
             // Head marker (only while it hasn't been swept).
             if (m_songTime < note.time)
-                drawQuadAt(head, {sz, sz}, withAlpha(slideHeadTint, alpha));
+                drawNoteQuad(head, {sz, sz}, slideHeadMat, alpha);
 
             // Sample-point node markers, surviving ones only.
             size_t startIdx = (m_songTime < note.time && !live.empty()) ? 1 : 0;
             for (size_t i = startIdx; i < live.size(); ++i)
-                drawQuadAt(live[i], {NOTE_RADIUS * 0.6f, NOTE_RADIUS * 0.6f},
-                           withAlpha(slideNodeTint, alpha));
+                drawNoteQuad(live[i], {NOTE_RADIUS * 0.6f, NOTE_RADIUS * 0.6f},
+                             slideNodeMat, alpha);
             continue;
         }
 
         if (note.isFlick) {
-            // Arrow body uses the Flick tint; inner accent is a derived white.
-            drawQuadAt(head, {sz * 0.9f, sz * 1.2f}, withAlpha(flickTint, alpha));
+            // Arrow body uses the Flick material; inner accent is flat white.
+            drawNoteQuad(head, {sz * 0.9f, sz * 1.2f}, flickMat, alpha);
             drawQuadAt(head, {sz * 0.4f, sz * 0.4f}, {1.f, 1.f, 1.f, alpha});
             continue;
         }
 
-        // Plain Tap: outer dark ring + inner fill (ring stays hardcoded).
+        // Plain Tap: outer dark ring (flat) + lit inner fill.
         drawQuadAt(head, {sz + 8.f, sz + 8.f}, {0.f, 0.f, 0.f, alpha * 0.6f});
-        drawQuadAt(head, {sz, sz}, withAlpha(tapTint, alpha));
+        drawNoteQuad(head, {sz, sz}, tapMat, alpha);
     }
 }
 

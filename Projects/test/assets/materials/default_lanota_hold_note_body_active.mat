@@ -1,8 +1,13 @@
 {
+  "version": 2,
+  "class": "pbr",
   "name": "default_lanota_hold_note_body_active",
-  "kind": "glow",
-  "tint": [0.4, 0.9, 1, 0.95],
-  "params": [1, 0, 0, 0],
+  "baseColor": [0.4, 0.9, 1, 0.95],
+  "metallic": 0,
+  "roughness": 0.5,
+  "emissiveColor": [0.4, 0.9, 1],
+  "emissiveIntensity": 1,
+  "useNormalMap": false,
   "targetMode": "lanota",
   "targetSlot": "hold_note_body_active"
 }

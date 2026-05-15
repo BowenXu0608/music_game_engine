@@ -13,8 +13,10 @@
 #include "MeshRenderer.h"
 #include "ParticleSystem.h"
 #include "Camera.h"
+#include "Material.h"
 #include <GLFW/glfw3.h>
 #include <string>
+#include <unordered_map>
 
 class Renderer {
 public:
@@ -45,6 +47,13 @@ public:
     void setCamera(const Camera& cam) { m_camera = cam; }
     const Camera& camera() const      { return m_camera; }
 
+    // Resolve a PBR material's texture *paths* into GPU views. baseColor loads
+    // as sRGB, normal as linear. Empty/failed paths fall back to white /
+    // flat-normal. No-op for SpecialEffect materials. Textures are cached by
+    // path for the renderer's lifetime. Game-mode renderers call this in
+    // onInit after resolveMaterial().
+    void resolvePbrTextures(Material& m);
+
     VkCommandBuffer   currentCmd()   const { return m_currentCmd; }
     VulkanContext&    context()            { return m_ctx; }
     DescriptorManager& descriptors()      { return m_descMgr; }
@@ -52,6 +61,12 @@ public:
     // White 1x1 fallback texture
     VkImageView whiteView()    const { return m_whiteTexture.view; }
     VkSampler   whiteSampler() const { return m_whiteTexture.sampler; }
+
+    // Flat tangent-space-normal 1x1 fallback — bound at Set 1 binding 1 for
+    // PBR materials that carry no normal map. Game-mode renderers use this as
+    // the fallback when a material's normalTexPath is empty.
+    VkImageView flatNormalView()    const { return m_flatNormalTexture.view; }
+    VkSampler   flatNormalSampler() const { return m_flatNormalTexture.sampler; }
 
     uint32_t width()  const { return m_swapchain.extent().width; }
     uint32_t height() const { return m_swapchain.extent().height; }
@@ -81,7 +96,21 @@ private:
 
     Camera   m_camera;
     Texture  m_whiteTexture;
+    Texture  m_flatNormalTexture;
     VkDescriptorSet m_whiteTexSet = VK_NULL_HANDLE;
+
+    // Preinstalled scene light (no UI). lightDir is the direction the light
+    // travels (world space); shaders use L = -lightDir.
+    glm::vec3 m_lightDir     = glm::normalize(glm::vec3(-0.3f, -0.6f, -0.5f));
+    glm::vec3 m_lightColor   = glm::vec3(1.f, 1.f, 1.f);
+    float     m_lightInten   = 3.0f;
+    glm::vec3 m_ambientColor = glm::vec3(1.f, 1.f, 1.f);
+    float     m_ambientInten = 0.25f;
+
+    // PBR texture cache keyed by absolute path ("<path>" = sRGB baseColor,
+    // "<path>|n" = linear normal-map variant). Owned for the renderer's
+    // lifetime; freed in shutdown().
+    std::unordered_map<std::string, Texture> m_pbrTexCache;
 
     VkCommandBuffer m_currentCmd    = VK_NULL_HANDLE;
     uint32_t        m_imageIndex    = 0;

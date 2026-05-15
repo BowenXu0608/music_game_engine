@@ -252,3 +252,63 @@ No Arcaea slot was added — chart hold-material overrides for 3D drop are defer
 `game/screens/GameplayHudView::drawHud` previously rendered an 8-direction offset halo when `HudTextConfig::glow=true` and a +1 px shadow when `bold=true`. The default `comboHud` had `glow=true`. On a high-DPI phone (`dpiScale ≈ 3.5×`) the offsets blurred glyphs into a single saturated blob — the unreadable gold smear over the combo number reported on Android.
 
 Both branches were removed from `drawHud`. The `glow`/`bold` fields stay on `HudTextConfig` (chart JSON round-trip preserved) but are now no-ops. Any future glow effect should go through the post-process bloom path, not multi-pass `AddText` offsets.
+
+## PBR Material System (2026-05-15, branch `pbr-material-system`)
+
+PBR (Disney metallic-roughness subset) is now **the** material system; the old
+effect kinds (Glow/Scroll/Pulse/Gradient/Custom/Unlit) are reclassified as
+"special effects" — still renderable, removed from the material picker.
+Selected by `MaterialClass { Pbr, SpecialEffect }` on `Material`/`MaterialAsset`.
+
+**No vertex-format change, no push-constant growth.** The 128 B push block is
+reinterpreted by a *distinct pipeline* (no runtime branch): `tint`→baseColor,
+`uvTransform`→`mrp`(metallic,roughness,emissiveIntensity,flags),
+`params`→emissive rgb, `kind`→`PBR_KIND_SENTINEL`. Byte map documented in
+`RenderTypes.h`.
+
+**`FrameUBO` grew 80→128 B** (`viewProj`, `cameraPos` xyz=eye/**w=time**,
+`lightDir`, `lightColor`, `ambient`) — shared by all 4 batchers, built once in
+`Renderer::endFrame`; all `updateFrameUBO` take `const FrameUBO&`. Every shader
+FrameUBO block rewritten; `ubo.time`→`ubo.cameraPos.w` in quad/mesh
+scroll+pulse. Preinstalled light = constants in `Renderer` (dir
+`normalize(-0.3,-0.6,-0.5)`, white, intensity 3.0, ambient white×0.25), no UI.
+
+**Set 1 → 2 bindings** (0=baseColor sRGB, 1=normal LINEAR). 1-image
+`allocateTextureSet` writes binding 0 only (legacy shaders don't sample
+binding 1 → validation-clean); 4-arg overload writes both. Pool 320→512.
+
+**Shaders:** new `quad_pbr.vert` (dedicated — shared `quad.vert` applies
+`uvTransform`, which collides with the `mrp` byte slot), `quad_pbr.frag`,
+`mesh_pbr.frag` (Cook-Torrance GGX + Lambert; derivative-TBN normal mapping, no
+tangent attribute; `mesh.vert` reused, emits `fragWorldPos`). Without a normal
+map a flat camera-facing quad has a constant normal → smooth, alpha-only.
+
+**Textures:** `TextureManager::loadFromFile(...,bool srgb)` +
+`createFlatNormal1x1()` (128,128,255 linear). `Renderer::resolvePbrTextures`
+loads baseColor(sRGB)/normal(linear) by path, cached, fallback white/flatNormal;
+each game-mode `onInit` calls it after `resolveMaterial`.
+
+**`.mat` v2:** `{"version":2,"class":"pbr|effect",...}`. v1 files migrate in
+memory (`migrateAssetV1toV2`: unlit→plain PBR, glow→emissive PBR,
+others→effect), rewritten v2 on next upsert / `seedDefaultMaterials`. No
+chart-JSON schema change. **Runtime `Material::cls` defaults to
+`SpecialEffect`** (deliberate — keeps the many renderer fallback-`Material`
+sites unchanged; `resolveMaterial` sets `Pbr` explicitly for PBR assets).
+`MaterialAsset::cls` defaults to `Pbr` (new assets are PBR).
+
+**Scope:** Bandori + Arcaea note `Material` draws are PBR. Cytus + Lanota got
+`slotMat()` + a lit `drawNoteQuad`/`mat`-overload path (tap/flick/hold/slide
+nodes; arc-tile/hold core+head) — per-note fade folded into
+`pbr.baseColor.a`; scan line, hit ring, slide path, halo, disks, rings, masks
+stay tint-only by design. Phigros unwired. "Every note lit with no chart
+override" is opt-in via seeded per-slot PBR defaults + picker, not automatic.
+
+**Editor:** `StartScreenEditor::renderMaterials` shows PBR controls for
+PBR-class assets; the legacy effect editor only renders for SpecialEffect
+assets (kept editable, not deleted).
+
+Verified: desktop builds clean, `ChartRoundtripTest` PASS, engine runs with
+Vulkan validation enabled with zero errors. Android whitelist + CMake updated;
+on-device APK run pending. Known limitation: a flat 2D quad with no normal map
+is uniformly shaded under the fixed light (correct PBR, visually flat) — this
+is why normal-map support is the payoff for the 2D path.

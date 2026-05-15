@@ -5,7 +5,10 @@
 
 layout(set = 0, binding = 0) uniform FrameUBO {
     mat4  viewProj;
-    float time;
+    vec4  cameraPos;   // xyz = eye, w = time
+    vec4  lightDir;    // xyz = directional light dir (world)
+    vec4  lightColor;  // rgb = color, w = intensity
+    vec4  ambient;     // rgb = ambient color, w = intensity
 } ubo;
 
 layout(set = 1, binding = 0) uniform sampler2D texSampler;

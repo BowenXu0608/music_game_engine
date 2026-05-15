@@ -113,4 +113,9 @@ private:
     // Per-slot chart material overrides, keyed by slot id.
     std::unordered_map<uint16_t, Material> m_chartMaterials;
     glm::vec4 slotTint(uint16_t slot, glm::vec4 fallbackRGBA) const;
+    // PBR material for a note slot: the chart's PBR asset (with resolved
+    // textures) when present, else a default PBR material whose baseColor is
+    // `fallbackRGBA`. Used for the lit note-quad path; decorative line/ring
+    // draws keep slotTint().
+    Material slotMat(uint16_t slot, glm::vec4 fallbackRGBA) const;
 };

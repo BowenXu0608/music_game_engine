@@ -29,7 +29,7 @@ public:
     // frameIndex must match the current frame-in-flight index
     void flush(VkCommandBuffer cmd, int frameIndex);
 
-    void updateFrameUBO(const glm::mat4& viewProj, float time, int frameIndex);
+    void updateFrameUBO(const FrameUBO& ubo, int frameIndex);
 
 private:
     void expandLine(glm::vec2 a, glm::vec2 b, float width, glm::vec4 color);

@@ -160,3 +160,11 @@ User: *"Delete the arcs and arctaps between 36 and 40 seconds."*
   ]
 }
 ```
+
+## Material slots (set_material)
+
+3D mesh notes are fully PBR-lit. Slot names for `set_material`:
+`Click Note`, `Flick Note`, `ArcTap Note / Tile`, `ArcTap Note / Shadow`,
+`Arc Note / Blue`, `Arc Note / Red`, `Arc Note / Blue Shadow`,
+`Arc Note / Red Shadow`, `Playfield / Ground`, `Playfield / Judgment Bar`,
+`Playfield / Sky Line`, `Playfield / Side Posts`.
