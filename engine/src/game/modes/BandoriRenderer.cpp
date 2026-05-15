@@ -82,6 +82,9 @@ void BandoriRenderer::onInit(Renderer& renderer, const ChartData& chart,
         m_camEye    = {config->cameraEye[0], config->cameraEye[1], config->cameraEye[2]};
         m_camTarget = {config->cameraTarget[0], config->cameraTarget[1], config->cameraTarget[2]};
         m_camFov    = config->cameraFov;
+        m_camDistance = config->cameraDistance;
+        m_camFovDeg   = config->cameraFovDeg;
+        m_playfieldWidthPct = config->playfieldWidthPct;
         m_laneCount = config->trackCount;
     }
 
@@ -105,9 +108,14 @@ void BandoriRenderer::onResize(uint32_t w, uint32_t h) {
 
     float aspect = h > 0 ? static_cast<float>(w) / h : 1.f;
 
-    // Camera from config (user-adjustable in editor)
-    Camera persp = Camera::makePerspective(m_camFov, aspect, 0.1f, 300.f);
-    persp.lookAt(m_camEye, m_camTarget);
+    // Camera from config (user-adjustable in editor). m_camEye/m_camFov are
+    // the baseline; the author's relative knobs dolly + override FOV.
+    glm::vec3 camOffset = m_camEye - m_camTarget;
+    glm::vec3 camEye    = m_camTarget + camOffset * std::max(m_camDistance, 0.01f);
+    float     camFov    = m_camFovDeg > 0.f ? m_camFovDeg : m_camFov;
+
+    Camera persp = Camera::makePerspective(camFov, aspect, 0.1f, 300.f);
+    persp.lookAt(camEye, m_camTarget);
     m_perspVP  = persp.viewProjection();
     m_proj11y  = std::abs(persp.projection()[1][1]);
 
@@ -117,7 +125,8 @@ void BandoriRenderer::onResize(uint32_t w, uint32_t h) {
     glm::vec2 rightTest = w2s({ 1.f, 0.f, HIT_ZONE_Z}, m_perspVP, (float)w, (float)h);
     float pxPerWorldUnit = (rightTest.x - leftTest.x) * 0.5f; // px per 1 world unit
     if (pxPerWorldUnit > 0.f) {
-        float desiredPx = (float)w * 0.30f; // highway fills 30% of screen width (centered)
+        float widthPct  = std::clamp(m_playfieldWidthPct, 0.2f, 1.f);
+        float desiredPx = (float)w * widthPct; // highway screen-width fraction (centered)
         float totalWorldW = desiredPx / pxPerWorldUnit;
         m_laneSpacing = totalWorldW / m_laneCount;
         m_noteWorldW  = m_laneSpacing; // notes fill the full lane width

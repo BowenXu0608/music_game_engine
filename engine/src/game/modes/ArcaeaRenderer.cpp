@@ -42,7 +42,11 @@ void ArcaeaRenderer::onInit(Renderer& renderer, const ChartData& chart,
                             const GameModeConfig* config) {
     m_renderer = &renderer;
     if (config && config->trackCount > 0) m_laneCount = config->trackCount;
-    if (config)                            m_skyHeight = config->skyHeight;
+    if (config) {
+        m_skyHeight   = config->skyHeight;
+        m_camDistance = config->cameraDistance;
+        m_camFovDeg   = config->cameraFovDeg;
+    }
 
     // Import per-slot material overrides from the chart. resolveMaterial()
     // picks whichever form the entry uses (asset reference or legacy inline).
@@ -142,8 +146,19 @@ void ArcaeaRenderer::onResize(uint32_t w, uint32_t h) {
     m_width  = w;
     m_height = h;
     float aspect = static_cast<float>(w) / static_cast<float>(h);
-    m_camera = Camera::makePerspective(45.f, aspect, 0.1f, 200.f);
-    m_camera.lookAt({0.f, 3.f, 10.f}, {0.f, 0.f, 0.f});
+
+    // Baked baseline framing for 3D drop. The author's relative knobs scale
+    // this: distance dollies along the eye->target axis, FOV overrides when >0.
+    const glm::vec3 baseEye{0.f, 3.f, 10.f};
+    const glm::vec3 baseTarget{0.f, 0.f, 0.f};
+    const float     baseFov = 45.f;
+
+    glm::vec3 offset = baseEye - baseTarget;
+    glm::vec3 eye    = baseTarget + offset * std::max(m_camDistance, 0.01f);
+    float     fov    = m_camFovDeg > 0.f ? m_camFovDeg : baseFov;
+
+    m_camera = Camera::makePerspective(fov, aspect, 0.1f, 200.f);
+    m_camera.lookAt(eye, baseTarget);
 }
 
 void ArcaeaRenderer::onUpdate(float dt, double songTime) {

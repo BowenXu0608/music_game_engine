@@ -71,6 +71,10 @@ private:
     int   m_laneCount = 7;
     float m_skyHeight = 1.f;
 
+    // Author camera knobs (relative to the baked baseline framing).
+    float m_camDistance = 1.f;   // x baseline eye-distance
+    float m_camFovDeg   = 0.f;   // 0 = baseline FOV, else degrees
+
     // --- Single source of truth for the playfield geometry ------------------
     // The ground mesh, the judgment gate, the tap-lane mapping, and the arc
     // coord mapping ALL reference these. If you need to change the lane width

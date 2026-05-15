@@ -1963,3 +1963,31 @@ Desktop builds clean (only pre-existing CP936 warnings). `ChartRoundtripTest` PA
 1. **Reinterpreting fixed-size push constants beats growing them.** The 128 B block is the Vulkan floor and was already full; binding a distinct pipeline whose GLSL reads the same bytes differently gave PBR all its per-draw data with zero ABI change and no SSBO.
 2. **Default-value choices are regression policy.** Flipping `Material::cls` default to PBR would have silently whitened every un-overridden note across four renderers. Defaulting to `SpecialEffect` and opting in via `resolveMaterial` was the difference between a safe change and a broad visual regression.
 3. **A "check if X was updated" question is worth answering literally.** The Copilot wasn't just un-updated for PBR — it had *no* material capability and `ChartSnapshot` explicitly excluded materials. Verifying that before building avoided assuming a migration where a net-new feature was needed, and surfaced the unrelated `"circle"/"scanline"` skill-file bug.
+
+## 2026-05-15 (later 2) — Author-adjustable camera + playfield width for drop modes (branch `pbr-material-system`)
+
+### Problem
+
+The gameplay camera was effectively fixed. 2D drop (Bandori) already read `cameraEye/Target/Fov` from `GameModeConfig` but 3D drop (Arcaea) **hardcoded** `lookAt({0,3,10},{0,0,0})` @45° in `onResize`, and there was **no editor UI** to change any of it. User wanted the chart author to control camera *distance* and *perspective* for both drop modes. Lighting explicitly out of scope (single directional light has no meaningful "position" for camera-facing note quads). Then a second issue surfaced from screenshots: the 2D highway occupied only a narrow strip vs. reference rhythm games that fill the screen.
+
+### Decisions (locked with the user before coding)
+
+1. Camera scope: drop modes only (2D Bandori + 3D Arcaea); author-owned (per-chart, saved to `music_selection.json`), not a player setting.
+2. Two **relative knobs with inherit sentinels**, NOT raw 6-float eye/target: `cameraDistance` (×baseline eye-distance, default `1.0`) and `cameraFovDeg` (degrees; `0` = use mode baseline). Backward-safe: existing charts → sentinels → identical render; avoids the per-mode-default conflict (Arcaea baseline 45°@`{0,3,10}` vs Bandori 55°@config-eye) and the migration risk of Arcaea suddenly obeying the legacy `cameraFov:55` already serialized everywhere.
+3. Lighting: skipped entirely (explained: directional-only, no position; flat camera-facing 2D quads make direction ≈ intensity; real value would be ambient/intensity/color, deferred).
+4. Playfield size is a *separate* control from camera (see Lessons): added `playfieldWidthPct` (screen-width fraction, default **0.9**, was a hardcoded 0.30).
+
+### What shipped
+
+- `GameModeConfig` (`engine/src/ui/ProjectHub.h`): `+cameraDistance=1.f`, `+cameraFovDeg=0.f`, `+playfieldWidthPct=0.9f`. Legacy `cameraEye/Target/Fov` untouched.
+- Serialization (`engine/src/game/screens/MusicSelectionView.cpp`): load+save all three; missing keys default to sentinels (zero regression).
+- `ArcaeaRenderer` (3D): baked baseline consts `{0,3,10}`/`{0,0,0}`/45°; `onResize` dollies `eye = target + offset*camDistance`, `fov = camFovDeg>0?camFovDeg:45`. Reads config in `onInit` next to `m_skyHeight`.
+- `BandoriRenderer` (2D): its config eye/fov are now the *baseline*; same relative transform in `onResize`; replaced hardcoded `desiredPx = w*0.30f` with `w * clamp(playfieldWidthPct,0.2,1)`.
+- SongEditor (`engine/src/ui/SongEditor.cpp`): Camera Distance + Field of View sliders for all DropNotes; Playfield Width slider (30–100%, %-scaled display proxy) for 2D drop only. Block mirrors the Sky Height slider pattern (~line 1816).
+- SongEditor scene-preview math (~3490–3524): applies the same distance/FOV transform; replaced its **duplicate** hardcoded `size.x*0.30f` with the gated `playfieldWidthPct` so the in-editor highway matches gameplay.
+
+### Lessons
+
+1. **The "fix the camera" request was mostly NOT a camera fix.** The narrow 2D highway came from a hardcoded `desiredPx = w*0.30f` plus a per-frame auto-scale that recomputes lane spacing to *always hit that target regardless of the camera VP* — so the camera Distance/FOV knobs are **horizontally neutralized for Bandori** (dolly in → lanes shrink to stay at the target %). Diagnosing the actual draw path (vs. assuming the obvious knob) is what found this; the real lever for 2D apparent size is `playfieldWidthPct`, with camera FOV only affecting perspective steepness/vanishing point.
+2. **The SongEditor scene preview duplicates renderer layout math.** The `* 0.30f` highway-width constant existed in *two* independent places (`BandoriRenderer::onResize` AND the SongEditor preview block). A renderer-only fix looked correct but "didn't show in preview." Any drop-mode layout/camera change must be applied to **both** sites or the preview silently diverges from gameplay.
+3. **Sentinel-default new fields = free backward compatibility.** `cameraFovDeg=0`/`cameraDistance=1` "inherit baseline" meant existing charts (and the already-serialized legacy `cameraFov:55`) render byte-identical with no migration pass.

@@ -1813,6 +1813,35 @@ void SongEditor::renderNotePage(Engine* engine) {
             ImGui::Spacing();
         }
 
+        if (gm.type == GameModeType::DropNotes) {
+            ImGui::Text("Camera Distance");
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("How far the camera sits from the playfield.\n"
+                                  "1.0 = default; lower zooms in, higher pulls back.");
+            ImGui::SetNextItemWidth(-1);
+            ImGui::SliderFloat("##camDistance", &gm.cameraDistance, 0.5f, 2.0f, "%.2fx");
+
+            ImGui::Text("Field of View");
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Perspective strength, in degrees.\n"
+                                  "0 = use this mode's default FOV.");
+            ImGui::SetNextItemWidth(-1);
+            ImGui::SliderFloat("##camFov", &gm.cameraFovDeg, 0.f, 110.f, "%.0f deg");
+
+            if (gm.dimension == DropDimension::TwoD) {
+                ImGui::Text("Playfield Width");
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("Fraction of the screen width the lanes\n"
+                                      "occupy at the hit line. Higher = bigger.");
+                ImGui::SetNextItemWidth(-1);
+                float pctDisplay = gm.playfieldWidthPct * 100.f;
+                if (ImGui::SliderFloat("##playfieldW", &pctDisplay,
+                                       30.f, 100.f, "%.0f%%"))
+                    gm.playfieldWidthPct = pctDisplay / 100.f;
+            }
+            ImGui::Spacing();
+        }
+
         if (gm.type == GameModeType::Circle) {
             ImGui::Text("Default Note Width");
             if (ImGui::IsItemHovered())
@@ -3459,9 +3488,12 @@ void SongEditor::renderSceneView(ImDrawList* dl, ImVec2 origin, ImVec2 size,
         // Build a real perspective VP matrix from the camera config so the
         // preview updates when the user adjusts Eye / Target / FOV.
         float aspect = size.x / std::max(size.y, 1.f);
-        glm::vec3 camEye   {gm.cameraEye[0],    gm.cameraEye[1],    gm.cameraEye[2]};
         glm::vec3 camTarget{gm.cameraTarget[0],  gm.cameraTarget[1], gm.cameraTarget[2]};
-        float     camFov = glm::radians(std::clamp(gm.cameraFov, 20.f, 120.f));
+        glm::vec3 camBaseEye{gm.cameraEye[0],    gm.cameraEye[1],    gm.cameraEye[2]};
+        glm::vec3 camEye = camTarget +
+                           (camBaseEye - camTarget) * std::max(gm.cameraDistance, 0.01f);
+        float fovDeg = gm.cameraFovDeg > 0.f ? gm.cameraFovDeg : gm.cameraFov;
+        float     camFov = glm::radians(std::clamp(fovDeg, 20.f, 120.f));
         glm::mat4 proj = glm::perspective(camFov, aspect, 0.1f, 300.f);
         // Flip Y for screen coords (top=0)
         proj[1][1] *= -1.f;
@@ -3486,7 +3518,10 @@ void SongEditor::renderSceneView(ImDrawList* dl, ImVec2 origin, ImVec2 size,
             ImVec2 rt = w2s({ 1.f, 0.f, HIT_ZONE_Z});
             float pxPerUnit = (rt.x - lt.x) * 0.5f;
             if (pxPerUnit > 0.f) {
-                float desiredPx = size.x * 0.30f;
+                float widthPct = (gm.dimension == DropDimension::TwoD)
+                                     ? std::clamp(gm.playfieldWidthPct, 0.2f, 1.f)
+                                     : 0.30f;
+                float desiredPx = size.x * widthPct;
                 laneSpacing = desiredPx / pxPerUnit / tc;
             }
         }

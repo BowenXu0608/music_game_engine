@@ -196,6 +196,9 @@ void MusicSelectionView::load(const std::string& projectPath) {
                         if (gm.contains("cameraTarget") && gm["cameraTarget"].is_array() && gm["cameraTarget"].size() >= 3)
                             for (int i = 0; i < 3; ++i) song.gameMode.cameraTarget[i] = gm["cameraTarget"][i].get<float>();
                         song.gameMode.cameraFov = gm.value("cameraFov", 55.f);
+                        song.gameMode.cameraDistance = gm.value("cameraDistance", 1.f);
+                        song.gameMode.cameraFovDeg   = gm.value("cameraFovDeg", 0.f);
+                        song.gameMode.playfieldWidthPct = gm.value("playfieldWidthPct", 0.9f);
 
                         song.gameMode.backgroundImage = gm.value("backgroundImage", "");
                         song.gameMode.skyHeight = gm.value("skyHeight", 1.f);
@@ -297,6 +300,9 @@ void MusicSelectionView::save() {
             gmJ["cameraEye"]    = {song.gameMode.cameraEye[0], song.gameMode.cameraEye[1], song.gameMode.cameraEye[2]};
             gmJ["cameraTarget"] = {song.gameMode.cameraTarget[0], song.gameMode.cameraTarget[1], song.gameMode.cameraTarget[2]};
             gmJ["cameraFov"]    = song.gameMode.cameraFov;
+            gmJ["cameraDistance"] = song.gameMode.cameraDistance;
+            gmJ["cameraFovDeg"]   = song.gameMode.cameraFovDeg;
+            gmJ["playfieldWidthPct"] = song.gameMode.playfieldWidthPct;
 
             gmJ["backgroundImage"] = toUtf8(song.gameMode.backgroundImage);
             gmJ["skyHeight"] = song.gameMode.skyHeight;

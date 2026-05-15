@@ -62,6 +62,17 @@ struct GameModeConfig {
     float cameraTarget[3] = {0.f, 0.f, -20.f};
     float cameraFov       = 55.f;
 
+    // Author-adjustable relative camera knobs (drop modes). Each renderer
+    // keeps its own baked baseline framing; these scale it.
+    //   cameraDistance: multiplier on the baseline eye-distance (1 = default)
+    //   cameraFovDeg:   absolute FOV in degrees; 0 = use the mode's baseline
+    float cameraDistance = 1.f;
+    float cameraFovDeg   = 0.f;
+
+    // 2D drop: fraction of screen width the highway spans at the hit line
+    // (centered). Higher = lanes occupy more of the screen.
+    float playfieldWidthPct = 0.9f;
+
     // 3D DropNotes: sky judgment line height (world Y).
     // Arc height [0..1] maps from ground (GROUND_Y) to this value.
     float skyHeight = 1.f;
