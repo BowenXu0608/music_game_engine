@@ -10,6 +10,11 @@ static constexpr float NOTE_RADIUS    = 30.f;
 static constexpr float NOTE_SIZE      = NOTE_RADIUS * 2.f;
 static constexpr float SCAN_THICKNESS = 4.f;
 
+// Defined later in this file; declared here so onRender() can interpolate
+// per-sample-point node positions along a slide path.
+static std::pair<float,float> linearPathEval(
+    const std::vector<std::pair<float,float>>& pts, float u);
+
 namespace {
 // Slot ids mirror MaterialSlots.cpp::kCytusSlots.
 enum CytusSlot : uint16_t {
@@ -306,7 +311,11 @@ void CytusRenderer::onRender(Renderer& renderer) {
 
     for (auto& note : m_notes) {
         // ── Hit effect: expanding ring ─────────────────────────────────
-        if (note.isHit) {
+        // A slide is "hit" the moment its head/first sample is judged, but
+        // its remaining sample points keep scoring until slideEndTime. Keep
+        // the whole slide (path + nodes) rendered until then; only after the
+        // last sample point does it play the ring + cull like other notes.
+        if (note.isHit && !(note.isSlide && m_songTime < note.slideEndTime)) {
             static constexpr float HIT_EFFECT_DUR = 0.35f;
             if (note.hitTimer >= HIT_EFFECT_DUR) continue;
             float t2       = note.hitTimer / HIT_EFFECT_DUR;
@@ -405,27 +414,39 @@ void CytusRenderer::onRender(Renderer& renderer) {
         }
 
         if (note.isSlide) {
-            // Straight-line segments between control points (Cytus-style).
-            if (note.path.size() >= 2) {
-                glm::vec2 prev(scanToScreenX(note.path[0].first),
-                               scanToScreenY(note.path[0].second));
-                for (size_t i = 1; i < note.path.size(); ++i) {
-                    glm::vec2 cur(scanToScreenX(note.path[i].first),
-                                  scanToScreenY(note.path[i].second));
-                    renderer.lines().drawLine(prev, cur, NOTE_RADIUS * 0.4f,
-                                              withAlpha(slidePathTint, alpha));
-                    prev = cur;
-                }
+            // Each sample point is its own node. As the scan line sweeps
+            // past a sample's time, that node (and the path leading to it)
+            // disappears — whether it was tapped or missed. Only the
+            // not-yet-swept remainder of the slide stays on screen.
+            const float total = std::max(
+                0.0001f, (float)(note.slideEndTime - note.time));
+
+            // Visible polyline points: head (until its time passes) followed
+            // by every sample-point node the scan line hasn't reached yet.
+            std::vector<glm::vec2> live;
+            if (m_songTime < note.time) live.push_back(head);
+            for (float spOff : note.samplePoints) {
+                double absTime = note.time + (double)spOff;
+                if (m_songTime >= absTime) continue;   // scan line passed it
+                float u = std::clamp(spOff / total, 0.f, 1.f);
+                auto [px, py] = linearPathEval(note.path, u);
+                live.push_back({scanToScreenX(px), scanToScreenY(py)});
             }
-            // Head marker
-            drawQuadAt(head, {sz, sz}, withAlpha(slideHeadTint, alpha));
-            // Node markers at each control point after the head
-            for (size_t i = 1; i < note.path.size(); ++i) {
-                glm::vec2 pp(scanToScreenX(note.path[i].first),
-                             scanToScreenY(note.path[i].second));
-                drawQuadAt(pp, {NOTE_RADIUS * 0.6f, NOTE_RADIUS * 0.6f},
+
+            for (size_t i = 1; i < live.size(); ++i)
+                renderer.lines().drawLine(live[i - 1], live[i],
+                                          NOTE_RADIUS * 0.4f,
+                                          withAlpha(slidePathTint, alpha));
+
+            // Head marker (only while it hasn't been swept).
+            if (m_songTime < note.time)
+                drawQuadAt(head, {sz, sz}, withAlpha(slideHeadTint, alpha));
+
+            // Sample-point node markers, surviving ones only.
+            size_t startIdx = (m_songTime < note.time && !live.empty()) ? 1 : 0;
+            for (size_t i = startIdx; i < live.size(); ++i)
+                drawQuadAt(live[i], {NOTE_RADIUS * 0.6f, NOTE_RADIUS * 0.6f},
                            withAlpha(slideNodeTint, alpha));
-            }
             continue;
         }
 
@@ -532,7 +553,8 @@ void CytusRenderer::showJudgment(int lane, Judgment judgment) {
             case Judgment::Bad:     pColor = {1.f,  0.6f, 0.2f, 1.f}; pCount = 10; break;
             default: return;
         }
-        m_renderer->particles().emitBurst({best->sx, best->sy}, pColor, pCount,
+        glm::vec2 hitPos(scanToScreenX(best->sx), scanToScreenY(best->sy));
+        m_renderer->particles().emitBurst(hitPos, pColor, pCount,
                                           200.f, 8.f, 0.5f);
     }
 }

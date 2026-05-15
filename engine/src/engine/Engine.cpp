@@ -458,23 +458,35 @@ void Engine::update(float dt) {
         if (auto* cyt = dynamic_cast<CytusRenderer*>(m_activeMode.get())) {
             auto slideTicks = cyt->consumeSlideTicks(songT);
             for (auto& st : slideTicks) {
-                // Find which touch is tracking this slide's hold
-                glm::vec2 expected{st.expectedX, st.expectedY};
-                bool hit = false;
-                for (auto& [touchId, noteId] : m_activeTouches) {
-                    if (noteId != st.noteId) continue;
-                    // Check last known slide position from HitDetector
-                    auto holdIt = m_hitDetector.getActiveHold(st.noteId);
-                    if (holdIt && !holdIt->positionSamples.empty()) {
-                        glm::vec2 touchPos = holdIt->positionSamples.back();
-                        float dist = glm::length(touchPos - expected);
-                        hit = dist < ScreenMetrics::dp(64.f); // generous radius
+                // Autoplay awards Perfect for every sample tick, mirroring the
+                // hold sample-tick path — otherwise a slide's body is never
+                // scored under autoplay (no real touch tracks it) and only the
+                // entry counts.
+                bool hit = m_autoPlay;
+                if (!m_autoPlay) {
+                    // Find which touch is tracking this slide's hold
+                    glm::vec2 expected{st.expectedX, st.expectedY};
+                    for (auto& [touchId, noteId] : m_activeTouches) {
+                        if (noteId != st.noteId) continue;
+                        // Check last known slide position from HitDetector
+                        auto holdIt = m_hitDetector.getActiveHold(st.noteId);
+                        if (holdIt && !holdIt->positionSamples.empty()) {
+                            glm::vec2 touchPos = holdIt->positionSamples.back();
+                            float dist = glm::length(touchPos - expected);
+                            hit = dist < ScreenMetrics::dp(64.f); // generous radius
+                        }
+                        break;
                     }
-                    break;
                 }
                 Judgment j = hit ? Judgment::Perfect : Judgment::Miss;
                 m_judgment.recordJudgment(j);
                 m_score.onJudgment(j);
+                // Per-sample-point particle feedback at the swept position.
+                if (j != Judgment::Miss) {
+                    m_renderer.particles().emitBurst(
+                        {st.expectedX, st.expectedY},
+                        {0.2f, 1.f, 0.3f, 1.f}, 16, 200.f, 7.f, 0.45f);
+                }
             }
         }
 

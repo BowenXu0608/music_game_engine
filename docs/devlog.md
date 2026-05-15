@@ -1886,3 +1886,34 @@ Fix in three files:
 1. **The visible symptom was downstream of the actual bug.** "Holds invisible" sounded like a renderer issue (which it partly was — 3D drop), but the dominant cause for the 2D-drop case the user was actually testing was an engine-loop omission: `setActiveHoldIds` was never called on Android. Look at the cull conditions in the renderer first when "things disappear" — they often imply an upstream contract the host engine forgot to satisfy.
 2. **A dropped parameter is not zero-cost.** `bool /*autoPlay*/` in the adapter is the minimum-effort signature to satisfy the interface, and it propagates a silent-failure mode that's invisible until someone toggles the UI. When stubbing an interface method, pick: implement it, throw, or log — never silently drop.
 3. **Test the chart you think is loaded.** I initially fixed 3D-drop hold rendering assuming the user's screenshot was 3D drop. It was — but the test project's `music_selection.json` only references `Aa_drop2d_*` charts, so the user's reported symptom was 2D-drop holds the whole time. Cross-check the chart selection path before optimizing for the renderer in the screenshot.
+
+## 2026-05-15 — Scan-line (Cytus) slide fixes: per-sample counting, render, particles (`main`)
+
+Scan-line slide processing was wrong end-to-end. The intended model (user-confirmed, recorded in memory `project_scanline_slide_model.md`): a Cytus slide is a *set of sample points*, **every sample point is individually counted** (one judgment + combo each), and **each sample-point node disappears the instant the scan line passes its time — hit or miss**. It is NOT one entry hit.
+
+Four coupled bugs, fixed in order as the user tested:
+
+1. **Particle position (all Cytus hits).** `CytusRenderer::showJudgment` emitted `particles().emitBurst` at raw scan-space `{best->sx, best->sy}` (normalized 0–1) while `emitBurst` expects screen pixels → every burst spawned in the top-left 1×1 px, invisible. Bandori works because it converts via `w2s` first. Fixed to `scanToScreenX/Y(best->sx/sy)`.
+
+2. **Autoplay never scored slide sample ticks.** Slide ticks come from `CytusRenderer::consumeSlideTicks` (one per `samplePoints[]`, by time), scored in the Cytus block of `Engine::update` — a *separate* path from hold sample ticks (`HitDetector::autoPlayTick` registers a slide as `ActiveHold` but the `isSlide` branch never fills `sampleOffsets`, so `consumeSampleTicks` ignores it). That loop was touch-only: it checked `m_activeTouches` + `getActiveHold().positionSamples`, which under autoplay is empty → only the head/entry scored, body silently uncounted ("you only see the entry"). Added `bool hit = m_autoPlay;` short-circuit (autoplay → Perfect every tick, mirroring `autoPlayTick`'s currentLane-sync convention).
+
+3. **First hit culled the whole slide.** The head/first sample sets `ScanNote::isHit`; `onRender`'s hit-effect branch plays a 0.35 s ring then `continue`s — culling the entire slide (path + all nodes) while ~1 s of sample points remained. Branch now exempts a slide while `m_songTime < note.slideEndTime`; only after the last sample does it ring+cull.
+
+4. **Render drew control points, not sample points; nodes didn't retract.** Node markers were drawn at `note.path` control points as one static blob held until slide end. Rewrote the slide render block: each **sample point** is its own node at `linearPathEval(note.path, spOff/total)`; the node *and* the path segment leading to it disappear once `m_songTime >= note.time + spOff` (scan line passed it), hit or miss; the head vanishes once `m_songTime >= note.time`. `linearPathEval` (defined below `onRender`) forward-declared at file top. Render-disappear and `consumeSlideTicks` use the identical `absTime` threshold, so a node pops a green particle burst (added in the `Engine.cpp` tick loop at `st.expectedX/Y`) and vanishes exactly as it's scored.
+
+### Verification
+
+- Release build clean each step (`cmake --build build --config Release --target MusicGameEngineTest`).
+- Autoplay on `Ac_scan_hard` (4 notes, 1 slide w/ 7 sample points) reaches **combo 11** = 4 + 7 every replay (was ~4, entry-only, before fix #2).
+- User confirmed scan-line slide behavior correct after fix #4.
+
+### Files touched
+
+- `engine/src/game/modes/CytusRenderer.cpp` — particle screen-space conversion in `showJudgment`; hit-effect branch slide exemption; full slide render-block rewrite (per-sample nodes + sweep-disappear); `linearPathEval` forward decl.
+- `engine/src/engine/Engine.cpp` — `m_autoPlay` short-circuit + per-sample green particle burst in the Cytus slide-tick loop.
+
+### Lessons
+
+1. **"Judged at entry" was the bug, not the design.** I initially framed entry-only scoring as a possible intended model and offered it as an option. The user corrected it firmly: every sample point counts. When a rhythm-game element looks like it "fires once," confirm the *intended* granularity from the genre/user before treating the observed behavior as spec.
+2. **Counting can be right while the feature looks broken.** Autoplay proved combo 11 (all samples scored) two fixes before the user was satisfied — the remaining complaints were *visual* (whole-slide cull, control-point blob, no per-sample particle). Don't declare a scoring bug closed on a combo number; the player judges by what disappears and what flashes.
+3. **Render and scoring must share the same threshold.** Tying node-disappear to the exact `absTime` that `consumeSlideTicks` consumes a tick is what makes "node vanishes as it's scored" feel correct. Two independent timelines for the same event read as a glitch.
