@@ -52,14 +52,14 @@ void ImGuiLayer::init(GLFWwindow* window, VulkanContext& ctx, VkRenderPass rende
     const char* interSB = "../../third_party/imgui/misc/fonts/Inter-SemiBold.ttf";
     const char* jbmono  = "../../third_party/imgui/misc/fonts/JetBrainsMono-Regular.ttf";
 
-    ui::fonts.body    = io.Fonts->AddFontFromFileTTF(interR,  13.f);
-    ui::fonts.bodyMed = io.Fonts->AddFontFromFileTTF(interM,  13.f);
-    ui::fonts.label   = io.Fonts->AddFontFromFileTTF(interSB, 11.f);
-    ui::fonts.heading = io.Fonts->AddFontFromFileTTF(interSB, 16.f);
-    ui::fonts.title   = io.Fonts->AddFontFromFileTTF(interSB, 18.f);
-    ui::fonts.mono    = io.Fonts->AddFontFromFileTTF(jbmono,  13.f);
-    ui::fonts.monoSm  = io.Fonts->AddFontFromFileTTF(jbmono,  11.f);
-    ui::fonts.monoLg  = io.Fonts->AddFontFromFileTTF(jbmono,  18.f);
+    ui::fonts.body    = io.Fonts->AddFontFromFileTTF(interR,  16.f);
+    ui::fonts.bodyMed = io.Fonts->AddFontFromFileTTF(interM,  16.f);
+    ui::fonts.label   = io.Fonts->AddFontFromFileTTF(interSB, 14.f);
+    ui::fonts.heading = io.Fonts->AddFontFromFileTTF(interSB, 20.f);
+    ui::fonts.title   = io.Fonts->AddFontFromFileTTF(interSB, 24.f);
+    ui::fonts.mono    = io.Fonts->AddFontFromFileTTF(jbmono,  16.f);
+    ui::fonts.monoSm  = io.Fonts->AddFontFromFileTTF(jbmono,  14.f);
+    ui::fonts.monoLg  = io.Fonts->AddFontFromFileTTF(jbmono,  24.f);
 
     if (ui::fonts.body) io.FontDefault = ui::fonts.body;
     s_monoFont = ui::fonts.mono;
@@ -67,7 +67,7 @@ void ImGuiLayer::init(GLFWwindow* window, VulkanContext& ctx, VkRenderPass rende
     // Fallback: Cousine if JetBrains Mono failed to load.
     if (!s_monoFont) {
         const char* cousinePath = "../../third_party/imgui/misc/fonts/Cousine-Regular.ttf";
-        s_monoFont = io.Fonts->AddFontFromFileTTF(cousinePath, 13.f);
+        s_monoFont = io.Fonts->AddFontFromFileTTF(cousinePath, 16.f);
         ui::fonts.mono = s_monoFont;
     }
 

@@ -18,14 +18,14 @@ inline void PopMono()  { if (s_monoFont) ImGui::PopFont(); }
 // Multi-weight / multi-size font registry. Populated by ImGuiLayer::init.
 // All pointers fall back to ImGui's default font if the .ttf is missing.
 struct Fonts {
-    ImFont* body      = nullptr;  // Inter 13/400 (default body)
-    ImFont* bodyMed   = nullptr;  // Inter 13/500 (project names, nav)
-    ImFont* label     = nullptr;  // Inter 11/600 (section headers, pills)
-    ImFont* heading   = nullptr;  // Inter 16/600 (panel titles)
-    ImFont* title     = nullptr;  // Inter 18/600 (Settings title)
-    ImFont* mono      = nullptr;  // JetBrains Mono 13
-    ImFont* monoSm    = nullptr;  // JetBrains Mono 11 (field values)
-    ImFont* monoLg    = nullptr;  // JetBrains Mono 18 (timecode)
+    ImFont* body      = nullptr;  // Inter 16/400 (default body)
+    ImFont* bodyMed   = nullptr;  // Inter 16/500 (project names, nav)
+    ImFont* label     = nullptr;  // Inter 14/600 (section headers, pills)
+    ImFont* heading   = nullptr;  // Inter 20/600 (panel titles)
+    ImFont* title     = nullptr;  // Inter 24/600 (Settings title)
+    ImFont* mono      = nullptr;  // JetBrains Mono 16
+    ImFont* monoSm    = nullptr;  // JetBrains Mono 14 (field values)
+    ImFont* monoLg    = nullptr;  // JetBrains Mono 24 (timecode)
 };
 extern Fonts fonts;
 

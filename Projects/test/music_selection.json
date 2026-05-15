@@ -67,6 +67,14 @@
             "goodMs": 100.0,
             "goodScore": 600,
             "noteAssets": {
+              "Arc Note": {
+                "sfxPath": "",
+                "texturePath": ""
+              },
+              "ArcTap Note": {
+                "sfxPath": "",
+                "texturePath": ""
+              },
               "Click Note": {
                 "sfxPath": "",
                 "texturePath": ""
