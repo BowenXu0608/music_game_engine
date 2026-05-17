@@ -81,6 +81,20 @@ private:
 
     std::unique_ptr<GameModeRenderer> createRenderer(const GameModeConfig& config);
 
+    // ── Gameplay gesture dispatch (ported from desktop Engine) ──────────────
+    // The desktop Engine routes each gesture to a mode-specific handler; the
+    // old Android callback only ever called checkHitPosition() (Arcaea-only),
+    // so lane-based taps were dropped and HoldBegin/HoldEnd were never wired —
+    // which also left hold bodies invisible (m_activeHoldIds stayed empty).
+    void dispatchHitResult(const HitResult& hit, int lane = -1);
+    void handleGestureLaneBased(const GestureEvent& evt, double songTime);
+    void handleGestureArcaea(const GestureEvent& evt, double songTime);
+    void handleGesturePhigros(const GestureEvent& evt, double songTime);
+    void handleGestureCircle(LanotaRenderer& lan,
+                             const GestureEvent& evt, double songTime);
+    void handleGestureScanLine(CytusRenderer& cyt,
+                               const GestureEvent& evt, double songTime);
+
     android_app*   m_app = nullptr;
     bool           m_running = false;
     bool           m_vulkanReady = false;
@@ -126,6 +140,11 @@ private:
     ImTextureID loadAssetTexture(const std::string& assetPath);
     void        releaseTextures();
     void        applyTheme();
+    // (Re)registers the offscreen scene image with ImGui. PostProcess::resize
+    // (via Renderer::onResize) destroys + recreates the scene image view, so
+    // the cached descriptor goes stale and gameplay blits a dead texture
+    // (black scene). Call after every Renderer::onResize and at init.
+    void        refreshSceneTexture();
     GameClock      m_clock;
     AudioEngine    m_audio;
     InputManager   m_input;

@@ -2179,3 +2179,54 @@ back **Bezier** (explicitly tests the migration) — `ChartRoundtripTest` PASS.
 4. **Reproduce, then read the draw path.** The "wedge" was diagnosed by
    dumping the actual chart JSON (duplicate tOffsets) and tracing both
    evaluators — not by guessing at the camera/material work on the branch.
+
+## 2026-05-17 (later) — Android gameplay input + desktop render-regression cluster + Android parity (branch `pbr-material-system`)
+
+Three separate problem reports in one session. Each fix was compiled and the relevant binary relaunched. Vulkan validation layers were the decisive diagnostic for the desktop cluster.
+
+### Part 1 — Android: hold bodies invisible + taps not counted
+
+**Report:** APK on a Samsung phone — hold notes show only a head (no body), and screen taps never register a hit.
+
+**Root cause (one stub, two symptoms).** `AndroidEngine::init`'s gesture callback (`AndroidEngine.cpp:35-50`) was a stripped-down stub: it handled only `GestureType::Tap` and always routed through `m_hitDetector.checkHitPosition()` — the Arcaea-only position path. The desktop `Engine` dispatches per game mode (`Engine.cpp:225-238`) into `handleGesture{LaneBased,Arcaea,Phigros,Circle,ScanLine}`.
+
+- Taps not counted: 2D/3D-drop (Bandori-style) charts use lane-keyed `TapData`/`HoldData`; `checkHitPosition()` only matches Arcaea position notes, so every tap returned `std::nullopt` and was silently dropped. The desktop reaches these via `m_hitDetector.checkHit(lane, songTime)` in `handleGestureLaneBased`.
+- Hold body invisible: the stub had no `HoldBegin`/`HoldEnd` case, so `m_hitDetector.beginHold()` never ran on Android → `activeHoldIds()` stayed empty → the already-correct per-tick `m_activeMode->setActiveHoldIds(m_hitDetector.activeHoldIds())` (`AndroidEngine.cpp:416`) propagated an empty set → the drop renderer's stale-cull (`note.time + 0.15`) dropped the hold body ~0.15 s after the head. The head draws on a separate path so it kept showing.
+
+**Fix.** Ported the desktop per-mode dispatch verbatim into `AndroidEngine`: the callback now runs the same `dynamic_cast` chain, and six methods were added (`AndroidEngine.h` decls + `.cpp` impls after `createRenderer`): `dispatchHitResult`, `handleGestureLaneBased/Arcaea/Phigros/Circle/ScanLine` — byte-for-byte equal to `Engine.cpp:1092-1383` minus the desktop `std::cout` score log. Added `#include "input/ScreenMetrics.h"`. `m_activeTouches` was already `unordered_map<int32_t,uint32_t>` (matches desktop). APK rebuilt clean (`:app:assembleDebug`, arm64-v8a). On-device verification is the user's step.
+
+### Part 2 — Desktop: particles gone, scan line unplayable, black on re-entry
+
+**Reports (running `MusicGameEngineTest.exe`):** (1) hit particles disappear; (2) Scan Line mode "cannot be played" — notes never appear; (3) leaving a song to the menu and re-entering shows only a black scene.
+
+Diagnosed with three parallel Explore agents, then every claim verified against the code directly. A Debug run with Vulkan validation captured to `build/Debug/vk_diag.log` was 0 bytes — no GPU errors — which ruled out all pipeline/descriptor-fault theories and was decisive.
+
+**#3 black re-entry — root cause confirmed.** The offscreen scene image is registered into ImGui exactly once at `Engine::init` (`Engine.cpp:242-246` → `m_sceneViewer.setSceneTexture`). `Renderer::onResize` (`Renderer.cpp:212-220`) calls `m_postProcess.resize()`, which destroys and recreates the scene `VkImage`/`VkImageView`. Nothing re-registered the ImGui descriptor, so after any swapchain recreate (the `beginFrame()`-fail path `Engine.cpp:556`, the mainLoop framebuffer-resize path `Engine.cpp:347`, or focus/DPI/letterbox events) ImGui blits a dead view → black scene (chrome still draws). Restart-from-pause "worked" only because it crossed no resize. Fix: new `ImGuiLayer::removeTexture()` (wraps `ImGui_ImplVulkan_RemoveTexture`) + `Engine::refreshSceneTexture()` (remove old set, re-`addTexture` the current `sceneImageView`, re-point `m_sceneViewer`). Called at init and after every `onResize` site.
+
+**#2 Scan Line — root cause confirmed.** `CytusRenderer` note quads were migrated (PBR commit) from the legacy flat-tint path to the new PBR `drawQuad(Material)` path (`slotMat()` → `MaterialClass::Pbr`, `drawNoteQuad`). That path renders nothing under Cytus's 2D ortho screen camera; the scan line itself still showed because it draws via the unchanged legacy `lines()` path — which is exactly why it looked like "the mode runs but has no notes." Fix: `CytusRenderer::onRender`'s `drawNoteQuad` lambda now uses the proven legacy unlit `drawQuad` overload (the same one the visible decorative quads use) with `material.pbr.baseColor` as the flat tint. `slotMat()` already puts the chart asset / default colour in `pbr.baseColor`, so this is visually identical to the pre-PBR Cytus. The PBR 2D-quad path itself is left unfixed (WIP); only the Cytus note draw was rerouted.
+
+**#1 particles — no separate defect; subsumed by #3.** Exhaustive analysis (the full `Renderer.cpp` diff, particle pipeline, shaders, descriptors, camera) plus the clean validation log show the particle path is correct and semantically unchanged across the branch (only `updateFrameUBO`'s signature changed; `viewProj` still = `m_camera.viewProjection()`). The entire scene — background, notes, lines, particles — composites through that single `m_sceneViewer` descriptor, so a stale descriptor blacks out / degrades the whole scene, particles included. "Particles disappear" is the partial-severity face of the #3 black-scene bug; the #3 fix addresses it. If ever still missing post-fix it needs a live RenderDoc capture (provably not a validation-level error), not log analysis.
+
+Disproven en route (kept so they aren't re-investigated): PBR lighting math degenerating to black (gives ~0.8·albedo, not black); missing base-colour texture (`Renderer::resolvePbrTextures` + `QuadBatch::resolvePbrTexSet` both fall back to a white 1x1); default `tint` zeroing fragColor (`Material::tint` defaults to white); stale SPIR-V (`.spv` newer than sources, glslc present); scene render-pass / depth-attachment change (PostProcess untouched by the commits); per-frame PBR descriptor leak (`m_pbrTexSetCache` caches by (baseView,normalView)).
+
+### Part 3 — Android parity for Part 2
+
+`AndroidEngine::createRenderer` was divergent and buggy vs desktop `Engine::createRenderer`: `ScanLine → PhigrosRenderer` (a stub — Scan Line ran the wrong mode entirely on Android) and `Circle 2D → CytusRenderer`. Aligned to desktop: `ScanLine → CytusRenderer` (also pulls in the shared Cytus note-draw fix since `CytusRenderer.cpp` is shared) and `Circle → LanotaRenderer` always (the dimension toggle is not exposed for Circle). Android already re-registered the scene texture in `onWindowResize` but not in the `render()` beginFrame-fail path (same black-scene bug). Factored `AndroidEngine::refreshSceneTexture()` (RemoveTexture+AddTexture) and used it at all three sites: `onWindowInit`, `onWindowResize`, and the `render()` fail path. APK rebuilds clean (`:app:assembleDebug`, arm64-v8a). On-device verification pending (no device was connected).
+
+### Files
+
+- `engine/src/android/AndroidEngine.{h,cpp}` — per-mode gesture dispatch (6 methods + callback rewrite + ScreenMetrics include); `createRenderer` ScanLine→Cytus / Circle→Lanota; `refreshSceneTexture()` + 3 call sites.
+- `engine/src/engine/Engine.{h,cpp}` — `refreshSceneTexture()` + call at init and both `onResize` sites.
+- `engine/src/ui/ImGuiLayer.{h,cpp}` — `removeTexture()`.
+- `engine/src/game/modes/CytusRenderer.cpp` — `drawNoteQuad` → legacy flat path.
+
+Desktop user-confirmed correct for scan line + black-screen; particle visual check and all Android on-device checks still pending.
+
+### Lessons
+
+1. One stub, several symptoms. Android "holds invisible" + "taps dead" were a single missing per-mode gesture dispatch; desktop "particles gone" + "black re-entry" were one stale descriptor. Find the shared upstream cause before fixing symptoms independently.
+2. A clean validation log is a strong negative result. 0 bytes from the Vulkan validation layer eliminated every pipeline/descriptor-fault theory at once and forced the correct conclusion that #1 was a compositing/lifetime issue, not a draw error. Capture it early.
+3. A "runs but nothing visible" mode names its own cause. Scan Line's line drew (legacy `lines()`) while notes did not (new PBR `drawQuad`) — the split between what rendered and what did not pointed straight at the changed path.
+4. Register-once GPU descriptors must re-register on target recreate. Any `ImGui_ImplVulkan_AddTexture` wrapping a render target needs a refresh hook wired to every swapchain/onResize path, not just the obvious one. Android had it in `onWindowResize` but missed the `beginFrame`-fail path — exactly the desktop bug.
+5. Record disproven theories. This branch's PBR/camera WIP invites the same wrong guesses; the disproven list above is part of the fix.
+6. Editor and Android `createRenderer` drift silently. ScanLine mapped to different renderers on the two targets. Mode→renderer tables that exist twice should be diffed whenever either changes.

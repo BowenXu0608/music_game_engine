@@ -3,6 +3,7 @@
 // ============================================================================
 #include "AndroidEngine.h"
 #include "AndroidFileIO.h"
+#include "input/ScreenMetrics.h"
 #include "ui/SettingsPageUI.h"
 #include <android/log.h>
 #include <android/input.h>
@@ -34,19 +35,22 @@ void AndroidEngine::init(android_app* app, const std::string& shaderDir) {
     m_input.init();
     m_input.setGestureCallback([this](const GestureEvent& evt) {
         if (m_screen != GameScreen::Gameplay || !m_activeMode) return;
-        double songTime = m_clock.songTime();
-        glm::vec2 screenSize = {(float)m_renderer.width(), (float)m_renderer.height()};
+        double t = m_clock.songTime();
 
-        if (evt.type == GestureType::Tap) {
-            auto hit = m_hitDetector.checkHitPosition(evt.pos, screenSize, songTime);
-            if (hit) {
-                auto judgment = m_judgment.judge(hit->timingDelta);
-                m_judgment.recordJudgment(judgment);
-                m_score.onJudgment(judgment);
-                if (m_activeMode && hit->noteId >= 0)
-                    m_activeMode->showJudgment(0, judgment);
-            }
-        }
+        // Mirror the desktop Engine's per-mode dispatch. checkHitPosition()
+        // (the old single path) only matches Arcaea-style position notes, so
+        // lane-based modes (Bandori 2D/3D drop, etc.) never registered taps
+        // and never began holds.
+        if (dynamic_cast<ArcaeaRenderer*>(m_activeMode.get()))
+            handleGestureArcaea(evt, t);
+        else if (dynamic_cast<PhigrosRenderer*>(m_activeMode.get()))
+            handleGesturePhigros(evt, t);
+        else if (auto* lan = dynamic_cast<LanotaRenderer*>(m_activeMode.get()))
+            handleGestureCircle(*lan, evt, t);
+        else if (auto* cyt = dynamic_cast<CytusRenderer*>(m_activeMode.get()))
+            handleGestureScanLine(*cyt, evt, t);
+        else
+            handleGestureLaneBased(evt, t);
     });
 
     loadStartScreen();
@@ -100,6 +104,15 @@ void AndroidEngine::init(android_app* app, const std::string& shaderDir) {
             m_assetsPath.pop_back();
         LOGI("Eager unpack done; assets root = %s", m_assetsPath.c_str());
     }
+
+    // Material asset library. Charts reference materials by asset *name*
+    // ({slot, assetName}), so the JSON eager-unpack above (which only sees
+    // quoted path-like values) never extracts the .mat files — extract the
+    // whole dir explicitly, then load it like desktop Engine::openProject.
+    // Seed/migrate are editor-only; build_apk.bat ships pre-migrated charts
+    // and the full assets/materials/ tree, so a plain load is sufficient.
+    AndroidFileIO::extractDirToInternal("assets/materials");
+    m_materialLibrary.loadFromProject(m_assetsPath);
 
     LOGI("AndroidEngine initialized");
 }
@@ -226,13 +239,21 @@ void AndroidEngine::onWindowInit(ANativeWindow* window) {
     // to the swapchain itself — desktop draws it via ImGui::Image, and we
     // do the same here. Without this, gameplay renders to an unseen
     // framebuffer and only HUD overlays appear.
+    refreshSceneTexture();
+
+    m_vulkanReady = true;
+    LOGI("Vulkan renderer ready: %dx%d", m_renderer.width(), m_renderer.height());
+}
+
+void AndroidEngine::refreshSceneTexture() {
+    if (m_sceneTexSet != VK_NULL_HANDLE) {
+        ImGui_ImplVulkan_RemoveTexture(m_sceneTexSet);
+        m_sceneTexSet = VK_NULL_HANDLE;
+    }
     m_sceneTexSet = ImGui_ImplVulkan_AddTexture(
         m_renderer.postProcess().bloomSampler(),
         m_renderer.sceneImageView(),
         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-
-    m_vulkanReady = true;
-    LOGI("Vulkan renderer ready: %dx%d", m_renderer.width(), m_renderer.height());
 }
 
 void AndroidEngine::onWindowResize() {
@@ -245,19 +266,10 @@ void AndroidEngine::onWindowResize() {
         LOGE("onResize failed: %s", e.what());
     }
 
-    // PostProcess::resize destroys + recreates the scene image and view.
-    // Our cached ImGui descriptor still points at the freed handle, which
-    // shows up as a black/garbage gameplay scene (or a GPU fault on stricter
-    // drivers) the first time renderGameplayHUD blits it. Rebind to the
-    // current sceneImageView so gameplay actually appears.
-    if (m_sceneTexSet != VK_NULL_HANDLE) {
-        ImGui_ImplVulkan_RemoveTexture(m_sceneTexSet);
-        m_sceneTexSet = VK_NULL_HANDLE;
-    }
-    m_sceneTexSet = ImGui_ImplVulkan_AddTexture(
-        m_renderer.postProcess().bloomSampler(),
-        m_renderer.sceneImageView(),
-        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    // PostProcess::resize destroyed + recreated the scene image and view, so
+    // the cached ImGui descriptor now points at a freed handle (black/garbage
+    // gameplay scene, or a GPU fault on stricter drivers). Rebind it.
+    refreshSceneTexture();
 }
 
 void AndroidEngine::onWindowTerm() {
@@ -416,6 +428,7 @@ void AndroidEngine::update(float dt) {
 void AndroidEngine::render() {
     if (!m_renderer.beginFrame()) {
         m_renderer.onResize(nullptr);
+        refreshSceneTexture();   // scene image view was recreated
         return;
     }
 
@@ -893,6 +906,11 @@ void AndroidEngine::startGameplay(int songIndex, bool autoPlay) {
 
     // Create renderer
     m_activeMode = createRenderer(song.gameMode);
+    // Must precede onInit: renderers resolve chart.materials assetNames
+    // through the library during onInit. Without this the library pointer is
+    // null and every asset-referenced material falls back to a hardcoded
+    // default. Mirrors Engine::setMode on desktop.
+    m_activeMode->setMaterialLibrary(&m_materialLibrary);
     m_activeMode->onInit(m_renderer, m_currentChart, &song.gameMode);
     m_hitDetector.init(m_currentChart);
     m_judgment.reset();
@@ -1030,11 +1048,270 @@ std::unique_ptr<GameModeRenderer> AndroidEngine::createRenderer(const GameModeCo
                 return std::make_unique<ArcaeaRenderer>();
             return std::make_unique<BandoriRenderer>();
         case GameModeType::Circle:
-            if (config.dimension == DropDimension::ThreeD)
-                return std::make_unique<LanotaRenderer>();
-            return std::make_unique<CytusRenderer>();
+            // Match desktop Engine::createRenderer: Circle is always the
+            // Lanota rotating-disk renderer (the dimension toggle is not
+            // exposed for this mode in the editor).
+            return std::make_unique<LanotaRenderer>();
         case GameModeType::ScanLine:
-            return std::make_unique<PhigrosRenderer>();
+            // Match desktop: ScanLine = Cytus sweep-line renderer. Mapping
+            // this to PhigrosRenderer (a stubbed mode) is why Scan Line was
+            // unplayable on Android. CytusRenderer.cpp is shared, so the
+            // legacy-flat note-draw fix applies here too.
+            return std::make_unique<CytusRenderer>();
     }
     return std::make_unique<BandoriRenderer>();
+}
+
+// ============================================================================
+// Gameplay gesture handlers — faithful ports of the desktop Engine handlers
+// (Engine.cpp). Same logic, minus the desktop std::cout score logging. Keeping
+// these byte-for-byte equivalent to the desktop is deliberate: any divergence
+// reintroduces the Android-only input/hold drift this fix removes.
+// ============================================================================
+
+void AndroidEngine::dispatchHitResult(const HitResult& hit, int lane) {
+    auto judgment = m_judgment.judge(hit.timingDelta);
+    m_judgment.recordJudgment(judgment);
+    m_score.onJudgment(judgment);
+    if (m_activeMode)
+        m_activeMode->showJudgment(lane >= 0 ? lane : 0, judgment);
+}
+
+void AndroidEngine::handleGestureLaneBased(const GestureEvent& evt, double songTime) {
+    int screenW = static_cast<int>(m_renderer.width());
+    int tc = m_gameplayConfig.trackCount;
+    int lane = static_cast<int>(evt.pos.x / static_cast<float>(screenW) * tc);
+    lane = std::clamp(lane, 0, tc - 1);
+
+    switch (evt.type) {
+        case GestureType::Tap: {
+            auto hit = m_hitDetector.checkHit(lane, songTime);
+            if (hit) dispatchHitResult(*hit, lane);
+            for (auto& dh : m_hitDetector.consumeDrags(lane, songTime))
+                dispatchHitResult(dh, lane);
+            break;
+        }
+        case GestureType::Flick: {
+            auto hit = m_hitDetector.checkHit(lane, songTime);
+            if (hit) {
+                if (hit->noteType == NoteType::Flick) {
+                    float speed = glm::length(evt.velocity);
+                    float dirAcc = speed > 0.f ? std::abs(evt.velocity.x) / speed : 0.f;
+                    auto judgment = m_judgment.judgeFlick(hit->timingDelta, dirAcc);
+                    m_judgment.recordJudgment(judgment);
+                    m_score.onJudgment(judgment);
+                    if (m_activeMode) m_activeMode->showJudgment(lane, judgment);
+                } else {
+                    dispatchHitResult(*hit, lane);
+                }
+            }
+            break;
+        }
+        case GestureType::HoldBegin: {
+            auto noteId = m_hitDetector.beginHold(lane, songTime);
+            if (noteId) {
+                m_activeTouches[evt.touchId] = *noteId;
+                HitResult headHit{*noteId, 0.f, NoteType::Hold};
+                dispatchHitResult(headHit, lane);
+            }
+            break;
+        }
+        case GestureType::SlideBegin:
+        case GestureType::SlideMove: {
+            auto it = m_activeTouches.find(evt.touchId);
+            if (it != m_activeTouches.end())
+                m_hitDetector.updateHoldLane(it->second, lane);
+            for (auto& dh : m_hitDetector.consumeDrags(lane, songTime))
+                dispatchHitResult(dh, lane);
+            break;
+        }
+        case GestureType::HoldEnd:
+        case GestureType::SlideEnd: {
+            auto it = m_activeTouches.find(evt.touchId);
+            if (it != m_activeTouches.end()) {
+                auto hit = m_hitDetector.endHold(it->second, songTime);
+                if (hit) dispatchHitResult(*hit, lane);
+                m_activeTouches.erase(it);
+            }
+            break;
+        }
+        default: break;
+    }
+}
+
+void AndroidEngine::handleGestureArcaea(const GestureEvent& evt, double songTime) {
+    glm::vec2 screenSize{static_cast<float>(m_renderer.width()),
+                         static_cast<float>(m_renderer.height())};
+
+    switch (evt.type) {
+        case GestureType::Tap: {
+            auto hit = m_hitDetector.checkHitPosition(evt.pos, screenSize, songTime);
+            if (hit) dispatchHitResult(*hit);
+            break;
+        }
+        case GestureType::HoldBegin: {
+            auto noteId = m_hitDetector.beginHoldPosition(evt.pos, screenSize, songTime);
+            if (noteId) m_activeTouches[evt.touchId] = *noteId;
+            break;
+        }
+        case GestureType::SlideMove: {
+            auto it = m_activeTouches.find(evt.touchId);
+            if (it != m_activeTouches.end())
+                m_hitDetector.updateSlide(it->second, evt.pos, songTime);
+            break;
+        }
+        case GestureType::SlideEnd:
+        case GestureType::HoldEnd: {
+            auto it = m_activeTouches.find(evt.touchId);
+            if (it != m_activeTouches.end()) {
+                float accuracy = m_hitDetector.getSlideAccuracy(it->second);
+                auto hit = m_hitDetector.endHold(it->second, songTime);
+                if (hit) {
+                    auto judgment = m_judgment.judgeArc(accuracy, 1.0f);
+                    m_judgment.recordJudgment(judgment);
+                    m_score.onJudgment(judgment);
+                }
+                m_activeTouches.erase(it);
+            }
+            break;
+        }
+        default: break;
+    }
+}
+
+void AndroidEngine::handleGesturePhigros(const GestureEvent& evt, double songTime) {
+    if (evt.type != GestureType::Tap && evt.type != GestureType::HoldBegin) return;
+
+    auto* phigros = dynamic_cast<PhigrosRenderer*>(m_activeMode.get());
+    if (!phigros) return;
+
+    auto lines = phigros->getActiveLines();
+    for (const auto& line : lines) {
+        auto hit = m_hitDetector.checkHitPhigros(evt.pos, line.origin, line.rotation, songTime);
+        if (hit) {
+            dispatchHitResult(*hit);
+            break;
+        }
+    }
+}
+
+void AndroidEngine::handleGestureCircle(LanotaRenderer& lan,
+                                        const GestureEvent& evt, double songTime) {
+    constexpr float CIRCLE_PICK_DP = 48.f;
+    const float pickPx = ScreenMetrics::dp(CIRCLE_PICK_DP);
+
+    auto judgeAndFeedback = [this, &lan](const HitResult& hit, Judgment j) {
+        m_judgment.recordJudgment(j);
+        m_score.onJudgment(j);
+        lan.markNoteHit(hit.noteId);
+        lan.emitHitFeedback(hit.noteId, j);
+    };
+
+    switch (evt.type) {
+        case GestureType::Tap: {
+            auto pick = lan.pickNoteAt(evt.pos, songTime, pickPx);
+            if (!pick) break;
+            auto hit = m_hitDetector.consumeNoteById(pick->noteId, songTime);
+            if (!hit) break;
+            judgeAndFeedback(*hit, m_judgment.judge(hit->timingDelta));
+            break;
+        }
+        case GestureType::Flick: {
+            auto pick = lan.pickNoteAt(evt.pos, songTime, pickPx);
+            if (!pick) break;
+            auto hit = m_hitDetector.consumeNoteById(pick->noteId, songTime);
+            if (!hit) break;
+            if (hit->noteType == NoteType::Flick) {
+                float speed  = glm::length(evt.velocity);
+                float dirAcc = speed > 0.f ? std::abs(evt.velocity.x) / speed : 0.f;
+                judgeAndFeedback(*hit, m_judgment.judgeFlick(hit->timingDelta, dirAcc));
+            } else {
+                judgeAndFeedback(*hit, m_judgment.judge(hit->timingDelta));
+            }
+            break;
+        }
+        case GestureType::HoldBegin: {
+            auto pick = lan.pickNoteAt(evt.pos, songTime, pickPx);
+            if (!pick) break;
+            auto hit = m_hitDetector.beginHoldById(pick->noteId, songTime);
+            if (hit) {
+                m_activeTouches[evt.touchId] = hit->noteId;
+                judgeAndFeedback(*hit, m_judgment.judge(hit->timingDelta));
+            }
+            break;
+        }
+        case GestureType::HoldEnd: {
+            auto it = m_activeTouches.find(evt.touchId);
+            if (it == m_activeTouches.end()) break;
+            auto hit = m_hitDetector.endHold(it->second, songTime);
+            if (hit) judgeAndFeedback(*hit, m_judgment.judge(hit->timingDelta));
+            m_activeTouches.erase(it);
+            break;
+        }
+        default: break;
+    }
+}
+
+void AndroidEngine::handleGestureScanLine(CytusRenderer& cyt,
+                                          const GestureEvent& evt, double songTime) {
+    constexpr float SCAN_PICK_DP = 48.f;
+    const float pickPx = ScreenMetrics::dp(SCAN_PICK_DP);
+
+    auto judgeAndFeedback = [this, &cyt](const HitResult& hit, Judgment j) {
+        m_judgment.recordJudgment(j);
+        m_score.onJudgment(j);
+        cyt.markNoteHit(hit.noteId);
+    };
+
+    switch (evt.type) {
+        case GestureType::Tap: {
+            auto pick = cyt.pickNoteAt(evt.pos, songTime, pickPx);
+            if (!pick) break;
+            auto hit = m_hitDetector.consumeNoteById(pick->noteId, songTime);
+            if (!hit) break;
+            judgeAndFeedback(*hit, m_judgment.judge(hit->timingDelta));
+            break;
+        }
+        case GestureType::Flick: {
+            auto pick = cyt.pickNoteAt(evt.pos, songTime, pickPx);
+            if (!pick) break;
+            auto hit = m_hitDetector.consumeNoteById(pick->noteId, songTime);
+            if (!hit) break;
+            if (hit->noteType == NoteType::Flick) {
+                float speed  = glm::length(evt.velocity);
+                float dirAcc = speed > 0.f ? std::abs(evt.velocity.x) / speed : 0.f;
+                judgeAndFeedback(*hit, m_judgment.judgeFlick(hit->timingDelta, dirAcc));
+            } else {
+                judgeAndFeedback(*hit, m_judgment.judge(hit->timingDelta));
+            }
+            break;
+        }
+        case GestureType::HoldBegin: {
+            auto pick = cyt.pickNoteAt(evt.pos, songTime, pickPx);
+            if (!pick) break;
+            auto hit = m_hitDetector.beginHoldById(pick->noteId, songTime);
+            if (hit) {
+                m_activeTouches[evt.touchId] = hit->noteId;
+                judgeAndFeedback(*hit, m_judgment.judge(hit->timingDelta));
+            }
+            break;
+        }
+        case GestureType::SlideBegin:
+        case GestureType::SlideMove: {
+            auto it = m_activeTouches.find(evt.touchId);
+            if (it != m_activeTouches.end())
+                m_hitDetector.updateSlide(it->second, evt.pos, songTime);
+            break;
+        }
+        case GestureType::SlideEnd:
+        case GestureType::HoldEnd: {
+            auto it = m_activeTouches.find(evt.touchId);
+            if (it == m_activeTouches.end()) break;
+            auto hit = m_hitDetector.endHold(it->second, songTime);
+            if (hit) judgeAndFeedback(*hit, m_judgment.judge(hit->timingDelta));
+            m_activeTouches.erase(it);
+            break;
+        }
+        default: break;
+    }
 }

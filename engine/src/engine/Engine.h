@@ -110,6 +110,14 @@ private:
     // fitAndLetterbox so the running game matches the editor previews.
     void gameplayViewportPx(int& x, int& y, int& w, int& h) const;
 
+    // (Re)registers the offscreen scene image with ImGui and points the
+    // SceneViewer at the fresh descriptor. The scene image view is recreated
+    // by PostProcess whenever the swapchain is rebuilt (Renderer::onResize),
+    // so the descriptor created once at init goes stale and the gameplay
+    // scene blits a dead texture (black) on the next entry. Call this after
+    // every Renderer::onResize.
+    void refreshSceneTexture();
+
     void dispatchHitResult(const HitResult& hit, int lane = -1);
     void handleGestureLaneBased(const GestureEvent& evt, double songTime);
     void handleGestureArcaea(const GestureEvent& evt, double songTime);

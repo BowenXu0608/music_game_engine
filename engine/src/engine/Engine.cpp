@@ -238,12 +238,9 @@ void Engine::init(uint32_t width, uint32_t height, const std::string& title,
             handleGestureLaneBased(evt, t);
     });
 
-    // Create ImGui descriptor for scene texture
-    VkDescriptorSet sceneTexSet = m_imgui.addTexture(
-        m_renderer.sceneImageView(),
-        m_renderer.postProcess().bloomSampler()
-    );
-    m_sceneViewer.setSceneTexture(sceneTexSet);
+    // Create ImGui descriptor for scene texture (and re-create it after every
+    // swapchain/scene-target recreate — see refreshSceneTexture()).
+    refreshSceneTexture();
 
     // Give StartScreenEditor access to Vulkan so it can upload textures
     m_startScreenEditor.initVulkan(m_renderer.context(),
@@ -345,6 +342,7 @@ void Engine::mainLoop() {
         if (m_framebufferResized) {
             m_framebufferResized = false;
             m_renderer.onResize(m_window);
+            refreshSceneTexture();   // scene image view was recreated
             if (m_activeMode) {
                 if (m_currentLayer == EditorLayer::GamePlay) {
                     int vx, vy, vw, vh;
@@ -522,6 +520,21 @@ void Engine::update(float dt) {
     }
 }
 
+void Engine::refreshSceneTexture() {
+    // Free the previous descriptor first: PostProcess::resize() destroyed the
+    // image view it pointed at, so keeping it would both leak the set and risk
+    // ImGui sampling a dead view (the black gameplay scene on re-entry).
+    VkDescriptorSet old = m_sceneViewer.sceneTexture();
+    if (old != VK_NULL_HANDLE)
+        m_imgui.removeTexture(old);
+
+    VkDescriptorSet sceneTexSet = m_imgui.addTexture(
+        m_renderer.sceneImageView(),
+        m_renderer.postProcess().bloomSampler()
+    );
+    m_sceneViewer.setSceneTexture(sceneTexSet);
+}
+
 void Engine::gameplayViewportPx(int& x, int& y, int& w, int& h) const {
     int sw = static_cast<int>(m_renderer.width());
     int sh = static_cast<int>(m_renderer.height());
@@ -554,6 +567,7 @@ void Engine::render() {
 
     if (!m_renderer.beginFrame()) {
         m_renderer.onResize(m_window);
+        refreshSceneTexture();   // scene image view was recreated
         return;
     }
 

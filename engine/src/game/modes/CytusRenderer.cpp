@@ -319,12 +319,20 @@ void CytusRenderer::onRender(Renderer& renderer) {
                                   std::get<0>(whiteTex), std::get<1>(whiteTex),
                                   renderer.context(), renderer.descriptors());
     };
-    // Lit note quads — PBR material; per-note fade modulates baseColor alpha.
+    // Note quads. The PBR quad pipeline renders nothing under Cytus's 2D
+    // ortho screen camera (a regression from the WIP PBR/camera commits —
+    // "scan line cannot be played", notes never appear). Until the PBR 2D
+    // path is fixed, fall back to the proven legacy flat-tint path using the
+    // material's base colour. slotMat() puts the chart asset / default colour
+    // in pbr.baseColor, so this is visually identical to the pre-PBR Cytus
+    // (which used slotTint() + the same unlit drawQuad overload as the
+    // decorative quads above).
     auto drawNoteQuad = [&](glm::vec2 c, glm::vec2 sz,
                             const Material& base, float alphaMul) {
-        Material m = base;
-        m.pbr.baseColor = withAlpha(base.pbr.baseColor, alphaMul);
-        renderer.quads().drawQuad(c, sz, 0.f, m, {0.f, 0.f, 1.f, 1.f},
+        renderer.quads().drawQuad(c, sz, 0.f,
+                                  withAlpha(base.pbr.baseColor, alphaMul),
+                                  {0.f, 0.f, 1.f, 1.f},
+                                  std::get<0>(whiteTex), std::get<1>(whiteTex),
                                   renderer.context(), renderer.descriptors());
     };
 

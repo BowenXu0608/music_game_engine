@@ -16,6 +16,11 @@ public:
     void render(VkCommandBuffer cmd);
 
     VkDescriptorSet addTexture(VkImageView view, VkSampler sampler);
+    // Frees an ImGui descriptor created by addTexture(). Must be called before
+    // re-adding a texture whose underlying VkImageView was destroyed (e.g.
+    // after a swapchain / scene-target recreate) or the old set leaks and
+    // still points at a dead image view.
+    void removeTexture(VkDescriptorSet set);
 
     // Returns the Roboto font closest to targetSize (24/32/48/64).
     // Falls back to the default ImGui font if Roboto failed to load.

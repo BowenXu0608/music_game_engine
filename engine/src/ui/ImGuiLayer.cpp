@@ -157,6 +157,11 @@ VkDescriptorSet ImGuiLayer::addTexture(VkImageView view, VkSampler sampler) {
     return ImGui_ImplVulkan_AddTexture(sampler, view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 }
 
+void ImGuiLayer::removeTexture(VkDescriptorSet set) {
+    if (set != VK_NULL_HANDLE)
+        ImGui_ImplVulkan_RemoveTexture(set);
+}
+
 ImFont* ImGuiLayer::getLogoFont(float targetSize) const {
     int best = 0;
     float bestDiff = std::fabsf(k_logoFontSizes[0] - targetSize);
