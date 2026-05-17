@@ -165,7 +165,8 @@ int main() {
             CHECK_EQ(hd->waypoints.size(), (size_t)4, "hold waypoint count");
             if (hd->waypoints.size() == 4) {
                 CHECK_EQ((int)hd->waypoints[0].style, (int)HoldTransition::Straight, "wp[0] style");
-                CHECK_EQ((int)hd->waypoints[1].style, (int)HoldTransition::Angle90,  "wp[1] style");
+                // Legacy "angle90" is retired — it must migrate to Bezier.
+                CHECK_EQ((int)hd->waypoints[1].style, (int)HoldTransition::Bezier,   "wp[1] style (angle90 migrated)");
                 CHECK_EQ((int)hd->waypoints[2].style, (int)HoldTransition::Curve,    "wp[2] style");
                 CHECK_EQ((int)hd->waypoints[3].style, (int)HoldTransition::Rhomboid, "wp[3] style");
                 CHECK_NEAR(hd->waypoints[0].tOffset, 0.0f, "wp[0] tOffset");
@@ -431,11 +432,12 @@ int main() {
         R"({"explanation":"","ops":[{"op":"set_hold_transition","from":3.0,"to":5.0,"style":"angle90"}]})");
     for (const auto& op : setTx.ops)
         applyChartEditOp(holdNotes, 7, op);
-    CHECK_EQ((int)holdNotes[0].transition, (int)EditorHoldTransition::Angle90,
-             "hold transition set");
+    // "angle90" is retired — parseHoldStyle migrates it to Bezier.
+    CHECK_EQ((int)holdNotes[0].transition, (int)EditorHoldTransition::Bezier,
+             "hold transition set (angle90 migrated)");
     if (!holdNotes[0].waypoints.empty()) {
         CHECK_EQ((int)holdNotes[0].waypoints[0].style,
-                 (int)EditorHoldTransition::Angle90, "wp style rewritten");
+                 (int)EditorHoldTransition::Bezier, "wp style rewritten (angle90 migrated)");
     }
 
     // Mode gating for hold ops

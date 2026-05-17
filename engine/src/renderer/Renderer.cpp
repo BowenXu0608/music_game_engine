@@ -221,15 +221,29 @@ void Renderer::onResize(GLFWwindow* window) {
 
 void Renderer::setViewportScissor(VkCommandBuffer cmd) {
     auto ext = m_swapchain.extent();
+
+    float vx = 0.f, vy = 0.f;
+    float vw = static_cast<float>(ext.width);
+    float vh = static_cast<float>(ext.height);
+    VkRect2D scissor{{0, 0}, ext};
+
+    if (m_vpOverride && m_vpW > 0 && m_vpH > 0) {
+        vx = static_cast<float>(m_vpX);
+        vy = static_cast<float>(m_vpY);
+        vw = static_cast<float>(m_vpW);
+        vh = static_cast<float>(m_vpH);
+        scissor.offset = {m_vpX, m_vpY};
+        scissor.extent = {static_cast<uint32_t>(m_vpW),
+                          static_cast<uint32_t>(m_vpH)};
+    }
+
     VkViewport vp{};
-    vp.x        = 0.f;
-    vp.y        = 0.f;
-    vp.width    = static_cast<float>(ext.width);
-    vp.height   = static_cast<float>(ext.height);
+    vp.x        = vx;
+    vp.y        = vy;
+    vp.width    = vw;
+    vp.height   = vh;
     vp.minDepth = 0.f;
     vp.maxDepth = 1.f;
     vkCmdSetViewport(cmd, 0, 1, &vp);
-
-    VkRect2D scissor{{0,0}, ext};
     vkCmdSetScissor(cmd, 0, 1, &scissor);
 }

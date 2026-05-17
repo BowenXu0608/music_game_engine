@@ -21,8 +21,8 @@ keyframed animation.
   has `startTime`, `duration`, `target`, and an `easing` enum
   (`linear`, `sineInOut`, `quadInOut`, `cubicInOut`).
 - **Hold transitions** — like other drop modes, holds can cross lanes via
-  a multi-waypoint path. Styles: `straight`, `angle90`, `curve`,
-  `rhomboid`.
+  a multi-waypoint path. Styles: `straight`, `curve`, `rhomboid`,
+  `bezier`.
 
 ## Supported note types
 
@@ -49,7 +49,7 @@ No arcs, no arctaps, no slides in this mode.
 Append a lane-change waypoint to an existing Hold. Identify the hold by
 its start time; `at_time` is the absolute time along the body; `lane` is
 the target angular lane (0..trackCount-1, 0 at 12 o'clock, clockwise);
-`style` is one of `"straight"`, `"angle90"`, `"curve"`, `"rhomboid"`.
+`style` is one of `"straight"`, `"curve"`, `"rhomboid"`, `"bezier"`.
 ```
 {"op":"add_hold_waypoint", "note_time":4.0, "at_time":4.8,
  "lane":3, "style":"curve"}

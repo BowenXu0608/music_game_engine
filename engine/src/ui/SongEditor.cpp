@@ -13,6 +13,7 @@
 #include "editor/ChartStyle.h"
 #include "editor/CopilotSkill.h"
 #include "game/chart/ChartLoader.h"
+#include "ui/PreviewAspect.h"
 #include <imgui.h>
 #include <imgui_internal.h>
 #include <filesystem>
@@ -461,6 +462,22 @@ void SongEditor::loadChartFile(Difficulty diff, const std::string& chartRel) {
             m_scanPhaseDirty = true;
             m_scanPageTableDirty = true;
 
+            // Corner shape is song-wide. Adopt the first hold's style so the
+            // Note-tab combo reflects the song, then force every hold in this
+            // difficulty to it so the whole chart is uniform on load.
+            for (const auto& n : edNotes) {
+                if (n.type != EditorNoteType::Hold) continue;
+                m_defaultHoldTransition = n.waypoints.empty()
+                                              ? n.transition
+                                              : n.waypoints.back().style;
+                break;
+            }
+            for (auto& n : edNotes) {
+                if (n.type != EditorNoteType::Hold) continue;
+                n.transition = m_defaultHoldTransition;
+                for (auto& w : n.waypoints) w.style = m_defaultHoldTransition;
+            }
+
             std::cout << "[SongEditor] Loaded " << edNotes.size() << " notes from " << chartRel << "\n";
         } catch (...) {
             // Chart file doesn't exist or can't be parsed — start empty
@@ -864,13 +881,22 @@ void SongEditor::render(Engine* engine) {
                 ImGui::NewLine();
             }
 
+            // Aspect-ratio controls — same as StartScreen / MusicSelection
+            // editors, so the author can preview the playfield at the target
+            // device ratio instead of the raw panel size.
+            if (engine) {
+                previewAspect::renderControls(engine->previewAspect());
+                ImGui::Spacing();
+            }
+
             ImVec2 avail = ImGui::GetContentRegionAvail();
             if (avail.y > 20.f) {
-                ImVec2 sceneOrigin = ImGui::GetCursorScreenPos();
-                ImVec2 sceneSize(avail.x, avail.y);
+                previewAspect::FitResult fit = engine
+                    ? previewAspect::fitAndLetterbox(engine->previewAspect(), avail)
+                    : previewAspect::FitResult{ ImGui::GetCursorScreenPos(), avail };
                 ImDrawList* dl = ImGui::GetWindowDrawList();
-                renderSceneView(dl, sceneOrigin, sceneSize, engine);
-                ImGui::Dummy(sceneSize);
+                renderSceneView(dl, fit.origin, fit.size, engine);
+                ImGui::Dummy(avail);
             }
         }
         ImGui::EndChild();
@@ -1188,12 +1214,11 @@ void SongEditor::render(Engine* engine) {
                     ImGui::TextDisabled("Straight hold (no lane changes)");
                 } else {
                     ImGui::Text("Lane changes (%d segments)", (int)sel.waypoints.size() - 1);
-                    ImGui::TextDisabled("Each segment: previous lane -> target lane.");
-                    ImGui::TextDisabled("Drag the duration to control how long the");
-                    ImGui::TextDisabled("change takes (ends at the marked time).");
+                    ImGui::TextDisabled("Corner shape is song-wide (Note tab).");
+                    ImGui::TextDisabled("Drag the start/end dots on the timeline,");
+                    ImGui::TextDisabled("or set each change's duration below.");
                     ImGui::Spacing();
 
-                    const char* items[] = {"Straight", "90 Angle", "Curve", "Rhomboid"};
                     for (size_t i = 1; i < sel.waypoints.size(); ++i) {
                         ImGui::PushID((int)i);
                         const auto& prev = sel.waypoints[i - 1];
@@ -1202,13 +1227,9 @@ void SongEditor::render(Engine* engine) {
                         ImGui::Text("[%zu] lane %d -> %d  @%.2fs", i,
                                     prev.lane, cur.lane, cur.tOffset);
 
-                        int style = (int)cur.style;
-                        ImGui::SetNextItemWidth(-1);
-                        if (ImGui::Combo("##style", &style, items, 4))
-                            cur.style = (EditorHoldTransition)style;
-
-                        // Max length = how much room there is between the prev
-                        // waypoint and this one (the change has to fit inside).
+                        // Corner style is song-wide now; per-segment style is
+                        // no longer editable here (kept in the data so charts
+                        // round-trip). Only the change's duration is local.
                         float maxLen = std::max(0.f, cur.tOffset - prev.tOffset);
                         float tLen = std::clamp(cur.transitionLen, 0.f, maxLen);
                         ImGui::SetNextItemWidth(-1);
@@ -1758,6 +1779,18 @@ void SongEditor::renderMaterialSlotPicker(Engine* engine,
     ImGui::PopID();
 }
 
+// ── applySongHoldCornerStyle ─────────────────────────────────────────────────
+// Corner shape is a single song-wide setting (Note tab). Force every hold in
+// the current difficulty — legacy single-transition AND every multi-waypoint
+// segment — to m_defaultHoldTransition so the whole song is visually uniform.
+void SongEditor::applySongHoldCornerStyle() {
+    for (auto& n : notes()) {
+        if (n.type != EditorNoteType::Hold) continue;
+        n.transition = m_defaultHoldTransition;
+        for (auto& w : n.waypoints) w.style = m_defaultHoldTransition;
+    }
+}
+
 // ── renderNotePage ───────────────────────────────────────────────────────────
 // Left-sidebar "Note" tab. Top block: lane layout knobs that apply to every
 // note type (Tracks, Sky Height in 3D Drop, Default Note Width in Circle).
@@ -1838,6 +1871,16 @@ void SongEditor::renderNotePage(Engine* engine) {
                 if (ImGui::SliderFloat("##playfieldW", &pctDisplay,
                                        30.f, 100.f, "%.0f%%"))
                     gm.playfieldWidthPct = pctDisplay / 100.f;
+
+                ImGui::Text("Playfield Height");
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("How tall the highway appears.\n"
+                                      "Higher = lower, flatter camera (taller).");
+                ImGui::SetNextItemWidth(-1);
+                float hDisplay = gm.playfieldHeightPct * 100.f;
+                if (ImGui::SliderFloat("##playfieldH", &hDisplay,
+                                       30.f, 100.f, "%.0f%%"))
+                    gm.playfieldHeightPct = hDisplay / 100.f;
             }
             ImGui::Spacing();
         }
@@ -1939,28 +1982,31 @@ void SongEditor::renderNotePage(Engine* engine) {
         // Hold gets its corner-style default here — the setting the user
         // used to access only by clicking an existing hold note.
         if (std::strcmp(noteType, "Hold Note") == 0) {
-            ImGui::Text("Default Corner Style");
+            ImGui::Text("Corner Style");
             if (ImGui::IsItemHovered())
-                ImGui::SetTooltip("Transition style used when a hold's drag path\n"
-                                  "crosses lanes. Applies to newly-authored holds.");
-            const char* cornerLabels[] = {"Straight", "90 Angle", "Curve", "Rhomboid"};
-            int cur = (int)m_defaultHoldTransition;
+                ImGui::SetTooltip("Corner shape used by EVERY hold in this song.\n"
+                                  "One setting — changing it instantly rewrites all\n"
+                                  "holds (and applies to new ones you draw).");
+            // Explicit enum<->index map since enum values are not contiguous
+            // (value 1 was the removed hard-step style).
+            static const EditorHoldTransition kOpts[] = {
+                EditorHoldTransition::Straight,
+                EditorHoldTransition::Curve,
+                EditorHoldTransition::Rhomboid,
+                EditorHoldTransition::Bezier };
+            const char* cornerLabels[] = {"Straight", "Curve", "Rhomboid", "Bezier"};
+            int cur = 1;  // default to Curve if current value isn't offered
+            for (int k = 0; k < 4; ++k)
+                if (kOpts[k] == m_defaultHoldTransition) { cur = k; break; }
             ImGui::SetNextItemWidth(-1);
-            if (ImGui::Combo("##holdCorner", &cur, cornerLabels, 4))
-                m_defaultHoldTransition = (EditorHoldTransition)cur;
-
-            if (ImGui::Button("Apply to All Holds", ImVec2(-1, 24))) {
-                for (auto& n : notes()) {
-                    if (n.type != EditorNoteType::Hold) continue;
-                    n.transition = m_defaultHoldTransition;
-                    for (auto& w : n.waypoints) w.style = m_defaultHoldTransition;
-                }
-                m_statusMsg   = "Hold corners rewritten";
+            if (ImGui::Combo("##holdCorner", &cur, cornerLabels, 4)) {
+                m_defaultHoldTransition = kOpts[cur];
+                // Song-wide: apply to every hold in the current difficulty
+                // immediately so the whole song stays consistent.
+                applySongHoldCornerStyle();
+                m_statusMsg   = "Hold corner style applied to all holds";
                 m_statusTimer = 2.f;
             }
-            if (ImGui::IsItemHovered())
-                ImGui::SetTooltip("Rewrite every Hold's corner style in the\n"
-                                  "current difficulty to the value above.");
             ImGui::Spacing();
         }
 
@@ -3485,14 +3531,24 @@ void SongEditor::renderSceneView(ImDrawList* dl, ImVec2 origin, ImVec2 size,
 
     if (gm.type == GameModeType::DropNotes) {
         // ── Camera-based perspective highway ────────────────────────────────
-        // Build a real perspective VP matrix from the camera config so the
-        // preview updates when the user adjusts Eye / Target / FOV.
+        // Build a real perspective VP matrix from the SAME baked baseline the
+        // renderers use (Bandori 2D vs Arcaea 3D), so the preview matches
+        // gameplay. cameraDistance/FovDeg are the relative knobs on top.
         float aspect = size.x / std::max(size.y, 1.f);
-        glm::vec3 camTarget{gm.cameraTarget[0],  gm.cameraTarget[1], gm.cameraTarget[2]};
-        glm::vec3 camBaseEye{gm.cameraEye[0],    gm.cameraEye[1],    gm.cameraEye[2]};
+        bool  preview3D = (gm.dimension == DropDimension::ThreeD);
+        // 2D baseline blended by playfieldHeightPct — must mirror
+        // BandoriRenderer::onResize exactly (dual-site).
+        float hN = (std::clamp(gm.playfieldHeightPct, 0.3f, 1.f) - 0.3f) / 0.7f;
+        glm::vec3 camBaseEye   = preview3D
+            ? glm::vec3{0.f, 3.f, 10.f}
+            : glm::vec3{0.f, glm::mix(7.0f, 1.5f, hN), glm::mix(11.0f, 6.0f, hN)};
+        glm::vec3 camTarget    = preview3D
+            ? glm::vec3{0.f, 0.f, 0.f}
+            : glm::vec3{0.f, 0.f, glm::mix(-22.0f, -55.0f, hN)};
+        float     baseFovDeg   = preview3D ? 45.f : 55.f;
         glm::vec3 camEye = camTarget +
                            (camBaseEye - camTarget) * std::max(gm.cameraDistance, 0.01f);
-        float fovDeg = gm.cameraFovDeg > 0.f ? gm.cameraFovDeg : gm.cameraFov;
+        float fovDeg = gm.cameraFovDeg > 0.f ? gm.cameraFovDeg : baseFovDeg;
         float     camFov = glm::radians(std::clamp(fovDeg, 20.f, 120.f));
         glm::mat4 proj = glm::perspective(camFov, aspect, 0.1f, 300.f);
         // Flip Y for screen coords (top=0)
@@ -3620,21 +3676,45 @@ void SongEditor::renderSceneView(ImDrawList* dl, ImVec2 origin, ImVec2 size,
                         float u  = (tOff - tBeg) / tLen;
                         float la = (float)a.lane, lb = (float)b.lane;
                         switch (b.style) {
-                            case EditorHoldTransition::Angle90: return lb;
                             case EditorHoldTransition::Curve: {
                                 float s = u * u * (3.f - 2.f * u);
                                 return la + (lb - la) * s;
                             }
                             case EditorHoldTransition::Rhomboid:
                                 return la + (lb - la) * u;
+                            case EditorHoldTransition::Bezier: {
+                                float s = u * u * u;  // rounded corner
+                                return la + (lb - la) * s;
+                            }
                             default: return lb;
                         }
                     }
                     return (float)wps.back().lane;
                 };
 
-                for (int i = 0; i <= N; ++i) {
-                    float tOff = (float)i / (float)N * duration;
+                // Sample times: a coarse uniform grid (smooth for curved
+                // transitions) PLUS an anchor exactly at every waypoint and
+                // 1 ms before it. Without the anchors, an instant (len==0)
+                // lane change falls between two uniform samples and gets
+                // drawn as one long diagonal quad slashing across the lanes
+                // (the "wedge"); the pre-corner sample pins the previous lane
+                // so the step renders as a crisp near-vertical edge — exactly
+                // how BandoriRenderer anchors its hold ribbon.
+                std::vector<float> tSamples;
+                tSamples.reserve(N + 2 * note.waypoints.size() + 2);
+                for (int i = 0; i <= N; ++i)
+                    tSamples.push_back((float)i / (float)N * duration);
+                for (const auto& w : note.waypoints) {
+                    float wt = std::clamp(w.tOffset, 0.f, duration);
+                    tSamples.push_back(std::max(0.f, wt - 1e-3f));
+                    tSamples.push_back(wt);
+                }
+                std::sort(tSamples.begin(), tSamples.end());
+                tSamples.erase(std::unique(tSamples.begin(), tSamples.end(),
+                                   [](float a, float b){ return std::abs(a-b) < 1e-5f; }),
+                               tSamples.end());
+
+                for (float tOff : tSamples) {
                     float absDt = (note.time + tOff) - curTime;
                     float wz = -absDt * SCROLL_SPEED;
                     if (wz > 12.f || wz < -60.f) { havePrev = false; continue; }
@@ -5684,7 +5764,9 @@ ChartData SongEditor::buildChartFromNotes() const {
                         hw.style         = (HoldTransition)(int)w.style;
                         hd.waypoints.push_back(hw);
                     }
-                    hd.endLaneX = static_cast<float>(en.waypoints.back().lane);
+                    // Guarantee a strictly forward path before it reaches the
+                    // preview / export (also sets endLaneX).
+                    sanitizeHoldWaypoints(hd);
                 } else {
                     // Legacy single-transition (or straight) hold
                     hd.endLaneX = (en.endTrack < 0 || en.endTrack == en.track)
@@ -5893,9 +5975,9 @@ void SongEditor::exportAllCharts() {
                             const char* tname = "curve";
                             switch (w.style) {
                                 case HoldTransition::Straight: tname = "straight"; break;
-                                case HoldTransition::Angle90:  tname = "angle90";  break;
                                 case HoldTransition::Curve:    tname = "curve";    break;
                                 case HoldTransition::Rhomboid: tname = "rhomboid"; break;
+                                case HoldTransition::Bezier:   tname = "bezier";   break;
                             }
                             if (wi) f << ", ";
                             f << "{\"t\": " << w.tOffset
@@ -5908,9 +5990,9 @@ void SongEditor::exportAllCharts() {
                         f << ", \"endLane\": " << hold->endLaneX;
                         const char* tname = "straight";
                         switch (hold->transition) {
-                            case HoldTransition::Angle90:  tname = "angle90";  break;
                             case HoldTransition::Curve:    tname = "curve";    break;
                             case HoldTransition::Rhomboid: tname = "rhomboid"; break;
+                            case HoldTransition::Bezier:   tname = "bezier";   break;
                             default: break;
                         }
                         f << ", \"transition\": \"" << tname << "\"";
@@ -6747,19 +6829,68 @@ void SongEditor::handleNotePlacement(ImVec2 origin, ImVec2 size, float startTime
             m_holdDraft.waypoints.clear();
             m_holdDraft.waypoints.push_back({0.f, track, 0.f, m_defaultHoldTransition});
             m_holdLastTrack = track;
+            m_holdMaxRawOff = 0.f;
         }
         else if (m_holdDragging && ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
             // Sample current cursor; advance endTime; push a waypoint when
-            // the lane changes.
-            float curTime = std::max(m_holdDraft.time, snappedTime);
-            m_holdDraft.endTime = curTime;
+            // the lane changes. A hold is strictly forward in song time:
+            // a lane change is only recorded once the cursor's snapped time
+            // has advanced *past* the previous waypoint. Dragging the cursor
+            // right→left (backward) therefore records nothing — the hold can
+            // never fold back on itself. This also guarantees strictly
+            // increasing waypoint tOffsets (no duplicates from sweeping
+            // lanes faster than the snap grid), which is what kept the
+            // multi-lane ribbon from matching the drawn path.
+            constexpr float kWpEps = 1e-3f;
+            // The hold's start/end snap to the marker grid (beat alignment),
+            // but a lane-crossing waypoint must use the *raw* (unsnapped)
+            // cursor time. Marker-snapped time is far too coarse for a
+            // freehand drag: every crossing between two markers collapses to
+            // the same time, which previously forced either duplicate
+            // tOffsets (the ribbon "wedge") or — with the monotonic guard —
+            // dropped crossings (body stays at the start lane and only
+            // "corners" once near the end). Raw cursor time has full
+            // resolution and rises monotonically as the drag moves forward,
+            // so every lane change is recorded in the right place; a
+            // right→left drag yields a smaller raw time and is ignored, so
+            // the hold still can never fold backward.
+            m_holdDraft.endTime = std::max(m_holdDraft.time, snappedTime);
+            float rawOff = rawTime - m_holdDraft.time;
+
+            // Wrong-direction guard with a dead zone. A hold is time-forward
+            // only. Small backward jitter (mouse shake, hand tremor) within
+            // the dead zone is tolerated and simply ignored; dragging the
+            // cursor back further than the dead zone past the furthest point
+            // reached means the author changed their mind — cancel the whole
+            // in-progress hold instead of recording a malformed path. The
+            // dead zone is pixel-based so it feels the same at any zoom.
+            constexpr float kDeadZonePx = 16.f;
+            float deadZoneSec = (m_timelineZoom > 0.f)
+                                    ? kDeadZonePx / m_timelineZoom : 0.05f;
+            m_holdMaxRawOff = std::max(m_holdMaxRawOff, rawOff);
+            if (rawOff < m_holdMaxRawOff - deadZoneSec) {
+                m_holdDragging  = false;
+                m_holdLastTrack = -1;
+                m_holdMaxRawOff = 0.f;
+                m_holdDraft     = EditorNote{};
+                m_statusMsg     = "Hold cancelled - dragged backward (holds are forward in time).";
+                m_statusTimer   = 2.5f;
+                return;
+            }
+
             if (track != m_holdLastTrack) {
-                float tOff = curTime - m_holdDraft.time;
-                if (tOff <= 0.f) tOff = 0.0001f;
-                // Default each lane-change to an instant snap; the author
-                // can stretch transitionLen later in Note Properties.
-                m_holdDraft.waypoints.push_back({tOff, track, 0.f, m_defaultHoldTransition});
-                m_holdLastTrack = track;
+                float lastTOff = m_holdDraft.waypoints.empty()
+                                     ? 0.f
+                                     : m_holdDraft.waypoints.back().tOffset;
+                if (rawOff > lastTOff + kWpEps) {
+                    // Default each lane-change to an instant snap; the author
+                    // can stretch transitionLen later in Note Properties.
+                    m_holdDraft.waypoints.push_back({rawOff, track, 0.f, m_defaultHoldTransition});
+                    m_holdLastTrack = track;
+                }
+                // else: cursor is not forward of the last waypoint (drag
+                // moved backward, or two crossings landed <1 ms apart) —
+                // ignore so the path stays strictly forward.
             }
         }
         if (m_holdDragging && ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
@@ -6768,18 +6899,43 @@ void SongEditor::handleNotePlacement(ImVec2 origin, ImVec2 size, float startTime
             m_holdDraft.endTime = std::max(m_holdDraft.endTime, snappedTime);
             float dur = m_holdDraft.endTime - m_holdDraft.time;
             if (dur > 0.001f) {
-                // Ensure the last waypoint ends at the hold's tail so the
-                // body covers the full duration. If the user finished on the
-                // same lane as the previous waypoint, just extend it.
+                // Hold the final lane to the hold's tail. Do NOT move the
+                // last lane-change's tOffset to `dur` — that would push the
+                // final lane change to the very end and lose where it was
+                // actually drawn (the "corner at the end" bug). Instead
+                // append a same-lane waypoint at the tail so the last lane
+                // persists from its real change time through to the end.
                 if (!m_holdDraft.waypoints.empty()) {
                     auto& last = m_holdDraft.waypoints.back();
-                    if (last.lane == m_holdLastTrack && last.tOffset < dur) {
-                        last.tOffset = dur;
-                    } else if (last.tOffset < dur) {
-                        m_holdDraft.waypoints.push_back({dur, m_holdLastTrack, 0.f,
+                    if (last.tOffset < dur - 1e-3f) {
+                        m_holdDraft.waypoints.push_back({dur, last.lane, 0.f,
                                                           m_defaultHoldTransition});
+                    } else {
+                        last.tOffset = std::min(last.tOffset, dur);
                     }
                 }
+                // Final safety net: enforce a strictly forward path on the
+                // draft (mirrors sanitizeHoldWaypoints for the editor type).
+                // Covers the extend-to-tail step above and any path that
+                // slipped through, so the timeline + saved chart match what
+                // was drawn and never run backward.
+                {
+                    constexpr float kWpEps = 1e-3f;
+                    auto& wp = m_holdDraft.waypoints;
+                    for (size_t i = 1; i < wp.size(); ++i) {
+                        float lo = wp[i - 1].tOffset + kWpEps;
+                        if (wp[i].tOffset < lo) wp[i].tOffset = lo;
+                    }
+                    for (auto& w : wp) w.tOffset = std::min(w.tOffset, dur);
+                    for (size_t i = wp.size(); i-- > 1; ) {
+                        if (wp[i].tOffset <= wp[i - 1].tOffset) {
+                            wp[i - 1].lane  = wp[i].lane;
+                            wp[i - 1].style = wp[i].style;
+                            wp.erase(wp.begin() + static_cast<long>(i));
+                        }
+                    }
+                }
+
                 // Drop the waypoints vector if it's a degenerate straight hold
                 // (single starting waypoint or two same-lane waypoints).
                 bool flat = true;
@@ -6817,7 +6973,6 @@ void SongEditor::handleNotePlacement(ImVec2 origin, ImVec2 size, float startTime
                     if (tLen <= 0.f || tOff <= tBegin) return la;
                     if (tOff >= tEnd)                  return lb;
                     float u = (tOff - tBegin) / tLen;
-                    if (h.transition == EditorHoldTransition::Angle90) return lb;
                     if (h.transition == EditorHoldTransition::Curve) {
                         float s = u * u * (3.f - 2.f * u);
                         return la + (lb - la) * s;
@@ -6838,13 +6993,16 @@ void SongEditor::handleNotePlacement(ImVec2 origin, ImVec2 size, float startTime
                     float u  = (tOff - tBeg) / tLen;
                     float la = (float)a.lane, lb = (float)b.lane;
                     switch (b.style) {
-                        case EditorHoldTransition::Angle90: return lb;
                         case EditorHoldTransition::Curve: {
                             float s = u * u * (3.f - 2.f * u);
                             return la + (lb - la) * s;
                         }
                         case EditorHoldTransition::Rhomboid:
                             return la + (lb - la) * u;
+                        case EditorHoldTransition::Bezier: {
+                            float s = u * u * u;  // rounded corner
+                            return la + (lb - la) * s;
+                        }
                         default: return lb;
                     }
                 }
@@ -7598,9 +7756,6 @@ void SongEditor::renderNotes(ImDrawList* dl, ImVec2 origin, ImVec2 size,
                             float px = xTransBeg + (xB - xTransBeg) * u;
                             float py;
                             switch (b.style) {
-                                case EditorHoldTransition::Angle90:
-                                    py = (i == N) ? yB : yA;
-                                    break;
                                 case EditorHoldTransition::Curve: {
                                     float s = u * u * (3.f - 2.f * u);
                                     py = yA + (yB - yA) * s;
@@ -7609,6 +7764,11 @@ void SongEditor::renderNotes(ImDrawList* dl, ImVec2 origin, ImVec2 size,
                                 case EditorHoldTransition::Rhomboid:
                                     py = yA + (yB - yA) * u;
                                     break;
+                                case EditorHoldTransition::Bezier: {
+                                    float s = u * u * u;  // rounded corner
+                                    py = yA + (yB - yA) * s;
+                                    break;
+                                }
                                 default:
                                     py = yA + (yB - yA) * u;
                                     break;
@@ -7630,6 +7790,86 @@ void SongEditor::renderNotes(ImDrawList* dl, ImVec2 origin, ImVec2 size,
                     } else if (a.lane != b.lane) {
                         // Instant snap (no transitionLen): vertical connector
                         dl->AddLine(ImVec2(xB, yA), ImVec2(xB, yB), stroke, 1.5f);
+                    }
+                }
+
+                // ── Per-lane-change retime handles (selected hold only) ──────
+                // Two draggable dots per lane change:
+                //   • START dot (cyan)  — sets how long the change takes.
+                //   • END dot  (amber)  — when the change completes (the
+                //                          waypoint time itself).
+                // Shown only for the selected hold so the timeline stays
+                // readable; corner *shape* is song-wide (Note tab).
+                if (clickable && (int)ni == m_selectedNoteIdx) {
+                    EditorNote& mn = notes()[ni];
+                    const float R = 5.f;
+                    const float span = std::max(1.f, endX - noteX);
+                    auto mouseTOff = [&]() {
+                        float t = (io.MousePos.x - noteX) / span
+                                  * std::max(0.001f, duration);
+                        return std::clamp(t, 0.f, duration);
+                    };
+
+                    // Continue an in-progress drag for this note.
+                    if (m_xfDragNote == (int)ni && m_xfDragSeg >= 1
+                        && m_xfDragSeg < (int)mn.waypoints.size()) {
+                        auto& da = mn.waypoints[m_xfDragSeg - 1];
+                        auto& db = mn.waypoints[m_xfDragSeg];
+                        if (ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+                            float tcur = mouseTOff();
+                            if (m_xfDragKind == 2) {
+                                float lo = da.tOffset + 1e-3f;
+                                float hi = (m_xfDragSeg + 1 < (int)mn.waypoints.size())
+                                    ? mn.waypoints[m_xfDragSeg + 1].tOffset - 1e-3f
+                                    : duration;
+                                db.tOffset = std::clamp(tcur, lo, std::max(lo, hi));
+                                db.transitionLen = std::clamp(
+                                    db.transitionLen, 0.f, db.tOffset - da.tOffset);
+                            } else if (m_xfDragKind == 1) {
+                                float beg = std::clamp(tcur, da.tOffset, db.tOffset);
+                                db.transitionLen = std::clamp(
+                                    db.tOffset - beg, 0.f, db.tOffset - da.tOffset);
+                            }
+                            if (m_engineCached) m_engineCached->markEditorDirty();
+                        } else {
+                            m_xfDragNote = m_xfDragSeg = -1; m_xfDragKind = 0;
+                        }
+                    }
+
+                    // Draw dots; arm a new drag on press over one.
+                    for (size_t wi = 1; wi < mn.waypoints.size(); ++wi) {
+                        const auto& a = mn.waypoints[wi - 1];
+                        const auto& b = mn.waypoints[wi];
+                        if (a.lane == b.lane) continue;
+                        float yA = laneToY(a.lane), yB = laneToY(b.lane);
+                        float xB = noteX + (b.tOffset
+                                   / std::max(0.001f, duration)) * (endX - noteX);
+                        float tLen = std::clamp(b.transitionLen, 0.f,
+                                                b.tOffset - a.tOffset);
+                        float xBeg = xB - (tLen
+                                   / std::max(0.001f, duration)) * (endX - noteX);
+                        ImVec2 pEnd(xB, yB);
+                        ImVec2 pBeg(xBeg, (yA + yB) * 0.5f);
+                        bool oE = fabsf(io.MousePos.x - pEnd.x) <= R + 3
+                               && fabsf(io.MousePos.y - pEnd.y) <= R + 3;
+                        bool oB = fabsf(io.MousePos.x - pBeg.x) <= R + 3
+                               && fabsf(io.MousePos.y - pBeg.y) <= R + 3;
+                        dl->AddLine(ImVec2(xBeg, (yA + yB) * 0.5f),
+                                    ImVec2(xB, yB),
+                                    IM_COL32(255, 255, 255, 60), 1.f);
+                        dl->AddCircleFilled(pBeg, R,
+                            oB ? IM_COL32(150,235,255,255) : IM_COL32(90,200,255,235));
+                        dl->AddCircle(pBeg, R, IM_COL32(0,0,0,170), 12, 1.f);
+                        dl->AddCircleFilled(pEnd, R,
+                            oE ? IM_COL32(255,232,130,255) : IM_COL32(255,200,60,235));
+                        dl->AddCircle(pEnd, R, IM_COL32(0,0,0,170), 12, 1.f);
+                        if (m_xfDragNote < 0
+                            && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+                            if (oE) { m_xfDragNote=(int)ni; m_xfDragSeg=(int)wi;
+                                      m_xfDragKind=2; }
+                            else if (oB) { m_xfDragNote=(int)ni; m_xfDragSeg=(int)wi;
+                                           m_xfDragKind=1; }
+                        }
                     }
                 }
             } else if (endTrk == note.track) {
@@ -7661,14 +7901,16 @@ void SongEditor::renderNotes(ImDrawList* dl, ImVec2 origin, ImVec2 size,
                     if (tOff >= tEnd)   return endY;
                     float u = (tOff - tBegin) / tLen;
                     switch (note.transition) {
-                        case EditorHoldTransition::Angle90:
-                            return endY;
                         case EditorHoldTransition::Curve: {
                             float s = u * u * (3.f - 2.f * u);
                             return startY + dY * s;
                         }
                         case EditorHoldTransition::Rhomboid:
                             return startY + dY * u;
+                        case EditorHoldTransition::Bezier: {
+                            float s = u * u * u;  // rounded corner
+                            return startY + dY * s;
+                        }
                         default:
                             return startY;
                     }
@@ -7750,9 +7992,7 @@ void SongEditor::renderNotes(ImDrawList* dl, ImVec2 origin, ImVec2 size,
                     else if (sp >= tEnd)   ty = endCenterY;
                     else {
                         float u = (sp - tBegin) / tLen;
-                        if (note.transition == EditorHoldTransition::Angle90)
-                            ty = endCenterY;
-                        else if (note.transition == EditorHoldTransition::Curve) {
+                        if (note.transition == EditorHoldTransition::Curve) {
                             float s = u * u * (3.f - 2.f * u);
                             ty = centerY + dY * s;
                         } else {

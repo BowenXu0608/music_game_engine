@@ -38,7 +38,7 @@ this mode.
 Append a lane-change waypoint to an existing Hold. Identify the hold by
 its start time; `at_time` is the absolute time along the body; `lane` is
 the target lane at that point; `style` is one of `"straight"`,
-`"angle90"`, `"curve"`, `"rhomboid"`. No-op if no Hold matches or
+`"curve"`, `"rhomboid"`, `"bezier"`. No-op if no Hold matches or
 `at_time` falls outside the body.
 ```
 {"op":"add_hold_waypoint", "note_time":4.0, "at_time":4.8,

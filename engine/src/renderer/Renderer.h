@@ -71,12 +71,24 @@ public:
     uint32_t width()  const { return m_swapchain.extent().width; }
     uint32_t height() const { return m_swapchain.extent().height; }
 
+    // Constrain rendering to a centered sub-rect (letterbox). Used by the
+    // desktop test-game to render at the author's chosen aspect ratio; the
+    // black scene clear outside the scissor becomes the letterbox bars.
+    void setViewportOverride(int x, int y, int w, int h) {
+        m_vpOverride = true;
+        m_vpX = x; m_vpY = y; m_vpW = w; m_vpH = h;
+    }
+    void clearViewportOverride() { m_vpOverride = false; }
+
     VkRenderPass swapchainRenderPass() const { return m_renderPass.handle(); }
     VkImageView sceneImageView() const { return m_postProcess.sceneView(); }
 
 private:
     void recordFrame(uint32_t imageIndex);
     void setViewportScissor(VkCommandBuffer cmd);
+
+    bool m_vpOverride = false;
+    int  m_vpX = 0, m_vpY = 0, m_vpW = 0, m_vpH = 0;
 
     VulkanContext    m_ctx;
     Swapchain        m_swapchain;

@@ -73,6 +73,10 @@ struct GameModeConfig {
     // (centered). Higher = lanes occupy more of the screen.
     float playfieldWidthPct = 0.9f;
 
+    // 2D drop: how tall the highway appears (camera pitch/height blend).
+    // Higher = lower, flatter camera → taller highway filling the screen.
+    float playfieldHeightPct = 0.85f;
+
     // 3D DropNotes: sky judgment line height (world Y).
     // Arc height [0..1] maps from ground (GROUND_Y) to this value.
     float skyHeight = 1.f;

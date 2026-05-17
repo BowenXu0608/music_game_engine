@@ -77,14 +77,13 @@ void BandoriRenderer::onInit(Renderer& renderer, const ChartData& chart,
         m_chartMaterials[md.slot] = m;
     }
 
-    // Apply camera config
+    // Apply camera config (eye/target are baked baselines, not from config —
+    // see onResize; cameraDistance/FovDeg are relative knobs over that).
     if (config) {
-        m_camEye    = {config->cameraEye[0], config->cameraEye[1], config->cameraEye[2]};
-        m_camTarget = {config->cameraTarget[0], config->cameraTarget[1], config->cameraTarget[2]};
-        m_camFov    = config->cameraFov;
         m_camDistance = config->cameraDistance;
         m_camFovDeg   = config->cameraFovDeg;
         m_playfieldWidthPct = config->playfieldWidthPct;
+        m_playfieldHeightPct = config->playfieldHeightPct;
         m_laneCount = config->trackCount;
     }
 
@@ -108,14 +107,24 @@ void BandoriRenderer::onResize(uint32_t w, uint32_t h) {
 
     float aspect = h > 0 ? static_cast<float>(w) / h : 1.f;
 
-    // Camera from config (user-adjustable in editor). m_camEye/m_camFov are
-    // the baseline; the author's relative knobs dolly + override FOV.
-    glm::vec3 camOffset = m_camEye - m_camTarget;
-    glm::vec3 camEye    = m_camTarget + camOffset * std::max(m_camDistance, 0.01f);
-    float     camFov    = m_camFovDeg > 0.f ? m_camFovDeg : m_camFov;
+    // Baseline framing blended by playfieldHeightPct: low value = higher,
+    // steeper camera (short highway in mid-screen); high value = low,
+    // shallow-pitch camera looking far down the track (tall BanG Dream-style
+    // trapezoid filling the screen). cameraDistance/cameraFovDeg are the
+    // author's relative knobs applied on top.
+    float hN = (std::clamp(m_playfieldHeightPct, 0.3f, 1.f) - 0.3f) / 0.7f;
+    const glm::vec3 baseEye{0.f,
+                            glm::mix(7.0f, 1.5f, hN),
+                            glm::mix(11.0f, 6.0f, hN)};
+    const glm::vec3 baseTarget{0.f, 0.0f, glm::mix(-22.0f, -55.0f, hN)};
+    const float     baseFov = 55.f;
+
+    glm::vec3 camOffset = baseEye - baseTarget;
+    glm::vec3 camEye    = baseTarget + camOffset * std::max(m_camDistance, 0.01f);
+    float     camFov    = m_camFovDeg > 0.f ? m_camFovDeg : baseFov;
 
     Camera persp = Camera::makePerspective(camFov, aspect, 0.1f, 300.f);
-    persp.lookAt(camEye, m_camTarget);
+    persp.lookAt(camEye, baseTarget);
     m_perspVP  = persp.viewProjection();
     m_proj11y  = std::abs(persp.projection()[1][1]);
 

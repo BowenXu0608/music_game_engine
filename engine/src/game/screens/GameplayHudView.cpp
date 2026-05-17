@@ -6,9 +6,11 @@
 #include <cstdio>
 #include <cfloat>
 
-void GameplayHudView::render(ImVec2 displaySize, IPlayerEngine& engine) {
+void GameplayHudView::render(ImVec2 displaySize, IPlayerEngine& engine,
+                             ImVec2 origin) {
     ImDrawList* dl = ImGui::GetForegroundDrawList();
     float sw = displaySize.x, sh = displaySize.y;
+    float ox = origin.x, oy = origin.y;
     const float ui = m_uiScale;
 
     const GameModeConfig& cfg = engine.gameplayConfig();
@@ -16,8 +18,8 @@ void GameplayHudView::render(ImVec2 displaySize, IPlayerEngine& engine) {
 
     auto drawHud = [&](const HudTextConfig& h, const char* text) {
         if (!text || text[0] == '\0') return;
-        float fx = sw * h.pos[0];
-        float fy = sh * h.pos[1];
+        float fx = ox + sw * h.pos[0];
+        float fy = oy + sh * h.pos[1];
         float fs = h.fontSize * h.scale * ui;
         ImU32 col = IM_COL32((int)(h.color[0]*255), (int)(h.color[1]*255),
                              (int)(h.color[2]*255), (int)(h.color[3]*255));
@@ -43,7 +45,7 @@ void GameplayHudView::render(ImVec2 displaySize, IPlayerEngine& engine) {
         float fs = sh_.fontSize * sh_.scale * ui;
         ImFont* font = ImGui::GetFont();
         ImVec2 textSz = font->CalcTextSizeA(fs, FLT_MAX, 0.f, scoreBuf);
-        float fx = sw * sh_.pos[0], fy = sh * sh_.pos[1];
+        float fx = ox + sw * sh_.pos[0], fy = oy + sh * sh_.pos[1];
         float pad = 8.f * ui;
         dl->AddRectFilled(
             ImVec2(fx - textSz.x / 2 - pad, fy - textSz.y / 2 - pad / 2),
@@ -69,7 +71,7 @@ void GameplayHudView::render(ImVec2 displaySize, IPlayerEngine& engine) {
         float fs = ch.fontSize * ch.scale * ui;
         ImFont* font = ImGui::GetFont();
         ImVec2 textSz = font->CalcTextSizeA(fs, FLT_MAX, 0.f, comboBuf);
-        float fx = sw * ch.pos[0], fy = sh * ch.pos[1];
+        float fx = ox + sw * ch.pos[0], fy = oy + sh * ch.pos[1];
         float pad = 10.f * ui;
         float panelH = textSz.y + ch.fontSize * ch.scale * ui * 0.5f + pad * 2;
         dl->AddRectFilled(
@@ -90,8 +92,8 @@ void GameplayHudView::render(ImVec2 displaySize, IPlayerEngine& engine) {
     {
         float btnSize = 44.f * ui;
         float margin  = 16.f * ui;
-        ImVec2 tl(margin, margin);
-        ImVec2 br(margin + btnSize, margin + btnSize);
+        ImVec2 tl(ox + margin, oy + margin);
+        ImVec2 br(ox + margin + btnSize, oy + margin + btnSize);
 
         ImGui::SetNextWindowPos(tl);
         ImGui::SetNextWindowSize(ImVec2(btnSize, btnSize));

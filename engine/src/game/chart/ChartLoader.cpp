@@ -242,9 +242,10 @@ ChartData ChartLoader::loadUnified(const std::string& path) {
                 if (!endLaneStr.empty()) {
                     hd.endLaneX = std::stof(endLaneStr);
                     std::string tStr = getVal("transition");
-                    if      (tStr == "angle90")  hd.transition = HoldTransition::Angle90;
+                    if      (tStr == "angle90")  hd.transition = HoldTransition::Bezier; // retired → migrate
                     else if (tStr == "curve")    hd.transition = HoldTransition::Curve;
                     else if (tStr == "rhomboid") hd.transition = HoldTransition::Rhomboid;
+                    else if (tStr == "bezier")   hd.transition = HoldTransition::Bezier;
                     else                         hd.transition = HoldTransition::Straight;
                     hd.transitionLen = getFloat("transitionLen");
                     std::string tsStr = getVal("transitionStart");
@@ -288,15 +289,20 @@ ChartData ChartLoader::loadUnified(const std::string& path) {
                             hw.lane          = (int)getF("lane", 0.f);
                             hw.transitionLen = getF("len", 0.f);
                             std::string st = getS("style");
-                            if      (st == "angle90")  hw.style = HoldTransition::Angle90;
+                            if      (st == "angle90")  hw.style = HoldTransition::Bezier; // retired → migrate
                             else if (st == "rhomboid") hw.style = HoldTransition::Rhomboid;
                             else if (st == "straight") hw.style = HoldTransition::Straight;
+                            else if (st == "bezier")   hw.style = HoldTransition::Bezier;
                             else                       hw.style = HoldTransition::Curve;
                             hd.waypoints.push_back(hw);
                             p = e + 1;
                         }
                         if (!hd.waypoints.empty()) {
-                            hd.endLaneX = static_cast<float>(hd.waypoints.back().lane);
+                            // Repair charts saved with duplicate / backward
+                            // waypoint times (older drag-record gesture bug):
+                            // a non-forward path renders as a folded/wrong
+                            // ribbon. sanitize also sets endLaneX.
+                            sanitizeHoldWaypoints(hd);
                         }
                     }
                 }

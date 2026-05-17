@@ -199,6 +199,7 @@ void MusicSelectionView::load(const std::string& projectPath) {
                         song.gameMode.cameraDistance = gm.value("cameraDistance", 1.f);
                         song.gameMode.cameraFovDeg   = gm.value("cameraFovDeg", 0.f);
                         song.gameMode.playfieldWidthPct = gm.value("playfieldWidthPct", 0.9f);
+                        song.gameMode.playfieldHeightPct = gm.value("playfieldHeightPct", 0.85f);
 
                         song.gameMode.backgroundImage = gm.value("backgroundImage", "");
                         song.gameMode.skyHeight = gm.value("skyHeight", 1.f);
@@ -303,6 +304,7 @@ void MusicSelectionView::save() {
             gmJ["cameraDistance"] = song.gameMode.cameraDistance;
             gmJ["cameraFovDeg"]   = song.gameMode.cameraFovDeg;
             gmJ["playfieldWidthPct"] = song.gameMode.playfieldWidthPct;
+            gmJ["playfieldHeightPct"] = song.gameMode.playfieldHeightPct;
 
             gmJ["backgroundImage"] = toUtf8(song.gameMode.backgroundImage);
             gmJ["skyHeight"] = song.gameMode.skyHeight;

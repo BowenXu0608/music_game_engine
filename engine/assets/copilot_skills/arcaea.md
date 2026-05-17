@@ -91,7 +91,7 @@ Remove every ArcTap whose `time` is in `[from, to]`.
 Arcaea ground holds support the same multi-waypoint path as other drop
 modes. See `_common.md`-adjacent references below for the three ops:
 `add_hold_waypoint`, `remove_hold_waypoint`, `set_hold_transition`.
-Style codes: `"straight"`, `"angle90"`, `"curve"`, `"rhomboid"`.
+Style codes: `"straight"`, `"curve"`, `"rhomboid"`, `"bezier"`.
 ```
 {"op":"add_hold_waypoint", "note_time":4.0, "at_time":4.8,
  "lane":3, "style":"curve"}

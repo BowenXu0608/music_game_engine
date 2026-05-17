@@ -1991,3 +1991,191 @@ The gameplay camera was effectively fixed. 2D drop (Bandori) already read `camer
 1. **The "fix the camera" request was mostly NOT a camera fix.** The narrow 2D highway came from a hardcoded `desiredPx = w*0.30f` plus a per-frame auto-scale that recomputes lane spacing to *always hit that target regardless of the camera VP* — so the camera Distance/FOV knobs are **horizontally neutralized for Bandori** (dolly in → lanes shrink to stay at the target %). Diagnosing the actual draw path (vs. assuming the obvious knob) is what found this; the real lever for 2D apparent size is `playfieldWidthPct`, with camera FOV only affecting perspective steepness/vanishing point.
 2. **The SongEditor scene preview duplicates renderer layout math.** The `* 0.30f` highway-width constant existed in *two* independent places (`BandoriRenderer::onResize` AND the SongEditor preview block). A renderer-only fix looked correct but "didn't show in preview." Any drop-mode layout/camera change must be applied to **both** sites or the preview silently diverges from gameplay.
 3. **Sentinel-default new fields = free backward compatibility.** `cameraFovDeg=0`/`cameraDistance=1` "inherit baseline" meant existing charts (and the already-serialized legacy `cameraFov:55`) render byte-identical with no migration pass.
+
+## 2026-05-15 (later 3) — Tall highway, adjustable playfield height, SongEditor preview ratio, test-game letterbox (branch `pbr-material-system`)
+
+Four follow-ups to the camera/playfield work above, each driven by a user observation against a BanG Dream reference screenshot.
+
+### A. Baked Bandori baseline → tall highway
+
+**Problem:** even at 90% width the 2D highway was a short trapezoid floating mid-screen, not the reference's tall runway. Root cause: the test chart had a steep camera serialized (`cameraEye [0,12,14]` → `cameraTarget [0,0,-20]`, the Bandori-tuned `GameModeConfig` defaults); Bandori read eye/target from config, so every chart that ever saved inherited that steep framing.
+
+**Fix:** made Bandori symmetric with Arcaea — it now uses a **baked baseline** and ignores the legacy config eye/target entirely (the `m_camEye/m_camTarget/m_camFov` members + the `config->cameraEye/Target/Fov` reads were deleted; `m_camDistance/m_camFovDeg/m_playfield*` kept). All existing 2D charts get the tall look with **no data migration**. Legacy `cameraEye/Target/Fov` remain in the struct/JSON only for compat (now vestigial for both drop renderers).
+
+### B. Playfield Height made adjustable
+
+**Problem:** the new baseline was itself a hardcoded constant ("are you set a fixed height? cannot it become adjustable?").
+
+**Fix:** new `GameModeConfig.playfieldHeightPct` (default `0.85`, 2D only), serialized in `MusicSelectionView`. Instead of exposing raw eye/target, one scalar blends the baseline framing: `hN = (clamp(pct,0.3,1)-0.3)/0.7`, then `baseEye = {0, mix(7.0,1.5,hN), mix(11.0,6.0,hN)}`, `baseTarget = {0,0, mix(-22,-55,hN)}`. Low % = high steep camera (short, old look); high % = low flat camera far down the track (tall). Editor gained a **Playfield Height** slider (30–100%, ×100 display proxy) beside Playfield Width. The blend formula is duplicated verbatim in `BandoriRenderer::onResize` and the SongEditor preview block (dual-site).
+
+### C. SongEditor scene preview gained the aspect-ratio control
+
+`previewAspect::renderControls` + `fitAndLetterbox` (shared `Engine::PreviewAspect` state) already existed on StartScreen + MusicSelection editor previews; SongEditor's scene preview was the only one stretching to the raw panel. Added the controls row + `fitAndLetterbox` into the `renderSceneView` caller block (`SongEditor.cpp`, `#include "ui/PreviewAspect.h"`); `renderSceneView` derives camera aspect from the passed size so the highway now reshapes to the chosen device ratio with letterbox bars. All three editor previews now share one ratio.
+
+### D. Test game letterboxed to the chosen ratio (HUD inside)
+
+**Goal:** the actual running test game should show the same aspect ratio as the previews; window stays, content letterboxes; unless the user resizes, the ratio is preserved.
+
+**Architecture discovered:** gameplay renders into an **offscreen** scene framebuffer cleared to black `(0,0,0,1)`, then composited to the window via `ImGui::Image(sceneTex, displaySz)` in `renderGameplayHUD`. So letterbox = constrain the **scene-pass scissor** to a centered sub-rect; the black clear outside it *is* the bars, baked into the scene texture. No window resize, no Vulkan viewport surgery beyond scissor/viewport.
+
+**Decisions (asked the user — genuine A/B fork):** (1) letterbox-in-window over OS-window-resize (robust, matches previews, adapts on resize); (2) HUD confined to the letterbox too.
+
+**Implementation:**
+- `Renderer`: `setViewportOverride(x,y,w,h)` / `clearViewportOverride()`; `setViewportScissor` uses the sub-rect (both VkViewport and VkScissor) when set, else full extent.
+- `Engine::gameplayViewportPx(x,y,w,h)`: letterbox `m_previewAspect` into the swapchain extent, **same math as `previewAspect::fitAndLetterbox`** → running game ≙ editor previews.
+- `Engine::render`: set the override only while `m_currentLayer == GamePlay` (before `beginFrame`, since that applies the scene-pass scissor); clear otherwise → editor untouched, native ratio = full screen (no bars, no behavior change).
+- Camera aspect: `setMode` (after `onInit`, which internally `onResize`d at full extent) and the framebuffer-resize path now feed the active mode the **sub-rect** size, so the playfield is shaped for the ratio (not distorted) and re-fits on window resize. Editor `m_previewMode` path unchanged.
+- HUD: `GameplayHudView::render` gained `ImVec2 origin = (0,0)` (default keeps Android — already device-shaped — and all other callers compiling unchanged); all score/combo/stop-button positions offset by `origin`; `Engine::renderGameplayHUD` passes the letterbox `{origin,size}`. Pause/Results stay full-window (modal, by design).
+
+### Lessons
+
+1. **Trace the composite path before deciding the letterbox mechanism.** The instinct was Vulkan viewport gymnastics or an OS window resize. Discovering the scene is offscreen→ImGui-composited reduced it to "scissor the scene pass; the existing black clear is the bars" — far less code and risk.
+2. **Default arguments are the cheap seam for player/editor divergence.** `origin = (0,0)` on the view render signature let desktop letterbox the HUD without touching the Android adapter or other call sites.
+3. **A hardcoded "good default" still invites the next 'can it be adjustable?'** Each fixed constant (0.30 width, then the baked tall baseline) drew the same request. Shipping the adjustable knob with a sensible default the first time would have collapsed three round-trips into one.
+
+
+## 2026-05-17 — Hold-note authoring overhaul: monotonic gesture, song-wide corners, timeline retime handles, Bezier, Angle90 removed (branch `pbr-material-system`)
+
+A single multi-step session, each step driven by the user testing a freshly
+drawn cross-lane Hold against the 2D-Drop preview and reporting what was wrong.
+Two renderers of the same hold exist and must agree: the gameplay
+`BandoriRenderer` (via `evalHoldLaneAt` in `ChartTypes.h`) and the **separate
+inline copy** in the SongEditor 2D-Drop scene preview (`SongEditor.cpp`
+~3626–3690). Most of the visible bugs were the preview's naive copy diverging
+from the shared evaluator.
+
+### 1. Backward / duplicate waypoint times → folded "wedge" ribbon
+
+**Problem:** a hold drawn lane 9→10→9→8 rendered as a giant distorted green
+wedge. `Aa_drop2d_hard.json` stored waypoints with **duplicate `tOffset`**
+(e.g. `[0, 1.32, 1.32, 2.64, 3.31]`). `evalHoldLaneAt` assumes strictly
+increasing tOffsets, returns at the first matching segment, and silently
+drops the later lane → the drawn apex never renders.
+
+**Root cause:** the drag-record gesture pushed a waypoint on every lane change
+using the **marker-snapped** time. Sweeping lanes faster than the snap grid, or
+dragging right→left, produced equal/backward tOffsets. The original code forced
+`tOff = 0.0001` (→ duplicates); the bug was structural.
+
+**Fix:** added `sanitizeHoldWaypoints(HoldData&)` to `ChartTypes.h` — nudges
+each waypoint ≥1 ms past its predecessor (every drawn lane survives as a fast
+forward ramp), clamps to `duration`, collapses overflow keeping the last lane,
+and re-derives `endLaneX`. Wired in at three choke points: `ChartLoader.cpp`
+(repairs already-saved charts on load — fixes gameplay **and** the editor since
+SongEditor loads via ChartLoader; the file self-heals on the next autosave),
+the editor `EditorNote→HoldData` conversion (preview/export), and the gesture
+commit safety net.
+
+### 2. Editor 2D-Drop preview drew diagonal smears, not steps
+
+**Problem:** even with clean data the preview still showed a wedge while the
+editor *timeline* (the green stepped bars) was correct.
+
+**Root cause:** the preview's inline body sampled **uniformly**
+(`tOff = i/N·duration`, N=20, ~0.17 s steps). With instant (`len=0`)
+transitions `laneAt` is a step function whose step windows are ~1 ms wide;
+uniform sampling never lands inside them, so it connected lane 8→10 with one
+long diagonal quad. `BandoriRenderer` doesn't have this bug because it anchors
+samples at every waypoint boundary.
+
+**Fix:** the preview now builds its sample list as the uniform grid **plus an
+anchor at every waypoint and 1 ms before it**. The pre-corner sample pins the
+previous lane so an instant change renders as a crisp near-vertical step —
+mirroring how `BandoriRenderer` anchors its ribbon.
+
+### 3. Waypoint times decoupled from the marker grid + tail rewrite
+
+**Problem:** a hold drawn lane 5 through several lanes "couldn't change in the
+correct place, only left a corner at the end."
+
+**Root cause:** `snappedTime = snapToMarker(rawTime)` is far too coarse for a
+freehand drag. Between two markers every crossing collapsed to the same time;
+the monotonic guard then *discarded* them, leaving 1–2 waypoints, and the
+commit step `last.tOffset = dur` stretched the final lane change to the hold's
+end → "stay at start, corner once at the end."
+
+**Fix:** the hold's **start/end still snap to markers** (beat alignment) but
+each lane-crossing waypoint now uses the **raw, unsnapped cursor time**. Raw
+time has full resolution and rises monotonically while dragging forward, so
+every change is recorded at its true sub-marker place; a right→left drag yields
+a smaller raw time and is ignored (never folds back). The commit "extend to
+tail" was rewritten to **append a same-lane waypoint at `dur`** instead of
+moving the last change's tOffset (moving it re-created the end-corner bug for
+the final segment).
+
+### 4. Wrong-direction drag → cancel with a dead zone
+
+Per the user: a backward drag should *cancel* the in-progress hold, not just be
+ignored, with a dead zone so jitter is tolerated. Added `m_holdMaxRawOff`
+(furthest-forward offset reached this drag). Each frame, if the cursor falls
+**> 16 px** (converted to seconds via `m_timelineZoom`, so it feels the same at
+any zoom) behind the furthest point reached, the draft is discarded and a
+status message shown. Small backward wobble within the dead zone stays
+ignored.
+
+### 5. Corner style is now one song-wide setting
+
+Per the user: the corner shape must be uniform per song, set in the Note tab
+like materials/audio — not per-segment. The Note-tab "Corner Style" combo now
+**auto-applies to every hold** on change via new
+`SongEditor::applySongHoldCornerStyle()` (rewrites legacy `transition` + every
+waypoint `style`); the separate "Apply to All Holds" button was removed. On
+chart load the song adopts the first hold's style (combo reflects the song)
+then forces all holds uniform. The **per-segment style combo was removed from
+the Note Properties popup** (it contradicted "same shape in one song"); the
+popup keeps the per-segment duration slider as a numeric fallback.
+
+### 6. Timeline transition retime handles (selected hold)
+
+Per the user: each lane change should have draggable start/end dots on the
+track. When a hold is selected (None tool), each lane change now shows two
+dots in the timeline body: a **cyan START dot** (drag to set `transitionLen` —
+how long the change takes) and an **amber END dot** (drag to move the
+waypoint's `tOffset` — when the change completes, clamped strictly between its
+neighbours so the path stays monotonic). New drag state `m_xfDragNote /
+m_xfDragSeg / m_xfDragKind`. No conflict with the recording gesture: handles
+require `m_noteTool == None` while recording requires the Hold tool — mutually
+exclusive. Edits call `markEditorDirty()` so they autosave and the preview
+updates live.
+
+### 7. Bezier corner added; 8. Angle90 deleted
+
+Added `Bezier` to `HoldTransition`/`EditorHoldTransition` — a **rounded
+corner**, cubic ease-in (`s=u³`, Bézier control `[s,s,s,e]`): holds the old
+lane, then sweeps smoothly into the new one near the change's end (smooth
+counterpart to the old hard 90° step; distinct from Curve's symmetric
+smoothstep). Wired into every path so all renderers agree: `evalHoldLaneAt` +
+legacy eval, the preview inline `laneAt`, tap-to-hold hit-test, both
+timeline-draw paths, chart load/save, and `ChartEditOps` (Copilot vocab).
+
+Then per the user, `Angle90` was **fully deleted** (not hidden). Both enums are
+now `{ Straight=0, Curve=2, Rhomboid=3, Bezier=4 }` — value `1` left unused so
+the cross-enum integer casts stay valid without touching every cast site.
+Every `case …::Angle90` / `== …::Angle90` removed. **Clean data migration:**
+any legacy `"angle90"` string read (ChartLoader ×2, `ChartEditOps::
+parseHoldStyle`) maps to **Bezier**, so old charts load as Bezier and rewrite
+to `"bezier"` on next save — the value disappears from data permanently and
+can never be re-selected. Copilot skill docs
+(`engine/assets/copilot_skills/{arcaea,bandori,lanota}.md`,
+`docs/ai_editor_copilot.md`) updated to list `straight/curve/rhomboid/bezier`.
+`chart_roundtrip_test.cpp` updated to feed `"angle90"` and assert it comes
+back **Bezier** (explicitly tests the migration) — `ChartRoundtripTest` PASS.
+
+### Lessons
+
+1. **A duplicated renderer is a latent divergence.** The SongEditor preview
+   re-implements `evalHoldLaneAt` instead of calling it. Every hold fix had to
+   be applied to both, and the preview's inferior sampling was the actual
+   user-visible bug twice. Worth collapsing onto the shared evaluator someday.
+2. **Snapping the wrong quantity.** Beat-snapping the *whole* gesture (incl.
+   per-waypoint times) forced an impossible trade-off (duplicates vs. dropped
+   lanes). Snap only what needs the grid (start/end); keep authoring detail at
+   raw resolution.
+3. **"Hide it" vs "delete it" are different asks.** First pass hid Angle90 and
+   migrated to Curve; the user wanted it gone *and* migrated to Bezier. Full
+   deletion meant enum surgery + a data-migration path at every string-parse
+   site + test + doc updates — record the migration target, not just the
+   removal.
+4. **Reproduce, then read the draw path.** The "wedge" was diagnosed by
+   dumping the actual chart JSON (duplicate tOffsets) and tracing both
+   evaluators — not by guessing at the camera/material work on the branch.

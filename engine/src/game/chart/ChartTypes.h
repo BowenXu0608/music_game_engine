@@ -28,11 +28,14 @@ struct TapData  {
 };
 
 // Lane-change transition style for cross-lane Hold notes.
-// Straight : no lane change (endLaneX == laneX).
-// Angle90  : body stays at laneX, snaps to endLaneX over the last transitionLen seconds.
+// Straight : linear slide from laneX to endLaneX over transitionLen seconds.
 // Curve    : smoothstep from laneX to endLaneX over the last transitionLen seconds.
 // Rhomboid : diamond-shaped body spanning both lanes across the last transitionLen seconds.
-enum class HoldTransition { Straight = 0, Angle90 = 1, Curve = 2, Rhomboid = 3 };
+// Bezier   : rounded corner — cubic ease-in: holds the old lane, then
+//            sweeps smoothly into the new one near the change's end.
+// (The old "Angle90" hard step was removed; charts using it migrate to Bezier.)
+// Value 1 is intentionally left unused so the remaining values stay stable.
+enum class HoldTransition { Straight = 0, Curve = 2, Rhomboid = 3, Bezier = 4 };
 
 // Hold sample point: a checkpoint inside a Hold note. Players do NOT tap these —
 // they just need to keep holding. Each passed sample awards slide-tick combo/score.
@@ -107,13 +110,17 @@ inline float evalHoldLaneLegacy_(const HoldData& h, float tOffset) {
     if (tOffset >= tEnd || tLen <= 0.f) return end;
     const float u = (tOffset - tBegin) / tLen;
     switch (h.transition) {
-        case HoldTransition::Angle90: return end;
         case HoldTransition::Curve: {
             const float s = u * u * (3.f - 2.f * u);
             return start + (end - start) * s;
         }
         case HoldTransition::Rhomboid:
             return start + (end - start) * u;
+        case HoldTransition::Bezier: {
+            // Cubic ease-in (Bézier ctrl [s,s,s,e]): rounded late corner.
+            const float s = u * u * u;
+            return start + (end - start) * s;
+        }
         default: return start;
     }
 }
@@ -147,14 +154,16 @@ inline float evalHoldLaneAt(const HoldData& h, float tOffset) {
         const float la = static_cast<float>(a.lane);
         const float lb = static_cast<float>(b.lane);
         switch (b.style) {
-            case HoldTransition::Angle90:
-                return lb;
             case HoldTransition::Curve: {
                 const float s = u * u * (3.f - 2.f * u);
                 return la + (lb - la) * s;
             }
             case HoldTransition::Rhomboid:
                 return la + (lb - la) * u;
+            case HoldTransition::Bezier: {
+                const float s = u * u * u;   // cubic ease-in (rounded corner)
+                return la + (lb - la) * s;
+            }
             case HoldTransition::Straight:
             default:
                 return lb;
@@ -177,6 +186,45 @@ inline int holdActiveSegment(const HoldData& h, float tOffset) {
             return static_cast<int>(i);
     }
     return -1;
+}
+
+// Enforce a strictly forward-in-time waypoint path.
+//
+// A Hold is drag-recorded by sweeping the cursor down the timeline; each
+// lane crossing pushes a waypoint at the cursor's *snapped* time. Two
+// problems produce a broken path:
+//   1. Sweeping lanes faster than the snap grid lands two crossings on the
+//      same grid point  → duplicate tOffset.
+//   2. Dragging the cursor right→left (backward in song time) → an
+//      out-of-order (smaller) tOffset.
+// Either makes evalHoldLaneAt return at the first matching segment and
+// silently drop every later lane, so the rendered ribbon no longer matches
+// the drawn path — and a backward drag visually folds the hold back on
+// itself. Nudge each waypoint at least kEps past its predecessor so every
+// drawn lane survives as a fast forward ramp; the hold can never run back.
+inline void sanitizeHoldWaypoints(HoldData& h) {
+    if (h.waypoints.size() < 2) return;
+    constexpr float kEps = 1e-3f;                       // 1 ms min spacing
+    auto& wp = h.waypoints;
+    wp.front().tOffset = std::max(0.f, wp.front().tOffset);
+    for (size_t i = 1; i < wp.size(); ++i) {
+        const float lo = wp[i - 1].tOffset + kEps;
+        if (wp[i].tOffset < lo) wp[i].tOffset = lo;
+    }
+    // If the nudges spilled past the hold's tail, collapse the overflow:
+    // clamp to `duration` and let the last drawn lane win at that instant
+    // so the body still ends exactly where the author released.
+    if (h.duration > 0.f) {
+        for (auto& w : wp) w.tOffset = std::min(w.tOffset, h.duration);
+        for (size_t i = wp.size(); i-- > 1; ) {
+            if (wp[i].tOffset <= wp[i - 1].tOffset) {
+                wp[i - 1].lane  = wp[i].lane;
+                wp[i - 1].style = wp[i].style;
+                wp.erase(wp.begin() + static_cast<long>(i));
+            }
+        }
+    }
+    h.endLaneX = static_cast<float>(wp.back().lane);
 }
 
 struct FlickData{

@@ -8,7 +8,11 @@ class IPlayerEngine;
 // IPlayerEngine each frame.
 class GameplayHudView {
 public:
-    void render(ImVec2 displaySize, IPlayerEngine& engine);
+    // origin/displaySize describe the letterboxed scene rect. Desktop passes
+    // the centered sub-rect so the HUD sits inside the chosen aspect ratio;
+    // Android passes the default (full screen, already device-shaped).
+    void render(ImVec2 displaySize, IPlayerEngine& engine,
+                ImVec2 origin = ImVec2(0.f, 0.f));
 
     // Multiplied into fontSize and panel padding so the HUD scales with
     // device DPI on Android (1.0 on desktop, ~2.6 on a 420dpi phone).

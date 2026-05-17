@@ -345,8 +345,17 @@ void Engine::mainLoop() {
         if (m_framebufferResized) {
             m_framebufferResized = false;
             m_renderer.onResize(m_window);
-            if (m_activeMode)
-                m_activeMode->onResize(m_renderer.width(), m_renderer.height());
+            if (m_activeMode) {
+                if (m_currentLayer == EditorLayer::GamePlay) {
+                    int vx, vy, vw, vh;
+                    gameplayViewportPx(vx, vy, vw, vh);
+                    m_activeMode->onResize(static_cast<uint32_t>(vw),
+                                           static_cast<uint32_t>(vh));
+                } else {
+                    m_activeMode->onResize(m_renderer.width(),
+                                           m_renderer.height());
+                }
+            }
         }
 
         float dt = m_clock.tick();
@@ -513,7 +522,36 @@ void Engine::update(float dt) {
     }
 }
 
+void Engine::gameplayViewportPx(int& x, int& y, int& w, int& h) const {
+    int sw = static_cast<int>(m_renderer.width());
+    int sh = static_cast<int>(m_renderer.height());
+    int aw = m_previewAspect.w > 0 ? m_previewAspect.w : 16;
+    int ah = m_previewAspect.h > 0 ? m_previewAspect.h : 9;
+    if (ah > aw) ah = aw;                       // landscape clamp (mirror)
+    float ratio = static_cast<float>(aw) / static_cast<float>(ah);
+
+    float fitW = static_cast<float>(sw);
+    float fitH = fitW / ratio;
+    if (fitH > sh) { fitH = static_cast<float>(sh); fitW = fitH * ratio; }
+
+    w = static_cast<int>(fitW);
+    h = static_cast<int>(fitH);
+    x = (sw - w) / 2;
+    y = (sh - h) / 2;
+}
+
 void Engine::render() {
+    // Letterbox the live scene to the author's chosen aspect ratio while the
+    // test game is actually playing. Must be set before beginFrame() — that
+    // is where the scene-pass viewport/scissor is first applied.
+    if (m_currentLayer == EditorLayer::GamePlay) {
+        int vx, vy, vw, vh;
+        gameplayViewportPx(vx, vy, vw, vh);
+        m_renderer.setViewportOverride(vx, vy, vw, vh);
+    } else {
+        m_renderer.clearViewportOverride();
+    }
+
     if (!m_renderer.beginFrame()) {
         m_renderer.onResize(m_window);
         return;
@@ -666,6 +704,14 @@ void Engine::setMode(GameModeRenderer* renderer, const ChartData& chart,
     m_activeMode.reset(renderer);
     m_activeMode->setMaterialLibrary(&m_materialLibrary);
     m_activeMode->onInit(m_renderer, chart, config);
+    // onInit's internal onResize used the full window; re-fit to the
+    // letterboxed scene rect so the camera aspect matches the chosen ratio.
+    {
+        int vx, vy, vw, vh;
+        gameplayViewportPx(vx, vy, vw, vh);
+        m_activeMode->onResize(static_cast<uint32_t>(vw),
+                               static_cast<uint32_t>(vh));
+    }
     m_hitDetector.init(chart);
     if (config) m_hitDetector.setTrackCount(config->trackCount);
     m_judgment.reset();
@@ -986,7 +1032,12 @@ void Engine::renderGameplayHUD() {
     ImGui::End();
     ImGui::PopStyleVar();
 
-    m_hudView.render(displaySz, *this);
+    // Confine the HUD to the same letterboxed rect the scene was rendered
+    // into, so score/combo sit inside the chosen aspect ratio (not on bars).
+    int vx, vy, vw, vh;
+    gameplayViewportPx(vx, vy, vw, vh);
+    m_hudView.render(ImVec2((float)vw, (float)vh), *this,
+                     ImVec2((float)vx, (float)vy));
 
     if (m_showResults) {
         renderResultsOverlay();

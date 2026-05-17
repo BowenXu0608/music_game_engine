@@ -119,7 +119,7 @@ Undo button restores snapshot
 
 | Op | Purpose |
 |---|---|
-| `add_hold_waypoint` | Append lane-change waypoint to hold matched by `note_time` (1 ms tolerance); `style` ∈ `straight/angle90/curve/rhomboid`; inserts sorted by tOffset |
+| `add_hold_waypoint` | Append lane-change waypoint to hold matched by `note_time` (1 ms tolerance); `style` ∈ `straight/curve/rhomboid/bezier`; inserts sorted by tOffset |
 | `remove_hold_waypoint` | Remove hold's waypoint matching `at_time` (1 ms tolerance) |
 | `set_hold_transition` | Bulk set transition style for holds in `[from, to]` — rewrites legacy `transition` field AND every waypoint's `style` (mirrors the "Apply to All Holds" button) |
 

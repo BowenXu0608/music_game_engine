@@ -136,7 +136,8 @@ struct DeleteSlideOp {
 // hold (matches the note whose start time equals `noteTime`); `atTime` is
 // the absolute time along the hold body at which to pin the lane change;
 // `lane` is the target integer lane at that point. `style` is one of
-// `"straight"`, `"angle90"`, `"curve"`, `"rhomboid"`.
+// `"straight"`, `"curve"`, `"rhomboid"`, `"bezier"` (legacy `"angle90"`
+// is accepted but migrated to `"bezier"`).
 // No-op if no Hold at `noteTime` or `atTime` falls outside the body.
 struct AddHoldWaypointOp {
     float       noteTime = 0.f;

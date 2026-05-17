@@ -69,18 +69,19 @@ const char* arcEaseName(float v) {
 // to Curve (the editor default).
 EditorHoldTransition parseHoldStyle(const std::string& s) {
     if (s == "straight") return EditorHoldTransition::Straight;
-    if (s == "angle90")  return EditorHoldTransition::Angle90;
+    if (s == "angle90")  return EditorHoldTransition::Bezier;  // retired → migrate
     if (s == "curve")    return EditorHoldTransition::Curve;
     if (s == "rhomboid") return EditorHoldTransition::Rhomboid;
+    if (s == "bezier")   return EditorHoldTransition::Bezier;
     return EditorHoldTransition::Curve;
 }
 
 const char* holdStyleName(EditorHoldTransition t) {
     switch (t) {
         case EditorHoldTransition::Straight: return "straight";
-        case EditorHoldTransition::Angle90:  return "angle90";
         case EditorHoldTransition::Curve:    return "curve";
         case EditorHoldTransition::Rhomboid: return "rhomboid";
+        case EditorHoldTransition::Bezier:   return "bezier";
     }
     return "curve";
 }

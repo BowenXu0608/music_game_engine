@@ -40,14 +40,11 @@ private:
 
     // Lane count (set from chart or config)
     int m_laneCount = 7;
-    // Camera settings (from config or defaults)
-    glm::vec3 m_camEye    = {0.f, 5.f, 6.f};
-    glm::vec3 m_camTarget = {0.f, -1.f, -20.f};
-    float     m_camFov    = 55.f;
-    // Author camera knobs (relative to m_camEye/m_camFov baseline).
+    // Author camera knobs (relative to the baked baseline; see onResize).
     float     m_camDistance = 1.f;   // x baseline eye-distance
     float     m_camFovDeg   = 0.f;   // 0 = baseline FOV, else degrees
     float     m_playfieldWidthPct = 0.9f;  // highway screen-width fraction
+    float     m_playfieldHeightPct = 0.85f; // highway vertical fill (0.3..1)
     float m_laneSpacing  = 1.2f;    // world units between lane centres (auto-scaled)
     static constexpr float HIT_ZONE_Z   = 0.f;
     static constexpr float APPROACH_Z   = -55.f;

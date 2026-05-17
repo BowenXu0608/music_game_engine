@@ -105,6 +105,11 @@ private:
     void update(float dt);
     void render();
 
+    // Letterbox rect (pixels) for the test-game scene: previewAspect fit
+    // into the swapchain extent, centered. Mirrors previewAspect::
+    // fitAndLetterbox so the running game matches the editor previews.
+    void gameplayViewportPx(int& x, int& y, int& w, int& h) const;
+
     void dispatchHitResult(const HitResult& hit, int lane = -1);
     void handleGestureLaneBased(const GestureEvent& evt, double songTime);
     void handleGestureArcaea(const GestureEvent& evt, double songTime);

@@ -21,7 +21,10 @@
 enum class EditorNoteType { Tap, Hold, Slide, Flick, Arc, ArcTap };
 
 // Lane-change transition style for a Hold note. Mirrors ChartTypes::HoldTransition.
-enum class EditorHoldTransition { Straight = 0, Angle90 = 1, Curve = 2, Rhomboid = 3 };
+// The editor offers Straight / Curve / Rhomboid / Bezier. The old hard
+// "Angle90" step was removed; legacy charts migrate to Bezier on load.
+// Value 1 left unused so the remaining values stay stable.
+enum class EditorHoldTransition { Straight = 0, Curve = 2, Rhomboid = 3, Bezier = 4 };
 
 // One waypoint along an authored Hold's lane path. Mirrors HoldWaypoint.
 struct EditorHoldWaypoint {
@@ -155,6 +158,10 @@ private:
     // settings for that note type — material-slot pickers, Hold-corner
     // default, plus the lane-layout knobs at the top.
     void renderNotePage(Engine* engine);
+    // Corner shape is song-wide (one setting in the Note tab). Rewrites
+    // every Hold in the current difficulty to m_defaultHoldTransition so the
+    // whole song stays consistent; called on edit and after chart load.
+    void applySongHoldCornerStyle();
     // Left-sidebar "Material" tab: project-wide material asset CRUD.
     // Defers rendering to StartScreenEditor::renderMaterials which already
     // owns the asset-library UI.
@@ -413,6 +420,20 @@ private:
     bool      m_holdDragging    = false;
     EditorNote m_holdDraft;                // the in-progress note being recorded
     int       m_holdLastTrack   = -1;      // last track sampled while dragging
+
+    // Timeline transition-handle drag (selected multi-waypoint hold only).
+    // The author grabs a small dot at a lane-change's transition START or
+    // END and drags it along the track to retime the change directly.
+    int  m_xfDragNote = -1;   // notes() index being edited (-1 = idle)
+    int  m_xfDragSeg  = -1;   // waypoint index (segment end b) being dragged
+    int  m_xfDragKind = 0;    // 1 = transition start (length), 2 = end (tOffset)
+    float     m_holdMaxRawOff   = 0.f;     // furthest-forward cursor offset
+                                           // reached this drag (seconds from
+                                           // the hold start). A hold is
+                                           // time-forward only; dragging the
+                                           // cursor back past this by more
+                                           // than a dead zone cancels the
+                                           // in-progress recording.
 
     // ── Scan Line authoring state ────────────────────────────────────────────
     // Hold tool: click-start captures head, mouse-wheel / Prev-Next navigation
