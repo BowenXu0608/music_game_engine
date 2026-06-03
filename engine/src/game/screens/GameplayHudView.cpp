@@ -1,10 +1,24 @@
 #include "GameplayHudView.h"
 #include "engine/IPlayerEngine.h"
 #include "gameplay/ScoreTracker.h"
-#include "ui/ProjectHub.h"  // full GameModeConfig + HudTextConfig
+#include "game/modes/GameModeRenderer.h"  // activeMode()->judgmentDisplays()
+#include "ui/ProjectHub.h"  // full GameModeConfig + HudTextConfig + JudgmentLabels
 #include <imgui.h>
 #include <cstdio>
 #include <cfloat>
+#include <string>
+
+namespace {
+std::string judgmentLabel(const JudgmentLabels& L, const JudgmentDisplay& d) {
+    switch (d.type) {
+        case Judgment::Perfect: return L.perfect;
+        case Judgment::Good:    return d.timingSign > 0 ? L.goodEarly : L.goodLate;
+        case Judgment::Bad:     return d.timingSign > 0 ? L.badEarly  : L.badLate;
+        case Judgment::Miss:    return L.miss;
+    }
+    return "";
+}
+} // namespace
 
 void GameplayHudView::render(ImVec2 displaySize, IPlayerEngine& engine,
                              ImVec2 origin) {
@@ -85,6 +99,44 @@ void GameplayHudView::render(ImVec2 displaySize, IPlayerEngine& engine,
         comboLabel.pos[1] += comboLabel.fontSize * comboLabel.scale / sh * 1.2f;
         comboLabel.fontSize *= 0.45f;
         drawHud(comboLabel, "COMBO");
+    }
+
+    // Floating judgment text (PERFECT / EARLY-LATE / TOO EARLY-LATE / MISS).
+    // Positioned per-lane (X from the renderer) at a configurable vertical band,
+    // rising slightly as it fades. Customizable via cfg.judgmentLabels.
+    if (cfg.judgmentLabels.enabled) {
+        if (GameModeRenderer* mode = engine.activeMode()) {
+            const JudgmentLabels& L = cfg.judgmentLabels;
+            ImFont* font = ImGui::GetFont();
+            for (const auto& d : mode->judgmentDisplays()) {
+                if (!d.isActive()) continue;
+                std::string label = judgmentLabel(L, d);
+                if (label.empty()) continue;
+
+                // Auto-shrink so the text stays narrower than one lane.
+                float fs = L.fontSize * ui;
+                ImVec2 sz = font->CalcTextSizeA(fs, FLT_MAX, 0.f, label.c_str());
+                float maxW = d.laneWidthPx * 0.9f;
+                if (maxW > 1.f && sz.x > maxW) {
+                    fs *= maxW / sz.x;
+                    sz  = font->CalcTextSizeA(fs, FLT_MAX, 0.f, label.c_str());
+                }
+
+                float a    = d.alpha();
+                float rise = (1.f - a) * 14.f * ui;   // small drift up while fading
+                float fx   = ox + sw * d.laneX01;
+                // Just above the judgment line (smaller Y = higher on screen).
+                float fy   = oy + sh * (d.hitLineY01 - L.yOffset) - rise;
+
+                glm::vec4 c = d.color();   // alpha already baked from lifetime
+                ImU32 col = IM_COL32((int)(c.r * 255), (int)(c.g * 255),
+                                     (int)(c.b * 255), (int)(c.a * 255));
+                ImVec2 tp(fx - sz.x * 0.5f, fy - sz.y * 0.5f);
+                dl->AddText(font, fs, ImVec2(tp.x + 1.f * ui, tp.y + 1.f * ui),
+                            IM_COL32(0, 0, 0, (int)(c.a * 160)), label.c_str());
+                dl->AddText(font, fs, tp, col, label.c_str());
+            }
+        }
     }
 
     // Top-left Stop button — phones have no Esc key. Hosted in a tiny

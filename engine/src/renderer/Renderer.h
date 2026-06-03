@@ -40,6 +40,10 @@ public:
     LineBatch&      lines()     { return m_lines; }
     MeshRenderer&   meshes()    { return m_meshes; }
     ParticleSystem& particles() { return m_particles; }
+    // Second particle instance bound to the SWAPCHAIN render pass, so its
+    // particles draw on top of the ImGui UI (for button-tap feedback). Emit
+    // into it from the UI layer; flushUiParticles() draws it after ImGui.
+    ParticleSystem& uiParticles() { return m_uiParticles; }
     TextureManager& textures()   { return m_texMgr; }
     BufferManager&  buffers()    { return m_bufMgr; }
     PostProcess&    postProcess(){ return m_postProcess; }
@@ -83,6 +87,11 @@ public:
     VkRenderPass swapchainRenderPass() const { return m_renderPass.handle(); }
     VkImageView sceneImageView() const { return m_postProcess.sceneView(); }
 
+    // Draw the UI particle instance into the still-open swapchain render pass
+    // (call AFTER ImGui has been rendered, BEFORE finishFrame()). Uses a
+    // screen-space ortho projection so emit positions are window pixels.
+    void flushUiParticles();
+
 private:
     void recordFrame(uint32_t imageIndex);
     void setViewportScissor(VkCommandBuffer cmd);
@@ -103,6 +112,7 @@ private:
     LineBatch      m_lines;
     MeshRenderer   m_meshes;
     ParticleSystem m_particles;
+    ParticleSystem m_uiParticles;  // swapchain-pass instance (UI overlay)
 
     PostProcess m_postProcess;
 

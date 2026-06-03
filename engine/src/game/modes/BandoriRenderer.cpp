@@ -2,6 +2,8 @@
 #include "renderer/Renderer.h"
 #include "renderer/Material.h"
 #include "renderer/MaterialAssetLibrary.h"
+#include "renderer/ParticleEffectLibrary.h"
+#include "renderer/ParticleSlots.h"
 #include "ui/ProjectHub.h"
 #include <glm/gtc/matrix_transform.hpp>
 #include <cmath>
@@ -98,7 +100,49 @@ void BandoriRenderer::onInit(Renderer& renderer, const ChartData& chart,
 
     m_judgmentDisplays.resize(m_laneCount);
 
+    // Index hold notes by id so the sustained aura can evaluate each hold's
+    // cross-lane curve at the judgment line, and resolve the bound effects.
+    m_holdNoteIdx.clear();
+    for (size_t i = 0; i < m_notes.size(); ++i) {
+        if (m_notes[i].type == NoteType::Hold)
+            m_holdNoteIdx[m_notes[i].id] = i;
+    }
+    resolveParticleEffects(config);
+
     onResize(renderer.width(), renderer.height());
+}
+
+void BandoriRenderer::resolveParticleEffects(const GameModeConfig* config) {
+    m_particleEffects.clear();
+    if (!m_particleLibrary || !m_renderer) return;
+
+    const std::string mode = "bandori";
+    for (const auto& slot : bandoriParticleSlots()) {
+        std::string name = defaultParticleEffectName(mode, slot.slug);
+        if (config) {
+            auto b = config->particleEffects.find(slot.slug);
+            if (b != config->particleEffects.end() && !b->second.empty())
+                name = b->second;
+        }
+        const ParticleEffectAsset* a = m_particleLibrary->get(name);
+        if (!a)   // bound asset missing — fall back to the seeded default
+            a = m_particleLibrary->get(defaultParticleEffectName(mode, slot.slug));
+        if (!a) continue;
+
+        uint16_t pipeKey = 0;
+        if (a->kind == ParticleEffectKind::Custom && !a->customShaderPath.empty()) {
+            std::string abs =
+                (m_particleLibrary->projectDir() / a->customShaderPath).string();
+            pipeKey = m_renderer->particles().registerCustomPipeline(abs);
+        }
+        m_particleEffects[slot.slug] = particleEmitFromAsset(*a, pipeKey);
+    }
+}
+
+glm::vec2 BandoriRenderer::laneHitPos(float lane) const {
+    float sw = (float)m_width, sh = (float)m_height;
+    float laneX = (lane - (m_laneCount - 1) * 0.5f) * m_laneSpacing;
+    return w2s({laneX, 0.f, HIT_ZONE_Z}, m_perspVP, sw, sh);
 }
 
 void BandoriRenderer::onResize(uint32_t w, uint32_t h) {
@@ -107,38 +151,55 @@ void BandoriRenderer::onResize(uint32_t w, uint32_t h) {
 
     float aspect = h > 0 ? static_cast<float>(w) / h : 1.f;
 
-    // Baseline framing blended by playfieldHeightPct: low value = higher,
-    // steeper camera (short highway in mid-screen); high value = low,
-    // shallow-pitch camera looking far down the track (tall BanG Dream-style
-    // trapezoid filling the screen). cameraDistance/cameraFovDeg are the
-    // author's relative knobs applied on top.
-    float hN = (std::clamp(m_playfieldHeightPct, 0.3f, 1.f) - 0.3f) / 0.7f;
-    const glm::vec3 baseEye{0.f,
-                            glm::mix(7.0f, 1.5f, hN),
-                            glm::mix(11.0f, 6.0f, hN)};
-    const glm::vec3 baseTarget{0.f, 0.0f, glm::mix(-22.0f, -55.0f, hN)};
+    // Fixed camera. Its position, pitch and FOV never change, so the lane-
+    // convergence angle is constant. The two author knobs map to orthogonal,
+    // angle-preserving effects (no scaling of the field):
+    //   Camera Distance  -> m_approachZ: how far the highway is drawn toward the
+    //     vanishing point, i.e. how much track is visible ahead.
+    //   Playfield Height -> anchorNdcY: vertical screen position of the judgment
+    //     line (a pure vertical shift; more room above as it lowers).
+    // cameraFovDeg overrides the baseline FOV when > 0.
+    // NOTE: this math is mirrored in SongEditor::renderSceneView (dual-site).
+    const glm::vec3 camEye{0.f, 5.f, 8.f};
+    const glm::vec3 camTarget{0.f, 0.f, -24.f};
     const float     baseFov = 55.f;
 
-    glm::vec3 camOffset = baseEye - baseTarget;
-    glm::vec3 camEye    = baseTarget + camOffset * std::max(m_camDistance, 0.01f);
-    float     camFov    = m_camFovDeg > 0.f ? m_camFovDeg : baseFov;
+    // Camera Distance -> visible track length.
+    float dN     = (std::clamp(m_camDistance, 0.5f, 2.0f) - 0.5f) / 1.5f;
+    m_approachZ  = -glm::mix(20.f, 110.f, dN);
+    // Playfield Height -> judgment-line screen position (flipped NDC: +1=bottom).
+    float hN          = (std::clamp(m_playfieldHeightPct, 0.3f, 1.f) - 0.3f) / 0.7f;
+    float anchorNdcY  = glm::mix(0.2f, 0.85f, hN);
 
+    float     camFov = m_camFovDeg > 0.f ? m_camFovDeg : baseFov;
     Camera persp = Camera::makePerspective(camFov, aspect, 0.1f, 300.f);
-    persp.lookAt(camEye, baseTarget);
+    persp.lookAt(camEye, camTarget);
+
+    // Pin the judgment line (z=0) to anchorNdcY — a vertical clip-space shift
+    // only, so the camera, FOV and lane angle are all untouched.
+    {
+        glm::mat4 proj = persp.projection();
+        glm::vec4 hitClip = (proj * persp.view()) * glm::vec4(0.f, 0.f, 0.f, 1.f);
+        if (std::abs(hitClip.w) > 1e-5f) {
+            float delta = anchorNdcY - hitClip.y / hitClip.w;
+            for (int k = 0; k < 4; ++k) proj[k][1] += delta * proj[k][3];
+        }
+        persp.setProj(proj);
+    }
     m_perspVP  = persp.viewProjection();
     m_proj11y  = std::abs(persp.projection()[1][1]);
 
-    // Calculate lane spacing so highway width matches ~90% of screen at the hit zone
-    // Project two test points at z=0 to find screen-space width per world unit
-    glm::vec2 leftTest  = w2s({-1.f, 0.f, HIT_ZONE_Z}, m_perspVP, (float)w, (float)h);
-    glm::vec2 rightTest = w2s({ 1.f, 0.f, HIT_ZONE_Z}, m_perspVP, (float)w, (float)h);
-    float pxPerWorldUnit = (rightTest.x - leftTest.x) * 0.5f; // px per 1 world unit
-    if (pxPerWorldUnit > 0.f) {
-        float widthPct  = std::clamp(m_playfieldWidthPct, 0.2f, 1.f);
-        float desiredPx = (float)w * widthPct; // highway screen-width fraction (centered)
-        float totalWorldW = desiredPx / pxPerWorldUnit;
-        m_laneSpacing = totalWorldW / m_laneCount;
-        m_noteWorldW  = m_laneSpacing; // notes fill the full lane width
+    // Playfield Width -> bottom width of the highway at the hit line.
+    {
+        glm::vec2 lT = w2s({-1.f, 0.f, HIT_ZONE_Z}, m_perspVP, (float)w, (float)h);
+        glm::vec2 rT = w2s({ 1.f, 0.f, HIT_ZONE_Z}, m_perspVP, (float)w, (float)h);
+        float pxPerWorldUnit = (rT.x - lT.x) * 0.5f;
+        if (pxPerWorldUnit > 0.f) {
+            float widthPct  = std::clamp(m_playfieldWidthPct, 0.2f, 1.f);
+            float desiredPx = (float)w * widthPct;
+            m_laneSpacing   = desiredPx / pxPerWorldUnit / m_laneCount;
+            m_noteWorldW    = m_laneSpacing;
+        }
     }
 
     m_camera = Camera::makeOrtho(0.f, static_cast<float>(w),
@@ -166,8 +227,8 @@ void BandoriRenderer::onRender(Renderer& renderer) {
         float rightX =  (m_laneCount * 0.5f) * m_laneSpacing;
         glm::vec2 sNL = w2s({leftX,  0.f, HIT_ZONE_Z}, m_perspVP, sw, sh);
         glm::vec2 sNR = w2s({rightX, 0.f, HIT_ZONE_Z}, m_perspVP, sw, sh);
-        glm::vec2 sFR = w2s({rightX, 0.f, APPROACH_Z}, m_perspVP, sw, sh);
-        glm::vec2 sFL = w2s({leftX,  0.f, APPROACH_Z}, m_perspVP, sw, sh);
+        glm::vec2 sFR = w2s({rightX, 0.f, m_approachZ}, m_perspVP, sw, sh);
+        glm::vec2 sFL = w2s({leftX,  0.f, m_approachZ}, m_perspVP, sw, sh);
         Material trackDefault;
         trackDefault.kind    = MaterialKind::Unlit;
         trackDefault.tint    = {0.08f, 0.10f, 0.18f, 0.8f};
@@ -187,7 +248,7 @@ void BandoriRenderer::onRender(Renderer& renderer) {
     for (int i = 0; i <= m_laneCount; ++i) {
         float wx   = (i - m_laneCount * 0.5f) * m_laneSpacing;
         glm::vec2 nearPt = w2s({wx, 0.f, HIT_ZONE_Z}, m_perspVP, sw, sh);
-        glm::vec2 farPt  = w2s({wx, 0.f, APPROACH_Z}, m_perspVP, sw, sh);
+        glm::vec2 farPt  = w2s({wx, 0.f, m_approachZ}, m_perspVP, sw, sh);
         renderer.lines().drawLine(nearPt, farPt, 1.5f, laneTint);
     }
 
@@ -296,7 +357,7 @@ void BandoriRenderer::onRender(Renderer& renderer) {
         // overshoot so the head doesn't pop out the moment it crosses the
         // line — gives the player a frame or two to react.
         const float zNear = holdActive ? 0.f : 12.f;
-        const float zFar  = APPROACH_Z - 2.f;
+        const float zFar  = m_approachZ - 2.f;
         const float dt    = static_cast<float>(note.time - m_songTime);
         const float tOffAtZNear = (-zNear / (SCROLL_SPEED * m_noteSpeedMul)) - dt;
         const float tOffAtZFar  = (-zFar  / (SCROLL_SPEED * m_noteSpeedMul)) - dt;
@@ -402,7 +463,7 @@ void BandoriRenderer::onRender(Renderer& renderer) {
             float lane = evalHoldLaneAt(*hold, tOff);
             float wx   = laneToWorldX(lane);
             float wz   = -static_cast<float>(absT - m_songTime) * (SCROLL_SPEED * m_noteSpeedMul);
-            if (wz > 12.f || wz < APPROACH_Z - 1.f) continue;
+            if (wz > 12.f || wz < m_approachZ - 1.f) continue;
 
             float r = m_noteWorldW * 0.25f;
             glm::vec3 wNL{wx - r, 0.f, wz + r};
@@ -439,7 +500,7 @@ void BandoriRenderer::onRender(Renderer& renderer) {
         // head quad visible longer so the reference stays on screen while
         // the player is still tracking the body.
         const float upperClip = (note.type == NoteType::Hold) ? 12.f : 2.f;
-        if (noteZ > upperClip || noteZ < APPROACH_Z - 2.f) continue;
+        if (noteZ > upperClip || noteZ < m_approachZ - 2.f) continue;
 
         float worldX = (laneX - (m_laneCount - 1) * 0.5f) * m_laneSpacing;
 
@@ -503,10 +564,23 @@ void BandoriRenderer::onRender(Renderer& renderer) {
     // Judgment displays removed — using particle effects only
 }
 
-void BandoriRenderer::showJudgment(int lane, Judgment judgment) {
+void BandoriRenderer::showJudgment(int lane, Judgment judgment, float timingDelta) {
     if (lane < 0 || lane >= static_cast<int>(m_judgmentDisplays.size())) return;
 
-    m_judgmentDisplays[lane].spawn(judgment, {0.f, 0.f});
+    // Anchor the floating text just above the actual judgment line, at this
+    // lane's center, sized to the lane. laneHitPos uses the w2s convention
+    // (y=0 = bottom), so window-space Y = 1 - y/height. Lane width comes from
+    // projecting the two lane edges at the hit line.
+    float fw = (m_width  > 0) ? (float)m_width  : 1.f;
+    float fh = (m_height > 0) ? (float)m_height : 1.f;
+    glm::vec2 pc = laneHitPos(static_cast<float>(lane));
+    glm::vec2 pl = laneHitPos(lane - 0.5f);
+    glm::vec2 pr = laneHitPos(lane + 0.5f);
+    float normX   = std::clamp(pc.x / fw, 0.f, 1.f);
+    float hitY01  = std::clamp(1.f - pc.y / fh, 0.f, 1.f);
+    float laneWpx = std::abs(pr.x - pl.x);
+    int   sign    = (timingDelta > 1e-4f) ? 1 : (timingDelta < -1e-4f ? -1 : 0);
+    m_judgmentDisplays[lane].spawn(judgment, normX, hitY01, laneWpx, sign);
 
     // Mark the closest note in this lane as hit — EXCEPT Hold notes, which
     // must stay visible until the player releases the key/finger. The hold
@@ -529,22 +603,54 @@ void BandoriRenderer::showJudgment(int lane, Judgment judgment) {
         if (d < bestDist) { bestDist = d; bestId = note.id; found = true; }
     }
     if (found) m_hitNotes.insert(bestId);
+    // Particle emission now lives in showHitEffect() so each gameplay event
+    // can fire its own author-bound effect; showJudgment only drives the text.
+}
 
-    // Particle effect — Miss gets nothing, others get colored burst
-    if (judgment != Judgment::Miss && m_renderer) {
-        float sw = (float)m_width, sh = (float)m_height;
-        float laneX = (lane - (m_laneCount - 1) * 0.5f) * m_laneSpacing;
-        glm::vec2 hitPos = w2s({laneX, 0.f, HIT_ZONE_Z}, m_perspVP, sw, sh);
+void BandoriRenderer::showHitEffect(HitEventKind kind, int lane,
+                                    NoteType /*type*/, Judgment judgment) {
+    if (judgment == Judgment::Miss || !m_renderer) return;
 
-        glm::vec4 pColor;
-        int pCount = 12;
-        switch (judgment) {
-            case Judgment::Perfect: pColor = {0.2f, 1.f, 0.3f, 1.f}; pCount = 20; break;
-            case Judgment::Good:    pColor = {0.3f, 0.6f, 1.f, 1.f}; pCount = 14; break;
-            case Judgment::Bad:     pColor = {1.f, 0.25f, 0.2f, 1.f}; pCount = 8; break;
-            default: break;
-        }
-        m_renderer->particles().emitBurst(hitPos, pColor, pCount, 200.f, 8.f, 0.5f);
+    const char* slug = nullptr;
+    switch (kind) {
+        case HitEventKind::ClickHit: slug = "click_hit"; break;
+        case HitEventKind::FlickHit: slug = "flick_hit"; break;
+        case HitEventKind::HoldHead: slug = "hold_head"; break;
+        case HitEventKind::HoldTick: slug = "hold_tick"; break;
+        case HitEventKind::HoldEnd:  slug = "hold_end";  break;
+    }
+    if (!slug) return;
+    auto it = m_particleEffects.find(slug);
+    if (it == m_particleEffects.end()) return;
+
+    glm::vec2 pos = laneHitPos(lane);
+    if (pos.x < -9000.f) return;   // behind camera
+    m_renderer->particles().emitEffect(it->second, pos);
+}
+
+void BandoriRenderer::emitHoldAura(float dt) {
+    if (!m_renderer) return;
+    auto it = m_particleEffects.find("hold_aura");
+    if (it == m_particleEffects.end()) return;
+
+    for (uint32_t id : m_activeHoldIds) {
+        auto lit = m_holdNoteIdx.find(id);
+        if (lit == m_holdNoteIdx.end()) continue;
+        const NoteEvent& note = m_notes[lit->second];
+        const auto* hold = std::get_if<HoldData>(&note.data);
+        if (!hold) continue;
+
+        // Lane of the hold segment currently crossing the judgment line:
+        // tOff = now - holdStart, evaluated on the cross-lane curve. This makes
+        // the aura follow the note as it changes lanes (fractional during a
+        // transition), instead of sticking to the start lane.
+        float tOff = static_cast<float>(m_songTime - note.time);
+        tOff = std::clamp(tOff, 0.f, hold->duration);
+        float lane = evalHoldLaneAt(*hold, tOff);
+
+        glm::vec2 pos = laneHitPos(lane);
+        if (pos.x < -9000.f) continue;
+        m_renderer->particles().emitSustained(id, it->second, pos, dt);
     }
 }
 

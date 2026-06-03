@@ -1,9 +1,12 @@
 #pragma once
 #include "GameModeRenderer.h"
 #include "renderer/Material.h"
+#include "renderer/ParticleSystem.h"   // ParticleEmit
 #include <vector>
 #include <unordered_set>
 #include <unordered_map>
+#include <map>
+#include <string>
 #include <optional>
 #include <glm/glm.hpp>
 
@@ -44,7 +47,7 @@ public:
     // Keyboard test path: dispatchHitResult routes here with a lane index.
     // We reverse-map lane → synthesized angle (matching the fallback in onInit)
     // and find the best matching note in any ring.
-    void showJudgment(int lane, Judgment judgment) override;
+    void showJudgment(int lane, Judgment judgment, float timingDelta = 0.f) override;
 
     // Segment-based disk animation keyframes live in ChartData::diskAnimation
     // and are imported into the local m_rotationEvents / m_moveEvents /
@@ -74,6 +77,12 @@ private:
         float  currentAngle;        // mirrors m_diskRotation so downstream code can stay uniform
         std::vector<NoteEvent>       notes;
     };
+
+    // Resolved particle effects keyed by event-slot slug (ParticleSlots.h).
+    // Lanota emits in screen space.
+    std::map<std::string, ParticleEmit> m_particleEffects;
+    void resolveParticleEffects(const GameModeConfig* config);
+    NoteType noteTypeById(uint32_t id) const;
 
     // Returns the interpolated disk angle (radians) for songTime given a
     // sorted list of segment-based rotation keyframes.  Holds at 0 before

@@ -24,10 +24,27 @@ struct HudTextConfig {
     float glowRadius   = 6.f;
 };
 
+// Floating judgment-text labels + placement. Engine users can change the
+// wording (e.g. localize, or use "PURE/FAR/LOST") and where the text sits.
+struct JudgmentLabels {
+    std::string perfect   = "PERFECT";
+    std::string goodEarly = "EARLY";
+    std::string goodLate  = "LATE";
+    std::string badEarly  = "TOO EARLY";
+    std::string badLate   = "TOO LATE";
+    std::string miss      = "MISS";
+    float yOffset  = 0.05f;   // normalized height ABOVE the judgment line
+    float fontSize = 22.f;    // base px (auto-shrunk to fit one lane width)
+    bool  enabled  = true;
+};
+
 struct GameModeConfig {
     GameModeType  type       = GameModeType::DropNotes;
     DropDimension dimension  = DropDimension::TwoD;
     int           trackCount = 7;
+
+    // Floating judgment text (PERFECT / EARLY-LATE / TOO EARLY-LATE / MISS).
+    JudgmentLabels judgmentLabels;
 
     // Judgment windows (in milliseconds, +/- from note center)
     float perfectMs = 50.f;   // +/- 50ms
@@ -102,6 +119,14 @@ struct GameModeConfig {
         std::string sfxPath;       // hit-sound audio for the note type
     };
     std::map<std::string, NoteTypeAssets> noteAssets;
+
+    // ── Per-event particle-effect bindings ──────────────────────────────
+    // Keyed by particle event-slot slug (see renderer/ParticleSlots.h:
+    // "click_hit", "flick_hit", "hold_head", "hold_tick", "hold_aura",
+    // "hold_end"). Value = ParticleEffectAsset name resolved at hit time via
+    // the project's ParticleEffectLibrary. Empty/absent = use the mode's
+    // seeded default (`default_<mode>_<slug>`).
+    std::map<std::string, std::string> particleEffects;
 };
 
 // ── Project info ─────────────────────────────────────────────────────────────

@@ -63,6 +63,9 @@ void Renderer::init(GLFWwindow* window, const std::string& shaderDir, bool valid
                   m_whiteTexture.view, m_whiteTexture.sampler,
                   m_flatNormalTexture.view, m_flatNormalTexture.sampler);
     m_particles.init(m_ctx, m_bufMgr, m_descMgr, m_postProcess.sceneRenderPass(), shaderDir);
+    // UI tap particles render into the swapchain pass so they sit on top of the
+    // ImGui UI (built-in + custom pipelines build against this pass).
+    m_uiParticles.init(m_ctx, m_bufMgr, m_descMgr, m_renderPass.handle(), shaderDir);
 
     // Default ortho camera
     m_camera = Camera::makeOrtho(0.f, static_cast<float>(ext.width),
@@ -79,6 +82,7 @@ void Renderer::shutdown() {
     m_lines.shutdown(m_ctx, m_bufMgr);
     m_meshes.shutdown(m_ctx, m_bufMgr);
     m_particles.shutdown(m_ctx, m_bufMgr);
+    m_uiParticles.shutdown(m_ctx, m_bufMgr);
     m_postProcess.shutdown(m_ctx);
     m_sync.shutdown(m_ctx);
     m_cmdMgr.shutdown(m_ctx);
@@ -166,6 +170,19 @@ void Renderer::endFrame() {
     setViewportScissor(m_currentCmd);
 
     // Swapchain render pass stays open for ImGui (no composite drawn)
+}
+
+void Renderer::flushUiParticles() {
+    int frame = m_sync.currentFrame();
+    auto ext = m_swapchain.extent();
+    // Screen-space ortho: emit positions are window pixels (top-left origin),
+    // matching ImGui MousePos. Drawn into the swapchain pass that endFrame()
+    // left open, so these particles sit on top of the ImGui UI.
+    FrameUBO ubo{};
+    ubo.viewProj = Camera::makeOrtho(0.f, static_cast<float>(ext.width),
+                                     static_cast<float>(ext.height), 0.f).viewProjection();
+    m_uiParticles.updateFrameUBO(ubo, frame);
+    m_uiParticles.flush(m_currentCmd, frame, m_whiteTexSet);
 }
 
 void Renderer::finishFrame() {

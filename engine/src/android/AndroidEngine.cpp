@@ -114,6 +114,12 @@ void AndroidEngine::init(android_app* app, const std::string& shaderDir) {
     AndroidFileIO::extractDirToInternal("assets/materials");
     m_materialLibrary.loadFromProject(m_assetsPath);
 
+    // Particle-effect library — extract + load the bundled effects, then ensure
+    // the shared UI button-tap effect exists (seed is idempotent / edit-safe).
+    AndroidFileIO::extractDirToInternal("assets/particles");
+    m_particleLibrary.loadFromProject(m_assetsPath);
+    m_particleLibrary.seedUiTapEffect();
+
     LOGI("AndroidEngine initialized");
 }
 
@@ -152,7 +158,8 @@ void AndroidEngine::onWindowInit(ANativeWindow* window) {
         "mesh_unlit.frag.spv", "mesh_glow.frag.spv",
         "mesh_scroll.frag.spv", "mesh_pulse.frag.spv", "mesh_gradient.frag.spv",
         "composite.vert.spv", "composite.frag.spv",
-        "bloom_downsample.comp.spv", "bloom_upsample.comp.spv"
+        "bloom_downsample.comp.spv", "bloom_upsample.comp.spv",
+        "particle.vert.spv", "particle.frag.spv"
     };
     for (auto& name : shaderFiles) {
         std::string assetPath = std::string("shaders/") + name;
@@ -474,8 +481,31 @@ void AndroidEngine::render() {
             break;
     }
 
+    // Button-tap feedback: a primary tap that landed on an interactive widget
+    // this frame emits the shared `ui_tap` effect at the tap point. Android is
+    // always the player, so no test-mode gate. The gameplay scene is a NoInputs
+    // ImGui::Image, so note/lane taps register no item and are excluded.
+    m_renderer.uiParticles().update(io.DeltaTime);
+    if (io.MouseClicked[0] && ImGui::IsAnyItemHovered()) {
+        const ParticleEffectAsset* a = m_particleLibrary.get(kUiTapEffectName);
+        ParticleEmit fx = a ? particleEmitFromAsset(*a, 0) : ParticleEmit{};
+        if (a && a->kind == ParticleEffectKind::Custom && !a->customShaderPath.empty()) {
+            std::string abs = (m_particleLibrary.projectDir() / a->customShaderPath).string();
+            fx.pipeKey = m_renderer.uiParticles().registerCustomPipeline(abs);
+        }
+        // High-DPI phone: scale the screen-pixel-tuned defaults up so the burst
+        // isn't tiny.
+        fx.sizeStart *= m_dpiScale; fx.sizeEnd *= m_dpiScale;
+        fx.speedMin  *= m_dpiScale; fx.speedMax *= m_dpiScale;
+        fx.gravity   *= m_dpiScale;
+        m_renderer.uiParticles().emitEffect(fx, {io.MousePos.x, io.MousePos.y});
+    }
+
     ImGui::Render();
     ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), m_renderer.currentCmd());
+
+    // UI tap particles render on top of the ImGui UI (swapchain pass still open).
+    m_renderer.flushUiParticles();
 
     m_renderer.finishFrame();
 }

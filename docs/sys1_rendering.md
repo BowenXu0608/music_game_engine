@@ -55,7 +55,8 @@ originSessionId: d4e6dddd-1cc1-4f7b-8da6-079be9eb81c0
 | `QuadBatch.h/.cpp` | Textured quads. `MAX_QUADS = 8192`. Self-contained per-frame UBOs + descriptor sets. Pipeline-per-MaterialKind (5 built-in + Custom) |
 | `LineBatch.h/.cpp` | Lines CPU-expanded to quad triangles. `MAX_LINES = 4096`. Self-contained |
 | `MeshRenderer.h/.cpp` | Per-mesh 3D draw with depth test. Pipeline-per-MaterialKind matching QuadBatch so Custom shaders work on 3D geometry too |
-| `ParticleSystem.h/.cpp` | Ring buffer 2048 particles, additive blend |
+| `ParticleSystem.h/.cpp` | Ring buffer 4096 particles, additive blend, built-in soft-sprite + per-`.frag` custom pipelines. `init(...,VkRenderPass,...)` parameterizes the target pass, so a second instance can target the swapchain pass (see UI tap particles below) |
+| `ParticleEffectAsset.h/.cpp` + `ParticleEffectLibrary.h/.cpp` + `ParticleSlots.h` | Data-driven `.pfx` effects (kinds Burst/Spark/Ring/Aura/Custom) + per-project registry + per-mode event-slot tables. `kUiTapEffectName="ui_tap"` is the shared button-tap effect |
 | `PostProcess.h/.cpp` | Bloom compute mip chain (downsample→upsample) + composite pass |
 | `RenderTypes.h` | `QuadVertex`, `LineVertex`, `MeshVertex`, `FrameUBO`, `QuadPushConstants`, `MeshPushConstants`, `DrawCall` |
 | `Material.h/.cpp` | `Material` struct + `MaterialKind` enum (Unlit/Glow/Scroll/Pulse/Gradient/Custom). Runtime value a batcher consumes |
@@ -64,7 +65,7 @@ originSessionId: d4e6dddd-1cc1-4f7b-8da6-079be9eb81c0
 | `MaterialSlots.h/.cpp` | Per-mode slot tables (Bandori/Arcaea/Cytus/Lanota/Phigros) with display name, group, default kind/tint/params. Helpers: `materialSlotSlug`, `materialModeName`, `detectChartMode` |
 | `ShaderCompiler.h/.cpp` | Runtime glslc invoker for Custom-kind materials. Accepts `.frag` (GLSL), `.spv` (load-verbatim), rejects `.hlsl` with a clear error. mtime-cached |
 | `Camera.h` | Unified ortho + perspective. Header-only |
-| `Renderer.h/.cpp` | Owns all batchers. Exposes `whiteView()`, `whiteSampler()`, `descriptors()` for game mode plugins |
+| `Renderer.h/.cpp` | Owns all batchers + TWO `ParticleSystem` instances: `m_particles` (scene pass) and `m_uiParticles` (swapchain pass, UI overlay). Exposes `whiteView()`, `whiteSampler()`, `descriptors()`, `swapchainRenderPass()`, `uiParticles()`, `flushUiParticles()` |
 
 ---
 
@@ -312,3 +313,64 @@ Vulkan validation enabled with zero errors. Android whitelist + CMake updated;
 on-device APK run pending. Known limitation: a flat 2D quad with no normal map
 is uniformly shaded under the fixed light (correct PBR, visually flat) — this
 is why normal-map support is the payoff for the 2D path.
+
+## UI button-tap particles (2026-06-04, branch `pbr-material-system`)
+
+Player-screen UI buttons emit a uniform, customizable particle burst on tap so a
+touch player gets press feedback. Notes are excluded (they have their own
+effects). The effect is one shared `.pfx` (`"ui_tap"`) editable in the FX tab,
+with **full custom-shader parity** with note effects.
+
+### The render-pass problem (why a second ParticleSystem)
+The scene `ParticleSystem` (`Renderer::m_particles`) flushes during
+`Renderer::endFrame()` into the **offscreen scene pass** — which is composited
+into the swapchain as a flat `ImGui::Image` *before* the rest of the UI draws.
+So scene particles are always *behind* the ImGui UI. To draw **on top of**
+buttons (and still allow custom GLSL, which an ImGui draw-list CPU sim can't do),
+a **second `ParticleSystem` instance** (`Renderer::m_uiParticles`) is initialized
+against `swapchainRenderPass()` instead of the scene pass. Its built-in and
+`registerCustomPipeline` pipelines therefore build against the swapchain pass.
+
+### Frame flow
+1. `endFrame()` → scene pass closes (scene `m_particles` already flushed inside).
+2. ImGui frame: per-layer page render → `tickUiTapParticles()` (emit into
+   `m_uiParticles`) → `m_imgui.render()` draws the UI into the open swapchain pass.
+3. `Renderer::flushUiParticles()` — sets a screen-space ortho `FrameUBO`
+   (`Camera::makeOrtho(0,w,h,0)`, so emit positions are window pixels =
+   `ImGui MousePos`) and flushes `m_uiParticles` into `m_currentCmd` at
+   `m_sync.currentFrame()` with `m_whiteTexSet`. Runs while the swapchain pass is
+   still open → particles land on top of the UI.
+4. `finishFrame()` closes the pass + submits.
+`m_uiParticles.update(dt)` runs alongside `m_particles.update(dt)`.
+
+### Trigger + scope
+`Engine::tickUiTapParticles(layer)` (desktop) / inline hook in
+`AndroidEngine::render` (Android): emit when
+`io.MouseClicked[0] && ImGui::IsAnyItemHovered()` at `io.MousePos`. One global
+hook — no edits to the ~50 button call sites. Player-screen gate: desktop =
+`isTestMode() && layer ∈ {StartScreen,MusicSelection,Settings,GamePlay}`; Android
+is always the player (no gate), and scales emit size/speed/gravity by
+`m_dpiScale`. **Notes are excluded for free:** the gameplay scene is an
+`ImGui::Image` inside a `ImGuiWindowFlags_NoInputs` window, so lane/note taps
+register no hovered item — only real widgets (incl. the Stop button) fire.
+
+### Asset
+`kUiTapEffectName="ui_tap"` (`ParticleSlots.h`, mode-independent) seeded by
+`ParticleEffectLibrary::seedUiTapEffect()` (guarded Burst default, edit-safe).
+Resolved per tap via `particleEmitFromAsset`; Custom kind →
+`uiParticles().registerCustomPipeline(absFragPath)`. Surfaces + edits through the
+existing FX-tab CRUD.
+
+### Android catch-up
+Android had no particle library and never extracted `particle.*.spv` — note
+particles wouldn't have worked there either. Added `AndroidEngine::m_particleLibrary`
+(+ extract `assets/particles` + `seedUiTapEffect`), `particle.vert.spv` /
+`particle.frag.spv` to the on-init shader whitelist, and
+`ParticleEffectAsset.cpp` / `ParticleEffectLibrary.cpp` to
+`engine/src/android/CMakeLists.txt`.
+
+Files: `Renderer.{h,cpp}`, `ParticleSlots.h`, `ParticleEffectLibrary.{h,cpp}`,
+`Engine.{h,cpp}`, `AndroidEngine.{h,cpp}`, `engine/src/android/CMakeLists.txt`.
+Verified: desktop builds clean + runs with zero errors; Android edits written but
+on-device run pending. Detail + the design rationale (and why an ImGui-drawlist
+CPU sim was rejected for lacking custom shaders): devlog 2026-06-04 (later).

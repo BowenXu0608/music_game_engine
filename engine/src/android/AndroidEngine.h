@@ -6,6 +6,8 @@
 #pragma once
 #include "renderer/Renderer.h"
 #include "renderer/MaterialAssetLibrary.h"
+#include "renderer/ParticleEffectLibrary.h"
+#include "renderer/ParticleSlots.h"
 #include "input/InputManager.h"
 #include "engine/GameClock.h"
 #include "engine/AudioEngine.h"
@@ -187,6 +189,9 @@ private:
 
     // Per-APK material asset library — populated at init from bundled assets.
     MaterialAssetLibrary m_materialLibrary;
+    // Per-APK particle-effect library — resolves the shared "ui_tap" button
+    // feedback effect (and is reused if note-particle wiring lands on Android).
+    ParticleEffectLibrary m_particleLibrary;
 
     // Shared player views (game-side, also used by desktop preview). Each is
     // driven through m_adapter so they never see AndroidEngine directly.

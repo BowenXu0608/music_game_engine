@@ -2230,3 +2230,281 @@ Desktop user-confirmed correct for scan line + black-screen; particle visual che
 4. Register-once GPU descriptors must re-register on target recreate. Any `ImGui_ImplVulkan_AddTexture` wrapping a render target needs a refresh hook wired to every swapchain/onResize path, not just the obvious one. Android had it in `onWindowResize` but missed the `beginFrame`-fail path — exactly the desktop bug.
 5. Record disproven theories. This branch's PBR/camera WIP invites the same wrong guesses; the disproven list above is part of the fix.
 6. Editor and Android `createRenderer` drift silently. ScanLine mapped to different renderers on the two targets. Mode→renderer tables that exist twice should be diffed whenever either changes.
+
+---
+
+## 2026-06-03 — Data-driven particle effects + timing-aware judgment text (`pbr-material-system`)
+
+Rebuilt the particle system from a single generic burst into a **data-driven,
+author-choosable effect system** modeled on the Material asset system, and added a
+floating **judgment text** display that was specified-but-never-drawn.
+
+### Particle effects (Bandori-first; Phases 0–3 of 5)
+- **Core** (`ParticleSystem.{h,cpp}`): `MAX_PARTICLES` 2048→4096; particles gained
+  gravity, color-over-life, size-over-life, rotation, seed, per-particle drag, and
+  a `pipeKey`. New `ParticleVertex` carries `(life01, seed)` to custom shaders.
+  New `shaders/particle.{vert,frag}` render a soft radial glow (no texture).
+  Emission patterns `{Radial, Directional, Ring, Aura}`; new `emitEffect` and
+  `emitSustained(id,…)` (per-id rate accumulator for continuous hold emission);
+  legacy `emitBurst` preserved. Flush now **buckets by pipeline** so each effect
+  (incl. custom shaders via `registerCustomPipeline`) draws in its own pass.
+- **Assets**: `ParticleEffectAsset` (`.pfx` JSON; kinds Burst/Spark/Ring/Aura/
+  Custom) + `ParticleEffectLibrary` + `ParticleSlots.h`, all mirroring the
+  Material equivalents. `Engine::openProject` seeds 6 tuned Bandori defaults under
+  `<project>/assets/particles/`.
+- **Binding**: `GameModeConfig::particleEffects` (slot→effect name), round-tripped
+  in `music_selection.json`.
+- **Wiring**: `GameModeRenderer::showHitEffect(kind,…)` + `emitHoldAura(dt)`; Engine
+  fires them from every hit path (click/flick/hold-head/tick/end + per-frame aura).
+  BandoriRenderer emits each bound effect at the lane's judgment line.
+- **Hold-aura cross-lane fix**: the sustained aura initially stuck to the hold's
+  start lane; now it evaluates the hold curve (`evalHoldLaneAt`) at the judgment
+  line every frame, so it follows cross-lane holds (fractional during transitions).
+
+### Judgment text
+- Found `JudgmentDisplay` was spawned + ticked but **never rendered**. Since the
+  scene draws before ImGui's frame, the text is drawn in `GameplayHudView`.
+- Timing-aware labels: Perfect→`PERFECT`, Good→`EARLY`/`LATE`, Bad→`TOO EARLY`/
+  `TOO LATE`, Miss→`MISS` (early = `timingDelta > 0`). `showJudgment` now carries
+  `timingDelta` across the base + all 4 renderers + Android. Labels + placement are
+  customizable via `GameModeConfig::judgmentLabels`.
+- **Placement fix**: first pass floated at a fixed band where lanes converge (huge,
+  disconnected). Re-anchored to the actual judgment line (`hitLineY01 = 1 - py/h`;
+  w2s y=0 is bottom) with a configurable `yOffset`, and the font auto-shrinks to
+  stay within one lane's on-screen width.
+
+### Notes
+- `file(GLOB_RECURSE)` only re-runs on reconfigure — new `.cpp` needs
+  `cmake -S . -B build` or you get LNK2019. Also added a POST_BUILD step to copy
+  compiled SPIR-V next to the exe (none existed before).
+- **Phase 4 (editor menu) pending**: no UI yet to edit/bind effects or judgment
+  labels — file-only for now. Phase 5 = other modes (Cytus slide ticks, Arcaea 3D,
+  Lanota). See `docs/MEMORY.md` → `project_particle_system.md`.
+
+### 2026-06-03 (cont.) — Particle FX editor + all-mode rollout
+- **FX editor** (`SongEditor::renderParticlePage`, new "FX" sidebar tab): effect
+  CRUD (kind/params/color/gravity + Custom-shader Compile), per-event slot
+  bindings, and judgment-label fields. Mode-aware (`pmode`).
+- **Phase 5 — particles across all modes.** Per-mode slot tables +
+  `particleSlotsForMode`; `Engine::openProject` seeds bandori/cytus/arcaea/lanota.
+  Each renderer resolves bound effects at `onInit` and routes its hit emission
+  through them. **Cytus** adds `slide_tick` (Engine slide-sample loop fires the
+  bound effect — completes the original "every slide sample point" ask).
+  **Arcaea** emits world-space (defaults rescaled). **Lanota** screen-space
+  (routes `emitHitFeedback` by note type + hold-tick branch). Judgment text
+  remains Bandori-only for now.
+
+### 2026-06-03 — Open problems / questions to process next session
+Captured at end of the particle-system day. Ordered roughly by impact.
+
+1. **Judgment text is Bandori-only.** Only `BandoriRenderer` populates
+   `judgmentDisplays()` + stores `laneX01/hitLineY01/laneWidthPx`. To extend the
+   floating PERFECT/EARLY-LATE/MISS text to the other modes, each needs per-mode
+   screen-position logic: Arcaea (world→screen via its 3D VP), Lanota (radial /
+   ring angle → screen), Cytus (scan position). Decide whether judgment text is
+   wanted in all modes (the original reference image was Arcaea).
+
+2. **Arcaea manual arc/hold input never dispatches a hit.** `handleGestureArcaea`
+   only calls `dispatchHitResult` on the `Tap` gesture (`checkHitPosition`).
+   `HoldBegin`→`beginHoldPosition` and `SlideEnd/HoldEnd`→`endHold` record/score
+   manually WITHOUT `dispatchHitResult`, so `showHitEffect`/`showJudgment` never
+   fire for manual arcs/holds. Result: the new per-type Arc/ArcTap/Hold effects
+   only show under AUTO PLAY. Fix = route those branches through dispatch (or a
+   feedback hook) so manual arc input emits. Pre-existing input gap, not particle-
+   specific.
+
+3. **Hold "aura" (sustained sparkle) is Bandori-only.** `emitHoldAura` is
+   implemented + curve-following only in `BandoriRenderer`. Cytus/Lanota/Arcaea
+   have no sustained hold aura. Decide if holds in those modes should sparkle
+   while held (needs per-mode active-hold position each frame).
+
+4. **Per-mode slot sets are uneven / partial.**
+   - Lanota: only `{click_hit, flick_hit, hold_tick}` — no hold_head/hold_end.
+     `emitHitFeedback` routes Flick vs click by `noteTypeById`, but hold head/end
+     aren't distinguished.
+   - Cytus: `{click_hit, flick_hit, hold_head, hold_end, slide_tick}` — no
+     hold_tick/aura. Cytus hold sample-ticks currently come through `showJudgment`
+     and would emit `hold_head` per tick (re-uses head slot; not ideal).
+   Decide the desired per-mode note-event vocabulary, then expand slot tables +
+   `defaultForSlot` + each renderer's routing.
+
+5. **Orphaned default asset.** Arcaea's slot set changed from `sky_hit` →
+   `arc`/`arctap`; projects opened earlier already have a `default_arcaea_sky_hit.pfx`
+   that's now unreferenced (harmless, but a stray file). Could prune on seed.
+
+6. **Editor edits apply on next gameplay launch only.** Effects resolve once in
+   each renderer's `onInit` (`resolveParticleEffects`). Changing an effect in the
+   FX tab won't update an already-running gameplay session. Acceptable (gameplay
+   relaunches fresh) but worth a live-reload if we want instant preview.
+
+7. **Custom particle shaders are additive-only.** The custom-pipeline path forces
+   additive blending (matches the particle aesthetic). If users want alpha-blended
+   custom particles, expose a blend choice on the asset.
+
+8. **Slide effect = ScanLine/Cytus only (by design).** The original request's
+   "slide note, every sample point" is satisfied in Cytus (`slide_tick`). Bandori
+   excludes Slide by design — confirm no slide effect is expected there.
+
+See `docs/MEMORY.md` → `project_particle_system.md` for the full feature state.
+
+## 2026-06-04 — 2D drop camera rework: fixed angle, decoupled Distance / Height (branch `pbr-material-system`)
+
+### Problem
+
+User asked to "recheck the view flow in the editor page," ran the engine, and
+reported the 2D drop (Bandori) camera controls were wrong: **"camera distance is
+strange, the playfield height is incorrect, and changing Height should not change
+the angle."** The previous model (2026-05-15 *later 3*, entry above) implemented
+**Playfield Height** by *blending the camera eye/target* — `baseEye = {0, mix(7,1.5,hN),
+mix(11,6,hN)}`, `baseTarget = {0,0, mix(-22,-55,hN)}` — i.e. raising Height literally
+**re-pitched the camera**, which is exactly the angle change the user was complaining
+about. **Camera Distance** was a dolly along the eye→target ray, which slid the
+judgment line on screen (the user read this as "distance changes the height").
+
+This took **four** build/run round-trips and three clarifying-question rounds to land,
+because "change the height without changing the angle" is geometrically subtle and my
+first interpretations kept coupling the controls. The failed attempts are recorded in
+Lessons — they are the valuable part.
+
+### What the user actually wanted (locked via AskUserQuestion, after the failures)
+
+- **Camera angle is fixed.** It must never change from any slider. (Camera position,
+  pitch and FOV are all constant.)
+- **Camera Distance → "see more track ahead."** Raising it shows more of the track
+  length (notes appear from further away); bottom width and angle unchanged. *Not* a
+  scale/zoom of the field.
+- **Playfield Height → raise/lower the judgment line.** A pure vertical reposition of
+  the hit line (more/less empty room above it); camera and angle untouched.
+
+### Final model (`BandoriRenderer::onResize`, mirrored in `SongEditor::renderSceneView`)
+
+Fixed camera: `camEye {0,5,8}`, `camTarget {0,0,-24}`, baseline FOV 55° (overridable
+by `cameraFovDeg>0`). Two orthogonal, **angle-preserving** knobs, no scaling:
+
+1. **Camera Distance → far draw distance** (`m_approachZ`, new `BandoriRenderer`
+   member). `dN = (clamp(camDistance,0.5,2)-0.5)/1.5`; `m_approachZ = -mix(20, 110, dN)`.
+   The track surface, lane dividers, and **note/hold cull tests** (was the const
+   `APPROACH_Z`, now `m_approachZ` at all 5 sites: track quad, lane loop, hold body
+   `zFar`, hold sample-tick cull, note cull) all extend to `m_approachZ`, so a higher
+   value literally draws + reveals more track toward the vanishing point. `APPROACH_Z`
+   kept as the `-55` reference constant only.
+2. **Playfield Height → judgment-line screen position** (`anchorNdcY`). `hN =
+   (clamp(pct,0.3,1)-0.3)/0.7`; `anchorNdcY = mix(0.2, 0.85, hN)` (flipped NDC, +1 =
+   bottom; higher % = lower line = more room above). Implemented as a **clip-space
+   vertical shift**: after `lookAt`, project the hit point `(0,0,0)`, then
+   `for k in 0..3: proj[k][1] += (anchorNdcY - hitNdcY) * proj[k][3]` (only `proj[2][3]`
+   is non-zero, so this is `proj[2][1] -= delta` — a uniform NDC-Y translate of every
+   vertex by `delta`). This moves the whole view vertically **without touching the
+   camera, FOV, or lane convergence**.
+3. **Playfield Width** unchanged in spirit: after the pin, lane spacing is recomputed
+   from `playfieldWidthPct` against the final `m_perspVP` so the bottom width hits the
+   target screen fraction.
+
+`m_proj11y` is still read from `persp.projection()[1][1]` for note sizing; the
+clip-space pin leaves `proj[1][1]` untouched, so that stays valid.
+
+### Editor / gameplay parity
+
+The whole block is duplicated (by necessity — see the 2026-05-15 lesson) in
+`SongEditor::renderSceneView`'s 2D branch. 3D drop (Arcaea) is **unchanged**: it keeps
+its eye-dolly (`camEye = target + (baseEye-target)*cameraDistance`) and `APPROACH_Z = -55`;
+the new `approachZ`/`anchorNdcY` math is gated behind `!preview3D`. Tooltips updated:
+Camera Distance = "How much of the track is visible ahead"; Playfield Height = "Vertical
+position of the judgment line."
+
+### Files
+
+- `engine/src/game/modes/BandoriRenderer.h` — `+ float m_approachZ = APPROACH_Z;`
+- `engine/src/game/modes/BandoriRenderer.cpp` — `onResize` rewrite; `APPROACH_Z` → `m_approachZ` at the 5 draw/cull sites.
+- `engine/src/ui/SongEditor.cpp` — `renderSceneView` 2D camera block rewrite; Camera Distance + Playfield Height tooltips.
+
+### Lessons
+
+1. **A perspective DOLLY is not angle-preserving, and can push the anchor behind the
+   camera.** My 2nd attempt made Height a dolly toward a far target (`z=-47`); at high
+   Height the camera dollied *past* the hit line (`z=0` went behind the eye), so the
+   judgment-line pin's `hitClip.w<=0` guard skipped and the line jumped. Dollying also
+   changes foreshortening, which *reads as* an angle change even though pitch is fixed.
+   For "same angle, different size," the only camera-space tools are **FOV/uniform-zoom**
+   (magnify) or **far-draw extent** (longer plane) — never a dolly.
+2. **"Same angle" forbids holding bottom width while changing vertical size.** A fixed
+   camera with a fixed bottom width and a different on-screen height *must* re-slope the
+   sides (the trapezoid is rigid). So "taller, same bottom width" can only mean
+   *extending the plane toward the vanishing point* (far-draw), not a vertical stretch.
+   I burned a build proving this before asking the user to pick concrete visual outcomes.
+3. **Ask for the visual outcome, not the mechanism.** The user first picked the option
+   labeled "dolly" — but the words described an angle-locked zoom, which a dolly does not
+   deliver. Progress only came from AskUserQuestion options phrased as *what the screen
+   should look like* ("see more track ahead", "raise/lower the hit line"), letting the
+   user assign each effect to a slider. The decisive feedback was "you have them
+   swapped" — the far-draw effect I'd put on Height was what they wanted on Distance.
+4. **Clip-space row-op is the clean way to pin/translate without disturbing the camera.**
+   `proj[k][1] += delta*proj[k][3]` gives a uniform vertical NDC shift that leaves the
+   view matrix, FOV, and X entirely alone — much safer than nudging eye/target.
+5. **Dual-site still bites.** Same as 2026-05-15: every change had to land in both
+   `BandoriRenderer::onResize` and the SongEditor preview or the in-editor view diverged
+   from the (autoplaying) preview the user was actually looking at.
+
+## 2026-06-04 (later) — UI button-tap particles (custom-shader capable) (branch `pbr-material-system`)
+
+### Problem
+Note hits had particle effects, but UI **buttons** had no tap feedback — on a touch phone
+there's no hover/press cursor, so the player couldn't tell a press registered. Goal: every
+tapped widget on the **player screens** pops one uniform, **customizable** particle burst at
+the tap point. Notes excluded. Locked with the user: player screens only (Start / Song-Select
+/ Settings / Gameplay incl. Results + Stop; editor excluded; desktop = `isTestMode()`, Android
+always player); a single shared `.pfx` (`"ui_tap"`); trigger on **any** tapped interactive
+widget; and — after a follow-up question — **full custom-shader parity** with note effects.
+
+### Key constraint that shaped the design
+The existing GPU `ParticleSystem` (`Renderer::m_particles`) flushes into the **offscreen scene
+pass** during `endFrame()`, i.e. *before* ImGui draws into the swapchain pass — so its
+particles render *behind* the UI. To draw **on top of** buttons **and** keep custom GLSL, I
+could not use an ImGui-drawlist CPU sim (no custom shaders). Instead: a **second
+`ParticleSystem` instance bound to the swapchain render pass**, flushed while that pass is
+still open (between `m_imgui.render()` and `finishFrame()`). This reuses the *entire* particle
+pipeline — emit patterns, the soft-sprite shader, and `registerCustomPipeline` — for free,
+because `ParticleSystem::init` already parameterizes the render pass and
+`Renderer::swapchainRenderPass()` was already exposed. No CPU re-implementation.
+
+### What shipped
+- `Renderer` (`Renderer.{h,cpp}`): `+ ParticleSystem m_uiParticles;` init against
+  `m_renderPass.handle()` (swapchain pass) / shutdown; `uiParticles()` accessor;
+  `flushUiParticles()` — sets a screen-space ortho `FrameUBO` (`Camera::makeOrtho(0,w,h,0)`, so
+  emit positions are window pixels = ImGui `MousePos`) and flushes into `m_currentCmd` at
+  `m_sync.currentFrame()` with `m_whiteTexSet`.
+- Shared asset: `kUiTapEffectName="ui_tap"` (`ParticleSlots.h`, mode-independent) +
+  `ParticleEffectLibrary::seedUiTapEffect()` (guarded Burst default — count 12, speed 90–180,
+  size 8→1, life .22–.4, soft white; preserves edits). Surfaces in the FX tab via `allNames()`,
+  editable through the existing `upsert` path incl. the Custom-shader compile field — so custom
+  GLSL works the same as note effects.
+- Desktop `Engine`: seed `ui_tap` in `openProject`; `m_renderer.uiParticles().update(dt)` in
+  `update`; `tickUiTapParticles(renderedLayer)` after the per-layer render (gate
+  `isTestMode() && layer ∈ {StartScreen,MusicSelection,Settings,GamePlay}`; on
+  `io.MouseClicked[0] && ImGui::IsAnyItemHovered()` resolve `ui_tap` → `ParticleEmit`
+  (+ `registerCustomPipeline` for Custom kind) → `uiParticles().emitEffect(fx, MousePos)`);
+  `m_renderer.flushUiParticles()` after `m_imgui.render()`, before `finishFrame()`.
+- Android `AndroidEngine`: added `m_particleLibrary` (extract `assets/particles` + load +
+  `seedUiTapEffect`); same hook in `render()` (no test gate — always player; emit fields scaled
+  by `m_dpiScale` so the burst isn't tiny at ~3.5×); `flushUiParticles()` after
+  `RenderDrawData`. Build plumbing: added `ParticleEffectAsset.cpp` + `ParticleEffectLibrary.cpp`
+  to `engine/src/android/CMakeLists.txt` and `particle.vert.spv`/`particle.frag.spv` to the
+  on-init shader-extraction whitelist (both were missing — Phase-5 note particles had never
+  been wired on Android).
+
+### Why notes are excluded for free
+The gameplay scene is composited as an `ImGui::Image` inside a `ImGuiWindowFlags_NoInputs`
+window (Engine.cpp:1059; Android `renderGameplayHUD`), which registers no ImGui item — so
+`IsAnyItemHovered()` is false on lane/note taps. Only real widgets (incl. the Stop
+`InvisibleButton`) trip the hook. No per-call-site edits to the ~50 buttons.
+
+### Lessons
+1. **Render-pass ownership decides where pixels land.** The whole design pivoted on the fact
+   that the existing particles flush into the offscreen pass; a second instance bound to the
+   *swapchain* pass was the minimal way to get on-top rendering without losing custom shaders.
+2. **A parameterized `init(renderPass)` pays off later.** Because `ParticleSystem` already took
+   its render pass as an argument, "draw on top of UI with custom shaders" cost ~one member +
+   one flush method instead of a new subsystem.
+3. **Android lagged the desktop particle work.** It had no particle library and never extracted
+   `particle.*.spv` — adding the UI feature surfaced that note particles wouldn't have worked on
+   device either. Both fixed here.

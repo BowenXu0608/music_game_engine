@@ -1,6 +1,8 @@
 #include "ArcaeaRenderer.h"
 #include "renderer/Renderer.h"
 #include "renderer/MaterialAssetLibrary.h"
+#include "renderer/ParticleEffectLibrary.h"
+#include "renderer/ParticleSlots.h"
 #include "ui/ProjectHub.h"   // GameModeConfig definition
 #include <glm/gtc/matrix_transform.hpp>
 #include <cmath>
@@ -41,6 +43,7 @@ Material ArcaeaRenderer::slotOrFallback(uint16_t slot, const Material& fallback)
 void ArcaeaRenderer::onInit(Renderer& renderer, const ChartData& chart,
                             const GameModeConfig* config) {
     m_renderer = &renderer;
+    resolveParticleEffects(config);
     if (config && config->trackCount > 0) m_laneCount = config->trackCount;
     if (config) {
         m_skyHeight   = config->skyHeight;
@@ -623,47 +626,76 @@ void ArcaeaRenderer::onShutdown(Renderer& renderer) {
     m_renderer = nullptr;
 }
 
-void ArcaeaRenderer::showJudgment(int lane, Judgment judgment) {
+void ArcaeaRenderer::showJudgment(int /*lane*/, Judgment /*judgment*/, float /*timingDelta*/) {
+    // Particle emission lives in showHitEffect (it carries NoteType, so each
+    // Arcaea note type — tap / flick / hold / arc / arctap — gets its own
+    // effect). Judgment TEXT for Arcaea is not wired yet.
+}
+
+void ArcaeaRenderer::showHitEffect(HitEventKind kind, int lane,
+                                   NoteType type, Judgment judgment) {
     if (!m_renderer || judgment == Judgment::Miss) return;
 
-    // Particles are transformed by the active camera's viewProj (see
-    // quad.vert); Arcaea's camera is 3D perspective, so we emit in world
-    // space, not screen pixels.
-    //
-    // Routing by `lane`:
-    //   lane > 0  → a lane-based hit (tap, flick, hold-tick) — emit at the
-    //               ground slot for that lane.
-    //   lane == 0 → either a real lane-0 tap OR an arc/arctap (Engine clamps
-    //               their lane=-1 to 0). If a sky event exists within a
-    //               tight timing window right now, prefer it. Otherwise use
-    //               lane-0 ground.
-    glm::vec2 worldHit;
+    // Particles transform through the active camera's viewProj; Arcaea's camera
+    // is 3D perspective, so emit in WORLD space (effects carry world-scale
+    // params). Ground notes sit on their lane slot; arc / arc-tap (sky) events
+    // emit at the precomputed world position nearest the current song time.
     float laneSpacing = (2.f * LANE_HALF_WIDTH) / static_cast<float>(std::max(1, m_laneCount));
     auto groundForLane = [&](int ln) {
         float wx = (static_cast<float>(ln) - (m_laneCount - 1) * 0.5f) * laneSpacing;
         return glm::vec2{wx, GROUND_Y};
     };
-
-    if (lane > 0) {
-        worldHit = groundForLane(lane);
-    } else {
-        constexpr double kWindow = 0.03;  // ~2 frames at 60fps
+    auto nearestSky = [&]() -> glm::vec2 {
+        constexpr double kWindow = 0.05;
         const HitEvent* best = nullptr;
         double bestDelta = kWindow;
         for (const auto& e : m_hitEvents) {
             double d = std::abs(e.time - m_songTime);
             if (d < bestDelta) { bestDelta = d; best = &e; }
         }
-        worldHit = best ? best->worldPos : groundForLane(0);
+        return best ? best->worldPos : groundForLane(lane > 0 ? lane : 0);
+    };
+
+    const char* slug = nullptr;
+    glm::vec2   worldHit;
+    switch (type) {
+        case NoteType::Arc:    slug = "arc";       worldHit = nearestSky(); break;
+        case NoteType::ArcTap: slug = "arctap";    worldHit = nearestSky(); break;
+        case NoteType::Flick:  slug = "flick_hit"; worldHit = groundForLane(lane > 0 ? lane : 0); break;
+        case NoteType::Hold:
+            slug = (kind == HitEventKind::HoldTick) ? "hold_tick"
+                 : (kind == HitEventKind::HoldEnd)  ? "hold_end"
+                                                    : "hold_head";
+            worldHit = groundForLane(lane > 0 ? lane : 0);
+            break;
+        default:               slug = "click_hit"; worldHit = groundForLane(lane > 0 ? lane : 0); break;
     }
 
-    glm::vec4 pColor{1, 1, 1, 1};
-    int pCount = 12;
-    switch (judgment) {
-        case Judgment::Perfect: pColor = {0.2f, 1.0f, 0.3f, 1.f}; pCount = 20; break;
-        case Judgment::Good:    pColor = {0.3f, 0.6f, 1.0f, 1.f}; pCount = 14; break;
-        case Judgment::Bad:     pColor = {1.0f, 0.25f, 0.2f, 1.f}; pCount = 8;  break;
-        default: break;
+    auto it = m_particleEffects.find(slug);
+    if (it != m_particleEffects.end())
+        m_renderer->particles().emitEffect(it->second, worldHit);
+}
+
+void ArcaeaRenderer::resolveParticleEffects(const GameModeConfig* config) {
+    m_particleEffects.clear();
+    if (!m_particleLibrary || !m_renderer) return;
+    const std::string mode = "arcaea";
+    for (const auto& slot : arcaeaParticleSlots()) {
+        std::string name = defaultParticleEffectName(mode, slot.slug);
+        if (config) {
+            auto b = config->particleEffects.find(slot.slug);
+            if (b != config->particleEffects.end() && !b->second.empty())
+                name = b->second;
+        }
+        const ParticleEffectAsset* a = m_particleLibrary->get(name);
+        if (!a) a = m_particleLibrary->get(defaultParticleEffectName(mode, slot.slug));
+        if (!a) continue;
+        uint16_t pipeKey = 0;
+        if (a->kind == ParticleEffectKind::Custom && !a->customShaderPath.empty()) {
+            std::string abs =
+                (m_particleLibrary->projectDir() / a->customShaderPath).string();
+            pipeKey = m_renderer->particles().registerCustomPipeline(abs);
+        }
+        m_particleEffects[slot.slug] = particleEmitFromAsset(*a, pipeKey);
     }
-    m_renderer->particles().emitBurst(worldHit, pColor, pCount, 3.f, 0.15f, 0.5f);
 }

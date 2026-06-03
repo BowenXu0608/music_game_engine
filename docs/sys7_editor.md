@@ -104,6 +104,10 @@ Multi-waypoint arc editor. Only visible/active in DropNotes + ThreeD mode.
 
 **Sky Height:** Configurable via `GameModeConfig::skyHeight` slider in Game Mode Config panel (range -1 to 3, default 1.0). Saved in `music_selection.json`.
 
+**Drop-mode camera sliders (Note tab → Lane Layout):** `Camera Distance` (0.5–2.0×) and `Field of View` (0–110°, 0 = mode default) for all DropNotes; `Playfield Width` (30–100%) and `Playfield Height` (30–100%) for 2D drop only. Reworked 2026-06-04 — for 2D drop the camera is **fixed** (no scaling, angle constant): **Camera Distance** sets how much track is visible ahead (far-draw distance), **Playfield Height** sets the judgment-line screen position (vertical shift), **Playfield Width** sets the bottom width. The preview math in `renderSceneView` (2D branch) mirrors `BandoriRenderer::onResize` verbatim — edit both. Full model + rationale: sys6_game_modes.md → BandoriRenderer "Camera model" and devlog 2026-06-04.
+
+**FX tab — `ui_tap` button-feedback effect (2026-06-04):** the shared player-screen button-tap particle effect (`"ui_tap"`, `kUiTapEffectName`) is a normal `.pfx` that surfaces in the FX-tab effect list (`renderParticlePage`) and edits through the existing CRUD — color/size/count/kind incl. **Custom** GLSL. No per-button binding (it's uniform); seeded by `ParticleEffectLibrary::seedUiTapEffect()` on project open. Rendering/trigger detail: sys1_rendering.md → "UI button-tap particles".
+
 ### Chart Persistence
 
 Save -> `exportAllCharts()` writes UCF JSON per difficulty. Song open -> loads charts back via `ChartLoader`. Round-trips: notes, scan fields, disk animation, scan speed events, waypoints, sample points, arc data (startX/Y, endX/Y, easeX/Y, color, void), arctap positions, beat markers.

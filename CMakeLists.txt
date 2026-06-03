@@ -100,6 +100,7 @@ if(GLSLC)
         ${SHADER_DIR}/quad_pulse.frag
         ${SHADER_DIR}/quad_gradient.frag
         ${SHADER_DIR}/quad_pbr.vert  ${SHADER_DIR}/quad_pbr.frag
+        ${SHADER_DIR}/particle.vert  ${SHADER_DIR}/particle.frag
         ${SHADER_DIR}/line.vert      ${SHADER_DIR}/line.frag
         ${SHADER_DIR}/mesh.vert
         ${SHADER_DIR}/mesh_pbr.frag
@@ -145,6 +146,17 @@ add_custom_command(TARGET MusicGameEngineTest POST_BUILD
             $<TARGET_FILE_DIR:MusicGameEngineTest>/assets/copilot_skills
     COMMENT "Copying copilot skill assets"
 )
+
+# Ensure freshly compiled SPIR-V is available next to the test exe (its CWD is
+# anchored to the exe dir at runtime, where it loads "shaders/<name>.spv").
+if(GLSLC)
+    add_custom_command(TARGET MusicGameEngineTest POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+                ${SHADER_OUT}
+                $<TARGET_FILE_DIR:MusicGameEngineTest>/shaders
+        COMMENT "Copying compiled shaders next to test exe"
+    )
+endif()
 
 # ── Tests ────────────────────────────────────────────────────────────────────
 # Phase 1b de-risk gate: confirms ChartLoader recovers every field the

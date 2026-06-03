@@ -1,10 +1,13 @@
 #pragma once
 #include "GameModeRenderer.h"
 #include "renderer/Material.h"
+#include "renderer/ParticleSystem.h"   // ParticleEmit
 #include <glm/glm.hpp>
 #include <vector>
 #include <utility>
 #include <unordered_map>
+#include <map>
+#include <string>
 #include <optional>
 
 class CytusRenderer : public GameModeRenderer {
@@ -15,7 +18,7 @@ public:
     void onUpdate(float dt, double songTime) override;
     void onRender(Renderer& renderer) override;
     void onShutdown(Renderer& renderer) override;
-    void showJudgment(int lane, Judgment judgment) override;
+    void showJudgment(int lane, Judgment judgment, float timingDelta = 0.f) override;
     const Camera& getCamera() const override { return m_camera; }
 
     // ── Spatial picker ─────────────────────────────────────────────────
@@ -49,6 +52,10 @@ public:
         float    expectedX, expectedY; // screen-space expected position
     };
     std::vector<SlideTick> consumeSlideTicks(double songTime);
+
+    // Emit the bound `slide_tick` particle effect at a swept sample position.
+    // Called by Engine for each landed slide sample point.
+    void emitSlideTickEffect(glm::vec2 screenPos, Judgment judgment);
 
 private:
     // ── Scan-line schedule ─────────────────────────────────────────────
@@ -109,6 +116,10 @@ private:
     std::vector<ScanNote>       m_notes;
     std::vector<ScanSpeedEvent> m_speedEvents;
     std::vector<PhaseEntry>     m_phaseTable;
+
+    // Resolved particle effects keyed by event-slot slug (ParticleSlots.h).
+    std::map<std::string, ParticleEmit> m_particleEffects;
+    void resolveParticleEffects(const GameModeConfig* config);
 
     // Per-slot chart material overrides, keyed by slot id.
     std::unordered_map<uint16_t, Material> m_chartMaterials;

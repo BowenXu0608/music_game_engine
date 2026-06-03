@@ -2,8 +2,11 @@
 #include "GameModeRenderer.h"
 #include "renderer/MeshRenderer.h"
 #include "renderer/Material.h"
+#include "renderer/ParticleSystem.h"   // ParticleEmit
 #include <vector>
 #include <unordered_map>
+#include <map>
+#include <string>
 
 class ArcaeaRenderer : public GameModeRenderer {
 public:
@@ -13,7 +16,9 @@ public:
     void onUpdate(float dt, double songTime) override;
     void onRender(Renderer& renderer) override;
     void onShutdown(Renderer& renderer) override;
-    void showJudgment(int lane, Judgment judgment) override;
+    void showJudgment(int lane, Judgment judgment, float timingDelta = 0.f) override;
+    void showHitEffect(HitEventKind kind, int lane,
+                       NoteType type, Judgment judgment) override;
     const Camera& getCamera() const override { return m_camera; }
 
 private:
@@ -38,6 +43,11 @@ private:
 
     // Returns the chart override for `slot` if present, else `fallback`.
     Material slotOrFallback(uint16_t slot, const Material& fallback) const;
+
+    // Resolved particle effects keyed by event-slot slug (ParticleSlots.h).
+    // Arcaea effects emit in WORLD space (world-scale params).
+    std::map<std::string, ParticleEmit> m_particleEffects;
+    void resolveParticleEffects(const GameModeConfig* config);
 
     Renderer* m_renderer = nullptr;
     Camera    m_camera;

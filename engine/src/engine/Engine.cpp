@@ -5,6 +5,7 @@
 #include "game/modes/ArcaeaRenderer.h"
 #include "game/modes/LanotaRenderer.h"
 #include "game/chart/ChartLoader.h"
+#include "renderer/ParticleSlots.h"
 #include "input/TouchTypes.h"
 #include "input/ScreenMetrics.h"
 #include <imgui.h>
@@ -215,7 +216,7 @@ void Engine::init(uint32_t width, uint32_t height, const std::string& title,
             auto it = m_keyboardHolds.find(lane);
             if (it != m_keyboardHolds.end()) {
                 auto hit = m_hitDetector.endHold(it->second, songT);
-                if (hit) dispatchHitResult(*hit, lane);
+                if (hit) dispatchHitResult(*hit, lane, /*isHoldEnd=*/true);
                 m_keyboardHolds.erase(it);
             }
         }
@@ -286,6 +287,16 @@ void Engine::openProject(const std::string& projectPath) {
     // calling with the same path just re-scans the materials dir, which is
     // cheap and covers the editor-adds-a-new-mat-file case.
     m_materialLibrary.loadFromProject(projectPath);
+
+    // Load + seed the particle-effect library for the project. Bandori is the
+    // only mode with a slot table today (Phase 5 extends this); seeding is
+    // idempotent and preserves user edits.
+    m_particleLibrary.loadFromProject(projectPath);
+    m_particleLibrary.seedDefaultEffects("bandori");
+    m_particleLibrary.seedDefaultEffects("cytus");
+    m_particleLibrary.seedDefaultEffects("arcaea");
+    m_particleLibrary.seedDefaultEffects("lanota");
+    m_particleLibrary.seedUiTapEffect();   // shared button-tap feedback effect
 
     // Determine which modes the project actually uses (from chart filenames)
     // so we only seed shared defaults for modes in play. Then migrate each
@@ -397,6 +408,7 @@ void Engine::update(float dt) {
     m_input.update(m_clock.songTime()); // process hold timeouts
 
     m_renderer.particles().update(dt);
+    m_renderer.uiParticles().update(dt);
 
     // Test mode transitions
     if (m_testTransitioning) {
@@ -438,8 +450,12 @@ void Engine::update(float dt) {
             Judgment j = t.hit ? Judgment::Perfect : Judgment::Miss;
             m_judgment.recordJudgment(j);
             m_score.onJudgment(j);
-            if (m_activeMode && t.lane >= 0)
+            if (m_activeMode && t.lane >= 0) {
                 m_activeMode->showJudgment(t.lane, j);
+                if (j != Judgment::Miss)
+                    m_activeMode->showHitEffect(HitEventKind::HoldTick, t.lane,
+                                                NoteType::Hold, j);
+            }
             // No SFX on hold sample ticks. playClickSfx() allocates a new
             // ma_audio_buffer + ma_sound per call and leaks them both, which
             // adds up fast on dense sample-point holds — the leaked source
@@ -488,17 +504,19 @@ void Engine::update(float dt) {
                 Judgment j = hit ? Judgment::Perfect : Judgment::Miss;
                 m_judgment.recordJudgment(j);
                 m_score.onJudgment(j);
-                // Per-sample-point particle feedback at the swept position.
-                if (j != Judgment::Miss) {
-                    m_renderer.particles().emitBurst(
-                        {st.expectedX, st.expectedY},
-                        {0.2f, 1.f, 0.3f, 1.f}, 16, 200.f, 7.f, 0.45f);
-                }
+                // Per-sample-point particle feedback via the bound `slide_tick`
+                // effect at the swept position (author-customizable in the FX tab).
+                if (j != Judgment::Miss)
+                    cyt->emitSlideTickEffect({st.expectedX, st.expectedY}, j);
             }
         }
 
         m_activeMode->setActiveHoldIds(m_hitDetector.activeHoldIds());
         m_activeMode->onUpdate(dt, songT);
+        // After onUpdate so the renderer's song time is current — the aura
+        // tracks the hold's lane at the judgment line, which moves for
+        // cross-lane holds.
+        m_activeMode->emitHoldAura(dt);   // sustained sparkle for held notes
     }
 
     // Update preview mode at editor scene time
@@ -638,10 +656,43 @@ void Engine::render() {
         m_songEditor.renderCopilotOverlay(this);
     }
 
+    // Button-tap feedback: emit on a tap that landed on a player-screen widget.
+    // Runs while the ImGui frame is still open so hover/click state is current.
+    tickUiTapParticles(renderedLayer);
+
     m_imgui.endFrame();
     m_imgui.render(m_renderer.currentCmd());
 
+    // Draw the UI tap particles ON TOP of the ImGui UI (swapchain pass is still
+    // open until finishFrame()).
+    m_renderer.flushUiParticles();
+
     m_renderer.finishFrame();
+}
+
+void Engine::tickUiTapParticles(EditorLayer renderedLayer) {
+    // Player context only: desktop shows player screens under test mode; the
+    // editor pages (ProjectHub / SongEditor) and non-test editing never spark.
+    const bool playerScreen =
+        renderedLayer == EditorLayer::StartScreen   ||
+        renderedLayer == EditorLayer::MusicSelection||
+        renderedLayer == EditorLayer::Settings      ||
+        renderedLayer == EditorLayer::GamePlay;
+    if (!isTestMode() || !playerScreen) return;
+
+    ImGuiIO& io = ImGui::GetIO();
+    // A primary tap that landed on an interactive widget this frame. The
+    // gameplay scene is an ImGui::Image in a NoInputs window, so note/lane taps
+    // register no item and are excluded automatically; only real buttons fire.
+    if (!io.MouseClicked[0] || !ImGui::IsAnyItemHovered()) return;
+
+    const ParticleEffectAsset* a = m_particleLibrary.get(kUiTapEffectName);
+    ParticleEmit fx = a ? particleEmitFromAsset(*a, 0) : ParticleEmit{};
+    if (a && a->kind == ParticleEffectKind::Custom && !a->customShaderPath.empty()) {
+        std::string abs = (m_particleLibrary.projectDir() / a->customShaderPath).string();
+        fx.pipeKey = m_renderer.uiParticles().registerCustomPipeline(abs);
+    }
+    m_renderer.uiParticles().emitEffect(fx, {io.MousePos.x, io.MousePos.y});
 }
 
 void Engine::setupPreviewMode(const GameModeConfig& config, const ChartData& chart,
@@ -653,6 +704,7 @@ void Engine::setupPreviewMode(const GameModeConfig& config, const ChartData& cha
     m_previewMode = createRenderer(config);
     m_previewMode->setEditorPreview(true);
     m_previewMode->setMaterialLibrary(&m_materialLibrary);
+    m_previewMode->setParticleLibrary(&m_particleLibrary);
     m_previewMode->onInit(m_renderer, chart, &config);
     m_previewMode->onResize(m_renderer.width(), m_renderer.height());
 
@@ -717,6 +769,7 @@ void Engine::setMode(GameModeRenderer* renderer, const ChartData& chart,
 
     m_activeMode.reset(renderer);
     m_activeMode->setMaterialLibrary(&m_materialLibrary);
+    m_activeMode->setParticleLibrary(&m_particleLibrary);
     m_activeMode->onInit(m_renderer, chart, config);
     // onInit's internal onResize used the full window; re-fit to the
     // letterboxed scene rect so the camera aspect matches the chosen ratio.
@@ -1103,13 +1156,22 @@ void Engine::renderResultsOverlay() {
 
 // ── Gesture handlers ─────────────────────────────────────────────────────────
 
-void Engine::dispatchHitResult(const HitResult& hit, int lane) {
+void Engine::dispatchHitResult(const HitResult& hit, int lane, bool isHoldEnd) {
     auto judgment = m_judgment.judge(hit.timingDelta);
     m_judgment.recordJudgment(judgment);
     m_score.onJudgment(judgment);
 
-    if (m_activeMode)
-        m_activeMode->showJudgment(lane >= 0 ? lane : 0, judgment);
+    if (m_activeMode) {
+        int effLane = lane >= 0 ? lane : 0;
+        m_activeMode->showJudgment(effLane, judgment, hit.timingDelta);
+        // Drive the bound particle effect for this event. The kind is derived
+        // from the note type, except hold releases which the caller flags.
+        HitEventKind kind = isHoldEnd ? HitEventKind::HoldEnd
+                          : hit.noteType == NoteType::Flick ? HitEventKind::FlickHit
+                          : hit.noteType == NoteType::Hold  ? HitEventKind::HoldHead
+                                                            : HitEventKind::ClickHit;
+        m_activeMode->showHitEffect(kind, effLane, hit.noteType, judgment);
+    }
 
     std::cout << "Hit - ";
     switch (judgment) {
@@ -1146,7 +1208,11 @@ void Engine::handleGestureLaneBased(const GestureEvent& evt, double songTime) {
                     auto judgment = m_judgment.judgeFlick(hit->timingDelta, dirAcc);
                     m_judgment.recordJudgment(judgment);
                     m_score.onJudgment(judgment);
-                    if (m_activeMode) m_activeMode->showJudgment(lane, judgment);
+                    if (m_activeMode) {
+                        m_activeMode->showJudgment(lane, judgment, hit->timingDelta);
+                        m_activeMode->showHitEffect(HitEventKind::FlickHit, lane,
+                                                    NoteType::Flick, judgment);
+                    }
                 } else {
                     // Flick gesture on a non-flick note — treat as plain tap
                     dispatchHitResult(*hit, lane);
@@ -1185,7 +1251,7 @@ void Engine::handleGestureLaneBased(const GestureEvent& evt, double songTime) {
             auto it = m_activeTouches.find(evt.touchId);
             if (it != m_activeTouches.end()) {
                 auto hit = m_hitDetector.endHold(it->second, songTime);
-                if (hit) dispatchHitResult(*hit, lane);
+                if (hit) dispatchHitResult(*hit, lane, /*isHoldEnd=*/true);
                 m_activeTouches.erase(it);
             }
             break;

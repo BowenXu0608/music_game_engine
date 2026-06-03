@@ -1,6 +1,8 @@
 #include "LanotaRenderer.h"
 #include "renderer/Renderer.h"
 #include "renderer/MaterialAssetLibrary.h"
+#include "renderer/ParticleEffectLibrary.h"
+#include "renderer/ParticleSlots.h"
 #include "ui/ProjectHub.h"   // GameModeConfig definition
 #include <glm/gtc/matrix_transform.hpp>
 #include <cmath>
@@ -59,6 +61,7 @@ glm::vec2 LanotaRenderer::w2s(glm::vec3 pos, const glm::mat4& vp, float sw, floa
 void LanotaRenderer::onInit(Renderer& renderer, const ChartData& chart,
                             const GameModeConfig* config) {
     m_renderer = &renderer;
+    resolveParticleEffects(config);
 
     // Per-slot chart material overrides — resolveMaterial() handles both
     // asset references and legacy inline entries.
@@ -920,22 +923,46 @@ LanotaRenderer::pickNoteAt(glm::vec2 screenPx, double songTime, float pixelTol) 
     return best;
 }
 
-void LanotaRenderer::emitHitFeedback(uint32_t noteId, Judgment judgment) {
-    if (!m_renderer) return;
-    if (judgment == Judgment::Miss) return;
+NoteType LanotaRenderer::noteTypeById(uint32_t id) const {
+    for (const auto& ring : m_rings)
+        for (const auto& note : ring.notes)
+            if (note.id == id) return note.type;
+    return NoteType::Tap;
+}
 
+void LanotaRenderer::resolveParticleEffects(const GameModeConfig* config) {
+    m_particleEffects.clear();
+    if (!m_particleLibrary || !m_renderer) return;
+    const std::string mode = "lanota";
+    for (const auto& slot : lanotaParticleSlots()) {
+        std::string name = defaultParticleEffectName(mode, slot.slug);
+        if (config) {
+            auto b = config->particleEffects.find(slot.slug);
+            if (b != config->particleEffects.end() && !b->second.empty())
+                name = b->second;
+        }
+        const ParticleEffectAsset* a = m_particleLibrary->get(name);
+        if (!a) a = m_particleLibrary->get(defaultParticleEffectName(mode, slot.slug));
+        if (!a) continue;
+        uint16_t pipeKey = 0;
+        if (a->kind == ParticleEffectKind::Custom && !a->customShaderPath.empty()) {
+            std::string abs =
+                (m_particleLibrary->projectDir() / a->customShaderPath).string();
+            pipeKey = m_renderer->particles().registerCustomPipeline(abs);
+        }
+        m_particleEffects[slot.slug] = particleEmitFromAsset(*a, pipeKey);
+    }
+}
+
+void LanotaRenderer::emitHitFeedback(uint32_t noteId, Judgment judgment) {
+    if (!m_renderer || judgment == Judgment::Miss) return;
     glm::vec2 screen;
     if (!projectNoteScreen(noteId, screen)) return;
-
-    glm::vec4 pColor;
-    int       pCount = 12;
-    switch (judgment) {
-        case Judgment::Perfect: pColor = {0.2f, 1.f,   0.3f, 1.f}; pCount = 20; break;
-        case Judgment::Good:    pColor = {0.3f, 0.6f,  1.f,  1.f}; pCount = 14; break;
-        case Judgment::Bad:     pColor = {1.f,  0.25f, 0.2f, 1.f}; pCount = 8;  break;
-        default: return;
-    }
-    m_renderer->particles().emitBurst(screen, pColor, pCount, 200.f, 8.f, 0.5f);
+    const char* slug = (noteTypeById(noteId) == NoteType::Flick) ? "flick_hit"
+                                                                 : "click_hit";
+    auto it = m_particleEffects.find(slug);
+    if (it != m_particleEffects.end())
+        m_renderer->particles().emitEffect(it->second, screen);
 }
 
 std::optional<uint32_t>
@@ -979,7 +1006,7 @@ LanotaRenderer::findNoteByAngle(float targetAngle, float angularTol) const {
     return best;
 }
 
-void LanotaRenderer::showJudgment(int lane, Judgment judgment) {
+void LanotaRenderer::showJudgment(int lane, Judgment judgment, float /*timingDelta*/) {
     if (m_trackCount <= 0) return;
     // Same formula as the lane→angle fallback in onInit so the keyboard maps
     // back to the same notes the fallback synthesized.
@@ -995,19 +1022,13 @@ void LanotaRenderer::showJudgment(int lane, Judgment judgment) {
     }
 
     // No standalone note at this lane/time — this is a Bandori-style hold
-    // sample tick passing under the hit line. Emit a burst anyway so the
-    // player sees feedback as the hold carves its path.
+    // sample tick passing under the hit line. Emit the bound `hold_tick`
+    // effect so the player sees feedback as the hold carves its path.
     if (judgment == Judgment::Miss || !m_renderer) return;
-    glm::vec4 pColor;
-    int       pCount = 12;
-    switch (judgment) {
-        case Judgment::Perfect: pColor = {0.2f, 1.f,   0.3f, 1.f}; pCount = 20; break;
-        case Judgment::Good:    pColor = {0.3f, 0.6f,  1.f,  1.f}; pCount = 14; break;
-        case Judgment::Bad:     pColor = {1.f,  0.25f, 0.2f, 1.f}; pCount = 8;  break;
-        default: return;
-    }
-    // Position the burst on the outer hit ring at the lane's angle — that's
-    // where the hold head sits during the hold, on the close (large) disk.
+    auto it = m_particleEffects.find("hold_tick");
+    if (it == m_particleEffects.end()) return;
+    // Position on the outer hit ring at the lane's angle — where the hold head
+    // sits during the hold, on the close (large) disk.
     float sw = static_cast<float>(m_width);
     float sh = static_cast<float>(m_height);
     float ringAngleOffset = m_rings.empty() ? 0.f : m_rings.front().currentAngle;
@@ -1019,7 +1040,7 @@ void LanotaRenderer::showJudgment(int lane, Judgment judgment) {
     glm::vec4 clip = m_perspVP * glm::vec4(world, 1.f);
     if (clip.w <= 0.f) return;
     glm::vec2 screen = w2s(world, m_perspVP, sw, sh);
-    m_renderer->particles().emitBurst(screen, pColor, pCount, 200.f, 8.f, 0.5f);
+    m_renderer->particles().emitEffect(it->second, screen);
 }
 
 // -----------------------------------------------------------------------------

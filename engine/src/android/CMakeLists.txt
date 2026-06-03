@@ -32,6 +32,8 @@ set(SHARED_RENDERER_SOURCES
     ${ENGINE_SRC}/renderer/LineBatch.cpp
     ${ENGINE_SRC}/renderer/MeshRenderer.cpp
     ${ENGINE_SRC}/renderer/ParticleSystem.cpp
+    ${ENGINE_SRC}/renderer/ParticleEffectAsset.cpp
+    ${ENGINE_SRC}/renderer/ParticleEffectLibrary.cpp
     ${ENGINE_SRC}/renderer/PostProcess.cpp
     ${ENGINE_SRC}/renderer/ShaderCompiler.cpp
     ${ENGINE_SRC}/renderer/Material.cpp

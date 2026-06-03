@@ -6,6 +6,10 @@ struct JudgmentDisplay {
     Judgment type = Judgment::Miss;
     float lifetime = 0.f;
     glm::vec2 position{0.f};
+    float laneX01     = 0.5f;   // normalized lane-center X (0..1), HUD/window space
+    float hitLineY01  = 0.9f;   // normalized Y of the judgment line (0=top,1=bottom)
+    float laneWidthPx = 120.f;  // on-screen width of one lane at the hit line (px)
+    int   timingSign  = 0;      // +1 = early, -1 = late, 0 = none
 
     static constexpr float DURATION = 0.8f;
 
@@ -13,6 +17,17 @@ struct JudgmentDisplay {
         type = j;
         position = pos;
         lifetime = DURATION;
+    }
+
+    // Richer spawn used by renderers that drive the floating judgment text.
+    void spawn(Judgment j, float normLaneX, float hitY01, float laneW, int sign) {
+        type = j;
+        laneX01     = normLaneX;
+        hitLineY01  = hitY01;
+        laneWidthPx = laneW;
+        timingSign  = sign;
+        position    = {0.f, 0.f};
+        lifetime    = DURATION;
     }
 
     void update(float dt) {

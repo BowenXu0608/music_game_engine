@@ -218,6 +218,31 @@ void MusicSelectionView::load(const std::string& projectPath) {
                                 song.gameMode.noteAssets[it.key()] = na;
                             }
                         }
+
+                        if (gm.contains("particleEffects") &&
+                            gm["particleEffects"].is_object()) {
+                            for (auto it = gm["particleEffects"].begin();
+                                 it != gm["particleEffects"].end(); ++it) {
+                                if (it.value().is_string())
+                                    song.gameMode.particleEffects[it.key()] =
+                                        it.value().get<std::string>();
+                            }
+                        }
+
+                        if (gm.contains("judgmentLabels") &&
+                            gm["judgmentLabels"].is_object()) {
+                            const auto& jl = gm["judgmentLabels"];
+                            JudgmentLabels& L = song.gameMode.judgmentLabels;
+                            L.perfect   = jl.value("perfect",   L.perfect);
+                            L.goodEarly = jl.value("goodEarly", L.goodEarly);
+                            L.goodLate  = jl.value("goodLate",  L.goodLate);
+                            L.badEarly  = jl.value("badEarly",  L.badEarly);
+                            L.badLate   = jl.value("badLate",   L.badLate);
+                            L.miss      = jl.value("miss",      L.miss);
+                            L.yOffset   = jl.value("yOffset",   L.yOffset);
+                            L.fontSize  = jl.value("fontSize",  L.fontSize);
+                            L.enabled   = jl.value("enabled",   L.enabled);
+                        }
                     }
                     set.songs.push_back(std::move(song));
                 }
@@ -323,6 +348,28 @@ void MusicSelectionView::save() {
                     naJ[toUtf8(kv.first)] = entry;
                 }
                 gmJ["noteAssets"] = naJ;
+            }
+
+            if (!song.gameMode.particleEffects.empty()) {
+                json peJ = json::object();
+                for (const auto& kv : song.gameMode.particleEffects)
+                    peJ[toUtf8(kv.first)] = toUtf8(kv.second);
+                gmJ["particleEffects"] = peJ;
+            }
+
+            {
+                const JudgmentLabels& L = song.gameMode.judgmentLabels;
+                json jl;
+                jl["perfect"]   = toUtf8(L.perfect);
+                jl["goodEarly"] = toUtf8(L.goodEarly);
+                jl["goodLate"]  = toUtf8(L.goodLate);
+                jl["badEarly"]  = toUtf8(L.badEarly);
+                jl["badLate"]   = toUtf8(L.badLate);
+                jl["miss"]      = toUtf8(L.miss);
+                jl["yOffset"]   = L.yOffset;
+                jl["fontSize"]  = L.fontSize;
+                jl["enabled"]   = L.enabled;
+                gmJ["judgmentLabels"] = jl;
             }
 
             songJ["gameMode"] = gmJ;

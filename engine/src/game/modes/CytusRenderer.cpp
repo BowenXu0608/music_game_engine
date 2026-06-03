@@ -2,6 +2,9 @@
 #include "renderer/Renderer.h"
 #include "renderer/ParticleSystem.h"
 #include "renderer/MaterialAssetLibrary.h"
+#include "renderer/ParticleEffectLibrary.h"
+#include "renderer/ParticleSlots.h"
+#include "ui/ProjectHub.h"   // GameModeConfig
 #include <glm/glm.hpp>
 #include <cmath>
 #include <algorithm>
@@ -197,8 +200,9 @@ bool CytusRenderer::scanLineGoingUp(double t) const {
 }
 
 void CytusRenderer::onInit(Renderer& renderer, const ChartData& chart,
-                           const GameModeConfig* /*config*/) {
+                           const GameModeConfig* config) {
     m_renderer = &renderer;
+    resolveParticleEffects(config);
 
     // Import per-slot material overrides — asset or legacy inline, picked by
     // resolveMaterial() based on which form the entry populates.
@@ -564,7 +568,7 @@ void CytusRenderer::markNoteHit(uint32_t noteId) {
     }
 }
 
-void CytusRenderer::showJudgment(int lane, Judgment judgment) {
+void CytusRenderer::showJudgment(int lane, Judgment judgment, float /*timingDelta*/) {
     if (judgment == Judgment::Miss) return;
     float bestDist = 999.f;
     ScanNote* best = nullptr;
@@ -577,20 +581,50 @@ void CytusRenderer::showJudgment(int lane, Judgment judgment) {
     }
     if (best) best->isHit = true;
 
-    // Particle burst at the note's on-screen position.
+    // Bound particle effect at the note's on-screen position. Slot is chosen by
+    // the note type (slide bodies fire their per-sample effect via the Engine
+    // slide-tick path, so the slide HEAD reads as a click here).
     if (m_renderer && best) {
-        glm::vec4 pColor;
-        int pCount = 12;
-        switch (judgment) {
-            case Judgment::Perfect: pColor = {0.2f, 1.f,  0.3f, 1.f}; pCount = 20; break;
-            case Judgment::Good:    pColor = {0.3f, 0.6f, 1.f,  1.f}; pCount = 14; break;
-            case Judgment::Bad:     pColor = {1.f,  0.6f, 0.2f, 1.f}; pCount = 10; break;
-            default: return;
+        const char* slug = best->isHold  ? "hold_head"
+                         : best->isFlick ? "flick_hit"
+                                         : "click_hit";
+        auto it = m_particleEffects.find(slug);
+        if (it != m_particleEffects.end()) {
+            glm::vec2 hitPos(scanToScreenX(best->sx), scanToScreenY(best->sy));
+            m_renderer->particles().emitEffect(it->second, hitPos);
         }
-        glm::vec2 hitPos(scanToScreenX(best->sx), scanToScreenY(best->sy));
-        m_renderer->particles().emitBurst(hitPos, pColor, pCount,
-                                          200.f, 8.f, 0.5f);
     }
+}
+
+void CytusRenderer::resolveParticleEffects(const GameModeConfig* config) {
+    m_particleEffects.clear();
+    if (!m_particleLibrary || !m_renderer) return;
+    const std::string mode = "cytus";
+    for (const auto& slot : cytusParticleSlots()) {
+        std::string name = defaultParticleEffectName(mode, slot.slug);
+        if (config) {
+            auto b = config->particleEffects.find(slot.slug);
+            if (b != config->particleEffects.end() && !b->second.empty())
+                name = b->second;
+        }
+        const ParticleEffectAsset* a = m_particleLibrary->get(name);
+        if (!a) a = m_particleLibrary->get(defaultParticleEffectName(mode, slot.slug));
+        if (!a) continue;
+        uint16_t pipeKey = 0;
+        if (a->kind == ParticleEffectKind::Custom && !a->customShaderPath.empty()) {
+            std::string abs =
+                (m_particleLibrary->projectDir() / a->customShaderPath).string();
+            pipeKey = m_renderer->particles().registerCustomPipeline(abs);
+        }
+        m_particleEffects[slot.slug] = particleEmitFromAsset(*a, pipeKey);
+    }
+}
+
+void CytusRenderer::emitSlideTickEffect(glm::vec2 screenPos, Judgment judgment) {
+    if (!m_renderer || judgment == Judgment::Miss) return;
+    auto it = m_particleEffects.find("slide_tick");
+    if (it == m_particleEffects.end()) return;
+    m_renderer->particles().emitEffect(it->second, screenPos);
 }
 
 // Linear interpolation along a piecewise-linear path at parameter u ∈ [0,1].

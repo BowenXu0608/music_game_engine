@@ -1,6 +1,7 @@
 #pragma once
 #include "renderer/Renderer.h"
 #include "renderer/MaterialAssetLibrary.h"
+#include "renderer/ParticleEffectLibrary.h"
 #include "renderer/vulkan/TextureManager.h"
 #include "game/modes/GameModeRenderer.h"
 #include "game/screens/GameplayHudView.h"
@@ -84,6 +85,7 @@ public:
     // Expose InputManager so platform code (Android JNI, iOS bridge) can inject touches
     InputManager& inputManager() override { return m_input; }
     MaterialAssetLibrary& materialLibrary() override { return m_materialLibrary; }
+    ParticleEffectLibrary& particleLibrary() { return m_particleLibrary; }
 
     // Point the material library at a project and reload its assets.
     // ProjectHub/StartScreenEditor call this when a project is opened; the
@@ -118,7 +120,7 @@ private:
     // every Renderer::onResize.
     void refreshSceneTexture();
 
-    void dispatchHitResult(const HitResult& hit, int lane = -1);
+    void dispatchHitResult(const HitResult& hit, int lane = -1, bool isHoldEnd = false);
     void handleGestureLaneBased(const GestureEvent& evt, double songTime);
     void handleGestureArcaea(const GestureEvent& evt, double songTime);
     void handleGesturePhigros(const GestureEvent& evt, double songTime);
@@ -128,6 +130,13 @@ private:
                                const GestureEvent& evt, double songTime);
 
     static std::unique_ptr<GameModeRenderer> createRenderer(const GameModeConfig& config);
+
+    // Button-tap feedback: if the current frame's tap landed on an interactive
+    // UI widget on a player screen, emit the shared `ui_tap` effect at the tap
+    // point into the renderer's UI particle instance (drawn on top of ImGui).
+    // Call after the per-layer page render(), before ImGui::Render().
+    void tickUiTapParticles(EditorLayer renderedLayer);
+
     void togglePause();
     void renderGameplayHUD();
     void renderPauseOverlay();
@@ -178,6 +187,10 @@ private:
     // inline material entries into this library before the chart hits a
     // renderer, so downstream code only ever sees asset references.
     MaterialAssetLibrary               m_materialLibrary;
+    // Per-project ParticleEffectAsset registry. Loaded + seeded alongside the
+    // material library in openProject(); shared with the active game-mode
+    // renderer via setParticleLibrary().
+    ParticleEffectLibrary              m_particleLibrary;
 
     PreviewAspect                      m_previewAspect;
     GameplayHudView                    m_hudView;

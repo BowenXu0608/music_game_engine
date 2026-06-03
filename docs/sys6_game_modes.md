@@ -26,7 +26,16 @@ Engine creates renderers via `createRenderer(GameModeConfig)` factory.
 
 ## BandoriRenderer (2D Drop Notes)
 
-**Dynamic lane count** from `config->trackCount`. **Configurable camera** (eye, target, FOV from GameModeConfig). **Auto lane spacing** computed from camera FOV + aspect ratio.
+**Dynamic lane count** from `config->trackCount`. **Auto lane spacing** computed each `onResize` so the highway bottom hits `playfieldWidthPct` of the screen.
+
+### Camera model (reworked 2026-06-04 — `onResize`)
+
+The camera is **fixed**: `camEye {0,5,8}`, `camTarget {0,0,-24}`, baseline FOV 55° (overridden when `cameraFovDeg > 0`). Position, pitch and FOV never change, so the lane-convergence **angle is constant** under every author knob. The two drop-camera knobs are orthogonal, angle-preserving, and do **not** scale the field:
+
+- **Camera Distance → visible track length** (`m_approachZ`, member; baseline `APPROACH_Z=-55` kept only as the reference constant). `dN=(clamp(camDistance,0.5,2)-0.5)/1.5`, `m_approachZ=-mix(20,110,dN)`. The track quad, lane dividers, hold-body `zFar`, hold sample-tick cull, and note cull all use `m_approachZ`, so a higher value draws + reveals more track toward the vanishing point (bottom width + angle unchanged).
+- **Playfield Height → judgment-line screen position** (`anchorNdcY`). `hN=(clamp(playfieldHeightPct,0.3,1)-0.3)/0.7`, `anchorNdcY=mix(0.2,0.85,hN)` (flipped NDC, +1=bottom; higher % = lower line, more room above). Applied as a **clip-space vertical shift** after `lookAt`: project hit point `(0,0,0)`, then `proj[k][1] += (anchorNdcY - hitNdcY)*proj[k][3]` for k=0..3 (only `proj[2][3]≠0`, so it is `proj[2][1] -= delta` = uniform NDC-Y translate). Leaves the view matrix, FOV, X axis and `proj[1][1]` (note sizing) untouched.
+
+`cameraDistance`/`playfieldHeightPct`/`playfieldWidthPct`/`cameraFovDeg` are per-chart (`GameModeConfig`, saved in `music_selection.json`). The legacy `cameraEye/Target/Fov` config fields are vestigial for both drop renderers. **This whole block is duplicated in `SongEditor::renderSceneView` (2D branch)** — keep them in sync. 3D drop (Arcaea) keeps its eye-dolly + `APPROACH_Z=-55` (gated by `preview3D`). See devlog 2026-06-04 for the full rationale + the four failed attempts.
 
 **Rendering:** Perspective-projected ground-plane notes scrolling toward hit zone. Hold bodies tessellated as ribbon strips with multi-waypoint cross-lane paths (Straight/Angle90/Curve/Rhomboid transitions). Hold sample-point markers along the ribbon.
 

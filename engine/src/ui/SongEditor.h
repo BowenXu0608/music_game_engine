@@ -7,6 +7,7 @@
 #include "game/chart/ChartTypes.h"
 #include "game/chart/ScanPageUtils.h"
 #include "renderer/MaterialSlots.h"
+#include "renderer/ParticleEffectAsset.h"
 #include "renderer/vulkan/TextureManager.h"
 #include <vulkan/vulkan.h>
 #include <GLFW/glfw3.h>
@@ -170,6 +171,9 @@ private:
     // Materials block and the Note tab's per-type sections.
     void renderMaterialSlotPicker(Engine* engine, MaterialModeKey modeKey,
                                   const MaterialSlotInfo& slot);
+    // Left-sidebar "FX" tab: particle-effect asset CRUD, per-event slot
+    // bindings (GameModeConfig::particleEffects), and judgment-text labels.
+    void renderParticlePage(Engine* engine);
     void renderAiPanels();
     void renderGameModePreview(ImDrawList* dl, ImVec2 origin, ImVec2 size);
     void renderChartTimeline(ImDrawList* dl, ImVec2 origin, ImVec2 size, Engine* engine);
@@ -306,6 +310,14 @@ private:
     // gesture pushes a new waypoint. "Apply to All Holds" rewrites every
     // existing hold waypoint's style to this value.
     EditorHoldTransition m_defaultHoldTransition = EditorHoldTransition::Curve;
+
+    // ── Particle FX tab edit state (renderParticlePage) ──────────────────
+    std::string         m_selectedEffect;        // name of effect being edited
+    ParticleEffectAsset m_editingEffect;         // working copy
+    bool                m_effectEditLoaded = false;
+    std::string         m_effectCompileLog;      // custom-shader compile result
+    char                m_newEffectNameBuf[64] = {};
+    bool                m_showNewEffectDialog = false;
 
     // ── Circle-mode disk animation authoring ─────────────────────────────
     // Per-difficulty keyframe lists, matching the m_diffNotes convention.

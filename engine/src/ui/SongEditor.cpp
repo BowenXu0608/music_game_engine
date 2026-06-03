@@ -5,6 +5,9 @@
 #include "renderer/vulkan/BufferManager.h"
 #include "renderer/MaterialSlots.h"
 #include "renderer/MaterialAssetLibrary.h"
+#include "renderer/ParticleEffectLibrary.h"
+#include "renderer/ParticleSlots.h"
+#include "renderer/ShaderCompiler.h"
 #include "editor/AIEditorClient.h"
 #include "editor/AIEditorConfig.h"
 #include "editor/ChartAudit.h"
@@ -751,6 +754,10 @@ void SongEditor::render(Engine* engine) {
             }
             if (ImGui::BeginTabItem("Material")) {
                 renderMaterialBuilderPage(engine);
+                ImGui::EndTabItem();
+            }
+            if (ImGui::BeginTabItem("FX")) {
+                renderParticlePage(engine);
                 ImGui::EndTabItem();
             }
             ImGui::EndTabBar();
@@ -1779,6 +1786,216 @@ void SongEditor::renderMaterialSlotPicker(Engine* engine,
     ImGui::PopID();
 }
 
+// ── renderParticlePage ───────────────────────────────────────────────────────
+// Left-sidebar "FX" tab. Three blocks:
+//   1. Particle-effect asset CRUD (create / edit kind+params+custom shader /
+//      save / delete) against the project ParticleEffectLibrary.
+//   2. Per-event slot bindings (Bandori click/flick/hold-head/tick/aura/end)
+//      written into m_song->gameMode.particleEffects.
+//   3. Judgment-text labels (m_song->gameMode.judgmentLabels).
+void SongEditor::renderParticlePage(Engine* engine) {
+    if (!engine || !m_song) {
+        ImGui::TextDisabled("Open a song to edit effects.");
+        return;
+    }
+    ParticleEffectLibrary& lib = engine->particleLibrary();
+    // Particle slots are mode-specific: ScanLine→cytus (adds slide_tick),
+    // Circle→lanota, 3D drop→arcaea (world-space), 2D drop→bandori.
+    std::string pmode = "bandori";
+    if (m_song->gameMode.type == GameModeType::ScanLine)      pmode = "cytus";
+    else if (m_song->gameMode.type == GameModeType::Circle)   pmode = "lanota";
+    else if (m_song->gameMode.type == GameModeType::DropNotes &&
+             m_song->gameMode.dimension == DropDimension::ThreeD) pmode = "arcaea";
+
+    // ── 1. Effect library editor ─────────────────────────────────────────────
+    ImGui::SeparatorText("Particle Effects");
+    if (ImGui::Button("+ New Effect")) {
+        m_showNewEffectDialog = true;
+        m_newEffectNameBuf[0] = '\0';
+    }
+    ImGui::SameLine();
+    ImGui::TextDisabled("(%d in project)", (int)lib.all().size());
+
+    if (m_showNewEffectDialog) { ImGui::OpenPopup("New Effect"); m_showNewEffectDialog = false; }
+    if (ImGui::BeginPopupModal("New Effect", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::InputText("Name", m_newEffectNameBuf, sizeof(m_newEffectNameBuf));
+        std::string name = m_newEffectNameBuf;
+        bool valid = !name.empty() && !lib.get(name);
+        if (!valid && !name.empty())
+            ImGui::TextColored(ImVec4(1.f, 0.5f, 0.4f, 1.f), "Name already exists");
+        if (!valid) ImGui::BeginDisabled();
+        if (ImGui::Button("Create", ImVec2(100, 0))) {
+            ParticleEffectAsset a;
+            a.name = name;
+            a.targetMode = pmode;
+            lib.upsert(a);
+            m_selectedEffect   = name;
+            m_editingEffect    = a;
+            m_effectEditLoaded = true;
+            m_effectCompileLog.clear();
+            ImGui::CloseCurrentPopup();
+        }
+        if (!valid) ImGui::EndDisabled();
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel", ImVec2(100, 0))) ImGui::CloseCurrentPopup();
+        ImGui::EndPopup();
+    }
+
+    // Selectable list.
+    {
+        float listH = std::min(140.f, ImGui::GetContentRegionAvail().y * 0.3f);
+        ImGui::BeginChild("fx_list", ImVec2(0, listH), true);
+        for (const auto& name : lib.allNames()) {
+            bool selected = (name == m_selectedEffect);
+            if (ImGui::Selectable(name.c_str(), selected)) {
+                m_selectedEffect = name;
+                if (const ParticleEffectAsset* a = lib.get(name)) {
+                    m_editingEffect    = *a;
+                    m_effectEditLoaded = true;
+                    m_effectCompileLog.clear();
+                }
+            }
+        }
+        ImGui::EndChild();
+    }
+
+    if (!m_selectedEffect.empty() && m_effectEditLoaded && lib.get(m_selectedEffect)) {
+        ParticleEffectAsset& e = m_editingEffect;
+        ImGui::Text("Editing: %s", e.name.c_str());
+
+        const char* kindNames[] = {"Burst", "Spark", "Ring", "Aura", "Custom"};
+        int kindIdx = (int)e.kind;
+        ImGui::SetNextItemWidth(-1.f);
+        if (ImGui::Combo("Kind", &kindIdx, kindNames, IM_ARRAYSIZE(kindNames)))
+            e.kind = (ParticleEffectKind)kindIdx;
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Burst=radial pop  Spark=directional+gravity  "
+                              "Ring=expanding  Aura=sustained hold sparkle  "
+                              "Custom=your .frag");
+
+        ImGui::ColorEdit4("Color", e.color.data(),
+                          ImGuiColorEditFlags_AlphaBar);
+        ImGui::ColorEdit4("Fade To", e.colorEnd.data(),
+                          ImGuiColorEditFlags_AlphaBar);
+        ImGui::DragInt("Count", &e.count, 1.f, 1, 200);
+        ImGui::DragFloat("Speed Min", &e.speedMin, 1.f, 0.f, 1000.f);
+        ImGui::DragFloat("Speed Max", &e.speedMax, 1.f, 0.f, 1000.f);
+        ImGui::DragFloat("Size Start", &e.sizeStart, 0.1f, 0.f, 64.f);
+        ImGui::DragFloat("Size End", &e.sizeEnd, 0.1f, 0.f, 64.f);
+        ImGui::DragFloat("Life Min", &e.lifeMin, 0.01f, 0.02f, 4.f);
+        ImGui::DragFloat("Life Max", &e.lifeMax, 0.01f, 0.02f, 4.f);
+        ImGui::DragFloat("Spread", &e.spread, 0.01f, 0.f, 6.2831853f);
+        ImGui::DragFloat2("Gravity", e.gravity.data(), 2.f, -2000.f, 2000.f);
+        ImGui::DragFloat("Drag", &e.drag, 0.005f, 0.5f, 1.f);
+        if (e.kind == ParticleEffectKind::Aura) {
+            ImGui::DragFloat("Rate (/s)", &e.rateHz, 1.f, 1.f, 400.f);
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Sustained spawn rate while a hold is held.");
+        }
+
+        if (e.kind == ParticleEffectKind::Custom) {
+            char shBuf[260];
+            std::snprintf(shBuf, sizeof(shBuf), "%s", e.customShaderPath.c_str());
+            ImGui::SetNextItemWidth(-90.f);
+            if (ImGui::InputText("Shader", shBuf, sizeof(shBuf)))
+                e.customShaderPath = shBuf;
+            ImGui::SameLine();
+            if (ImGui::Button("Compile") && !e.customShaderPath.empty()) {
+                std::filesystem::path abs =
+                    std::filesystem::path(lib.projectDir()) / e.customShaderPath;
+                ShaderCompileResult r = compileFragmentToSpv(abs, /*forceRebuild*/ true);
+                m_effectCompileLog = r.ok ? ("OK - " + r.spvPath)
+                                          : ("FAILED\n" + r.errorLog);
+            }
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Project-relative .frag. Inputs: fragUV, "
+                                  "fragColor, fragData(life01, seed); additive.");
+            if (!m_effectCompileLog.empty())
+                ImGui::TextWrapped("%s", m_effectCompileLog.c_str());
+        }
+
+        // Target slot — which event-slot picker this effect appears in.
+        const auto& slots = particleSlotsForMode(pmode);
+        std::vector<const char*> slotItems; slotItems.push_back("(any slot)");
+        for (auto& s : slots) slotItems.push_back(s.label.c_str());
+        int slotIdx = 0;
+        for (size_t i = 0; i < slots.size(); ++i)
+            if (slots[i].slug == e.targetSlotSlug) { slotIdx = (int)i + 1; break; }
+        ImGui::SetNextItemWidth(-1.f);
+        if (ImGui::Combo("Target slot", &slotIdx, slotItems.data(), (int)slotItems.size())) {
+            if (slotIdx == 0) { e.targetSlotSlug.clear(); }
+            else { e.targetSlotSlug = slots[slotIdx - 1].slug; e.targetMode = pmode; }
+        }
+
+        ImGui::Spacing();
+        if (ImGui::Button("Save", ImVec2(100, 0))) {
+            lib.upsert(e);
+            m_selectedEffect = e.name;
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Delete", ImVec2(100, 0))) {
+            lib.remove(e.name);
+            m_selectedEffect.clear();
+            m_effectEditLoaded = false;
+        }
+    } else {
+        ImGui::TextDisabled("Select an effect (or create one) to edit.");
+    }
+
+    // ── 2. Per-event bindings ─────────────────────────────────────────────────
+    ImGui::Spacing();
+    ImGui::SeparatorText("Event Bindings");
+    {
+        auto& binds = m_song->gameMode.particleEffects;
+        for (const auto& slot : particleSlotsForMode(pmode)) {
+            ImGui::PushID(slot.slug.c_str());
+            std::vector<std::string> compat =
+                lib.namesCompatibleWith(pmode, slot.slug);
+            std::vector<const char*> items; items.push_back("(default)");
+            for (auto& n : compat) items.push_back(n.c_str());
+
+            std::string cur;
+            auto bit = binds.find(slot.slug);
+            if (bit != binds.end()) cur = bit->second;
+            int sel = 0;
+            for (size_t i = 0; i < compat.size(); ++i)
+                if (compat[i] == cur) { sel = (int)i + 1; break; }
+
+            ImGui::Text("%s", slot.label.c_str());
+            ImGui::SetNextItemWidth(-1.f);
+            if (ImGui::Combo("##fxbind", &sel, items.data(), (int)items.size())) {
+                if (sel == 0) binds.erase(slot.slug);
+                else          binds[slot.slug] = compat[sel - 1];
+            }
+            ImGui::PopID();
+        }
+        ImGui::TextDisabled("(default) uses the seeded default_%s_<slot>.", pmode.c_str());
+    }
+
+    // ── 3. Judgment text ──────────────────────────────────────────────────────
+    ImGui::Spacing();
+    ImGui::SeparatorText("Judgment Text");
+    {
+        JudgmentLabels& L = m_song->gameMode.judgmentLabels;
+        ImGui::Checkbox("Show judgment text", &L.enabled);
+        auto strField = [](const char* label, std::string& s) {
+            char buf[64];
+            std::snprintf(buf, sizeof(buf), "%s", s.c_str());
+            if (ImGui::InputText(label, buf, sizeof(buf))) s = buf;
+        };
+        strField("Perfect",    L.perfect);
+        strField("Good early", L.goodEarly);
+        strField("Good late",  L.goodLate);
+        strField("Bad early",  L.badEarly);
+        strField("Bad late",   L.badLate);
+        strField("Miss",       L.miss);
+        ImGui::DragFloat("Above line", &L.yOffset, 0.005f, 0.f, 0.5f, "%.3f");
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Height above the judgment line (0..1 of screen).");
+        ImGui::DragFloat("Font px", &L.fontSize, 0.5f, 8.f, 80.f);
+    }
+}
+
 // ── applySongHoldCornerStyle ─────────────────────────────────────────────────
 // Corner shape is a single song-wide setting (Note tab). Force every hold in
 // the current difficulty — legacy single-transition AND every multi-waypoint
@@ -1849,8 +2066,8 @@ void SongEditor::renderNotePage(Engine* engine) {
         if (gm.type == GameModeType::DropNotes) {
             ImGui::Text("Camera Distance");
             if (ImGui::IsItemHovered())
-                ImGui::SetTooltip("How far the camera sits from the playfield.\n"
-                                  "1.0 = default; lower zooms in, higher pulls back.");
+                ImGui::SetTooltip("How much of the track is visible ahead.\n"
+                                  "Higher = the highway reaches further into the distance.");
             ImGui::SetNextItemWidth(-1);
             ImGui::SliderFloat("##camDistance", &gm.cameraDistance, 0.5f, 2.0f, "%.2fx");
 
@@ -1874,8 +2091,8 @@ void SongEditor::renderNotePage(Engine* engine) {
 
                 ImGui::Text("Playfield Height");
                 if (ImGui::IsItemHovered())
-                    ImGui::SetTooltip("How tall the highway appears.\n"
-                                      "Higher = lower, flatter camera (taller).");
+                    ImGui::SetTooltip("Vertical position of the judgment line.\n"
+                                      "Higher = lower line, more room above it.");
                 ImGui::SetNextItemWidth(-1);
                 float hDisplay = gm.playfieldHeightPct * 100.f;
                 if (ImGui::SliderFloat("##playfieldH", &hDisplay,
@@ -3536,28 +3753,65 @@ void SongEditor::renderSceneView(ImDrawList* dl, ImVec2 origin, ImVec2 size,
         // gameplay. cameraDistance/FovDeg are the relative knobs on top.
         float aspect = size.x / std::max(size.y, 1.f);
         bool  preview3D = (gm.dimension == DropDimension::ThreeD);
-        // 2D baseline blended by playfieldHeightPct — must mirror
-        // BandoriRenderer::onResize exactly (dual-site).
+        // 2D camera: FIXED position/pitch/FOV (no scaling of the field).
+        //   Camera Distance  -> far draw distance (how much track is visible).
+        //   Playfield Height -> vertical position of the judgment line.
+        // 3D keeps its dolly. Mirrors BandoriRenderer::onResize (dual-site).
         float hN = (std::clamp(gm.playfieldHeightPct, 0.3f, 1.f) - 0.3f) / 0.7f;
-        glm::vec3 camBaseEye   = preview3D
-            ? glm::vec3{0.f, 3.f, 10.f}
-            : glm::vec3{0.f, glm::mix(7.0f, 1.5f, hN), glm::mix(11.0f, 6.0f, hN)};
+        float dN = (std::clamp(gm.cameraDistance, 0.5f, 2.0f) - 0.5f) / 1.5f;
+        float approachZ  = preview3D ? -55.f : -glm::mix(20.f, 110.f, dN);
+        float anchorNdcY = glm::mix(0.2f, 0.85f, hN);
         glm::vec3 camTarget    = preview3D
             ? glm::vec3{0.f, 0.f, 0.f}
-            : glm::vec3{0.f, 0.f, glm::mix(-22.0f, -55.0f, hN)};
-        float     baseFovDeg   = preview3D ? 45.f : 55.f;
-        glm::vec3 camEye = camTarget +
-                           (camBaseEye - camTarget) * std::max(gm.cameraDistance, 0.01f);
+            : glm::vec3{0.f, 0.f, -24.f};
+        glm::vec3 camBaseEye   = preview3D
+            ? glm::vec3{0.f, 3.f, 10.f}
+            : glm::vec3{0.f, 5.f, 8.f};
+        // 3D dollies the eye along the view ray; 2D keeps the eye fixed.
+        glm::vec3 camEye = preview3D
+            ? camTarget + (camBaseEye - camTarget) * std::max(gm.cameraDistance, 0.01f)
+            : camBaseEye;
+        float     baseFovDeg = preview3D ? 45.f : 55.f;
         float fovDeg = gm.cameraFovDeg > 0.f ? gm.cameraFovDeg : baseFovDeg;
         float     camFov = glm::radians(std::clamp(fovDeg, 20.f, 120.f));
         glm::mat4 proj = glm::perspective(camFov, aspect, 0.1f, 300.f);
         // Flip Y for screen coords (top=0)
         proj[1][1] *= -1.f;
         glm::mat4 view = glm::lookAt(camEye, camTarget, glm::vec3(0.f, 1.f, 0.f));
-        glm::mat4 vp = proj * view;
 
         constexpr float HIT_ZONE_Z  = 0.f;
-        constexpr float APPROACH_Z  = -55.f;
+        float APPROACH_Z = approachZ;
+
+        if (!preview3D) {
+            // Pin the judgment line (z=0) to anchorNdcY (vertical shift only).
+            glm::vec4 hitClip = (proj * view) * glm::vec4(0.f, 0.f, 0.f, 1.f);
+            if (std::abs(hitClip.w) > 1e-5f) {
+                float delta = anchorNdcY - hitClip.y / hitClip.w;
+                for (int k = 0; k < 4; ++k) proj[k][1] += delta * proj[k][3];
+            }
+        }
+        glm::mat4 vp = proj * view;
+
+        constexpr float SCROLL_SPEED = 14.f;
+        float laneSpacing = 1.2f;
+        {
+            glm::mat4 mvp = vp;
+            auto bw2s = [&](glm::vec3 p) -> float {
+                glm::vec4 c = mvp * glm::vec4(p, 1.f);
+                if (c.w <= 0.f) return 0.f;
+                return origin.x + (c.x / c.w * 0.5f + 0.5f) * size.x;
+            };
+            float lx = bw2s({-1.f, 0.f, HIT_ZONE_Z});
+            float rx = bw2s({ 1.f, 0.f, HIT_ZONE_Z});
+            float pxPerUnit = (rx - lx) * 0.5f;
+            if (pxPerUnit > 0.f) {
+                float widthPct = (gm.dimension == DropDimension::TwoD)
+                                     ? std::clamp(gm.playfieldWidthPct, 0.2f, 1.f)
+                                     : 0.30f;
+                float desiredPx = size.x * widthPct;
+                laneSpacing = desiredPx / pxPerUnit / tc;
+            }
+        }
 
         auto w2s = [&](glm::vec3 pos) -> ImVec2 {
             glm::vec4 clip = vp * glm::vec4(pos, 1.f);
@@ -3567,20 +3821,6 @@ void SongEditor::renderSceneView(ImDrawList* dl, ImVec2 origin, ImVec2 size,
             return ImVec2(origin.x + (ndcX * 0.5f + 0.5f) * size.x,
                           origin.y + (ndcY * 0.5f + 0.5f) * size.y);
         };
-        constexpr float SCROLL_SPEED = 14.f;
-        float laneSpacing = 1.2f;
-        {
-            ImVec2 lt = w2s({-1.f, 0.f, HIT_ZONE_Z});
-            ImVec2 rt = w2s({ 1.f, 0.f, HIT_ZONE_Z});
-            float pxPerUnit = (rt.x - lt.x) * 0.5f;
-            if (pxPerUnit > 0.f) {
-                float widthPct = (gm.dimension == DropDimension::TwoD)
-                                     ? std::clamp(gm.playfieldWidthPct, 0.2f, 1.f)
-                                     : 0.30f;
-                float desiredPx = size.x * widthPct;
-                laneSpacing = desiredPx / pxPerUnit / tc;
-            }
-        }
 
         bool is3D = (gm.dimension == DropDimension::ThreeD);
 
