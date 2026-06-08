@@ -2851,3 +2851,82 @@ they're a point-in-time record, not current API.
 4. **Keep a back-compat seam at the read boundary.** One `normalizeModeToken` at the two asset
    loaders means old projects degrade gracefully (mode resolves; a missing renamed asset just falls
    back to the slot default) instead of the rename being a hard data break.
+
+## 2026-06-09 — Music Selection: iOS-picker rollers, START click SFX, UI-particle Y-flip fix, difficulty SFX (branch `pbr-material-system`)
+
+Four related changes to the Music Selection page, in order.
+
+### 1. The two wheels became real iOS-style rollers
+The set (left) and song (right) wheels were a faked-3D card stack: linear `yShift`, a manual
+trapezoid skew, **mouse-wheel-only** scrolling, and per-card `InvisibleButton`s. The user wanted
+them to read and feel like the **iPhone alarm time picker** — especially drag-to-spin on a phone.
+Reworked both ([`MusicSelectionView.cpp`](engine/src/game/screens/MusicSelectionView.cpp)) around
+one shared path:
+
+- **Cylindrical projection** — file-local `cylSample(t, centerY, radius, angleStep)` maps a signed
+  row-offset `t` onto a vertical cylinder: `y = centerY + R·sin(θ)`, `depth = max(0,cos θ)`,
+  `alpha = depth^1.35`, culled past ~85°. Rows bunch together and fade/shrink toward the top &
+  bottom edges; the centered row is largest and brightest. `rowPitch = clamp(height/7, 46, 100)`,
+  `angleStep = 0.34 rad`, `radius = rowPitch / sin(angleStep)`.
+- **Shared physics/input** — `tickWheelInput(...)` (one method, both wheels) places a single
+  full-band `InvisibleButton` and handles: **1:1 drag** (content follows finger; `vel = drows/dt`
+  carried into release), **momentum** (`cur += vel·dt`, friction `vel *= exp(-9·dt)`),
+  **snap-to-center** (`cur += (tgt-cur)·min(1,14·dt)` once vel settles), **mouse-wheel** as a flick
+  impulse, and **tap-to-select** via inverse projection (`t = asin((my-centerY)/radius)/angleStep`).
+  It also plays the scroll SFX when the centered index changes and returns it. New state on the
+  View: `m_*ScrollVel`, `m_dragWheel`/`m_dragLastY`/`m_dragTotal`/`m_dragMoved` (`DragWheel` enum).
+  The old `update()` lerp was removed (physics now lives here).
+- **Fixed center selection band** — `drawWheelBand` draws a faint accent fill + two hairlines at
+  `centerY ± rowPitch/2`; content scrolls *through* it (set = blue, song = pink).
+- **Row content (chosen by the user: "compact cover + name")** — `drawRollerRow` draws a
+  depth-scaled, vertically-foreshortened cover thumbnail + the title via
+  `AddText(font, fontSz, …)` (per-row font size scales with `depth`, so far rows shrink like iOS).
+  The **centered song row** additionally gets the score line + FC/AP rhombus badges (reusing the
+  diamond `AddImageQuad` uv trick). This **supersedes** the 2026-05 "Song wheel card redesign".
+- Per-card `InvisibleButton`s are gone (the band button owns tap+drag), so the **card-click SFX
+  moved** (see §2). Double-click on the song band still calls `onSongCardDoubleClick`.
+
+### 2. Click SFX moved from card-tap → START
+Per the user's clarification of the original wheel-sounds spec: the **scroll** SFX fires on row
+change (unchanged), and the **click** SFX (`m_wheelClickSfx`) now fires when the player presses
+**START** (`renderPlayButton`, on a successful `canPlay` launch), not when tapping a card. With
+the roller's per-card buttons removed there's no card-tap to hook anyway, and "click = commit"
+matches the intent.
+
+### 3. UI tap-particle landed in the wrong place — a Y-flip (not DPI)
+Reported: the `ui_tap` Ring spark appeared at the **window center / on the cover**, not under the
+cursor (most obvious on the centered START button). Two wrong guesses first — (a) DisplaySize vs
+swapchain-extent **DPI scaling**; I threaded `flushUiParticles(dispW, dispH)` to build the ortho
+in ImGui's `DisplaySize` space. Symptom changed but persisted. (b) Then I **instrumented**: a green
+ImGui ring at `io.MousePos` + a red particle emitted at the *same* coordinate + on-screen
+`MousePos/DisplaySize/fb` text. The screenshot was decisive: **`DisplaySize == fb (1280×720)`**
+(no DPI issue), X matched, and **mouse-at-top → spark-at-bottom**. A pure **vertical flip**.
+
+Root cause: `flushUiParticles` built its ortho with `Camera::makeOrtho(0, w, h, 0)`.
+`makeOrtho` wraps `glm::ortho`, whose **OpenGL Y-up** convention mirrors Y in this Vulkan pipeline
+(positive-height viewport, no negative-viewport flip; `makePerspective` flips `proj[1][1]`
+explicitly but `makeOrtho` does not). Fix: **`makeOrtho(0, w, 0, h)`** (`bottom=0, top=h`) so screen
+y=0 (top) → NDC −1 (top). One line in [`Renderer.cpp`](engine/src/renderer/Renderer.cpp). The
+DisplaySize plumbing from the first attempt was kept (harmless here, correct if scaling ever
+appears). Lesson: this same `makeOrtho(0,w,h,0)` "works" for Drop2D only because its quad batch
+feeds pre-flipped screen pixels from `w2s` — don't assume an ortho call that looks right elsewhere
+is right here; **measure with a ground-truth marker** instead of reasoning about conventions.
+
+### 4. New "Difficulty Sound" SFX box
+The user asked for a sound when the player clicks a difficulty button, configured **between** the
+existing Scroll and Click slots. Added `m_difficultySfx` on the View (round-tripped as
+`difficultySfx`, same `toUtf8` save), a third `sfxDropZone("Difficulty Sound", …)` in the
+Music-Selection sidebar's Wheel Sounds group (order: Scroll → Difficulty → Click), and threaded
+`IPlayerEngine*` into `renderDifficultyButtons` so EASY/MEDIUM/HARD play it. Fires **on change**
+(re-clicking the current difficulty is silent), matching the scroll-SFX rule.
+
+### Files
+- `engine/src/game/screens/MusicSelectionView.{h,cpp}` — rollers (`cylSample`/`drawWheelBand`/
+  `drawRollerRow`/`tickWheelInput`), drag/momentum/snap state, START click SFX, `m_difficultySfx`
+  + difficulty-button wiring, JSON round-trip.
+- `engine/src/renderer/Renderer.{h,cpp}` — `flushUiParticles(dispW,dispH)` + the `makeOrtho` Y-flip
+  fix.
+- `engine/src/engine/Engine.cpp` + `engine/src/android/AndroidEngine.cpp` — pass `DisplaySize` to
+  `flushUiParticles`.
+- `engine/src/ui/MusicSelectionEditor.cpp` — third SFX drop-zone; pass `m_engine` to
+  `renderDifficultyButtons`.

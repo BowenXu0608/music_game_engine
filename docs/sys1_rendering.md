@@ -336,11 +336,19 @@ against `swapchainRenderPass()` instead of the scene pass. Its built-in and
 1. `endFrame()` → scene pass closes (scene `m_particles` already flushed inside).
 2. ImGui frame: per-layer page render → `tickUiTapParticles()` (emit into
    `m_uiParticles`) → `m_imgui.render()` draws the UI into the open swapchain pass.
-3. `Renderer::flushUiParticles()` — sets a screen-space ortho `FrameUBO`
-   (`Camera::makeOrtho(0,w,h,0)`, so emit positions are window pixels =
-   `ImGui MousePos`) and flushes `m_uiParticles` into `m_currentCmd` at
-   `m_sync.currentFrame()` with `m_whiteTexSet`. Runs while the swapchain pass is
-   still open → particles land on top of the UI.
+3. `Renderer::flushUiParticles(dispW, dispH)` — sets a screen-space ortho
+   `FrameUBO` so emit positions are window pixels = `ImGui MousePos`, and flushes
+   `m_uiParticles` into `m_currentCmd` at `m_sync.currentFrame()` with
+   `m_whiteTexSet`. Runs while the swapchain pass is still open → particles land
+   on top of the UI. **Two coordinate gotchas (both fixed 2026-06-09):**
+   (a) the ortho is **`Camera::makeOrtho(0, w, 0, h)`** — `bottom=0, top=h`, NOT
+   the OpenGL-style `(0,w,h,0)`, which mirrors Y in this Vulkan pipeline (positive
+   viewport; `makeOrtho` does not flip Y the way `makePerspective` does). The
+   wrong form made a top-screen tap spark at the bottom.
+   (b) `w/h` come from the caller's **ImGui `DisplaySize`** (`Engine`/`AndroidEngine`
+   pass `io.DisplaySize`), not the swapchain extent, so the mapping holds under OS
+   display scaling (logical px ≠ physical framebuffer px). Falls back to the extent
+   if `<=0`.
 4. `finishFrame()` closes the pass + submits.
 `m_uiParticles.update(dt)` runs alongside `m_particles.update(dt)`.
 

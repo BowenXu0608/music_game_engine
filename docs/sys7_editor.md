@@ -371,7 +371,7 @@ MAT tiles render live `drawMaterialPreviewAt()` previews instead of the old stat
 - **Page Background + frosted overlay**: `m_pageBackground` persisted as top-level `background` in `music_selection.json`; drop zone in Hierarchy panel. When set, `renderPreview` and `renderGamePreview` paint the background over the whole scene, then layer 5 horizontal bands — left 18% heavy frost (α 190), 18 px gradient heavy→light, middle light frost (α 55), 18 px gradient light→heavy, right 18% heavy frost. 2 px dark vertical shadow lines at each boundary give the frost panels visible depth. (Earlier attempt used bright 1-px highlight lines with `+0.5f` / `-0.5f` sub-pixel offsets — removed because the fractional rasterization made left and right look asymmetric.)
 - **Achievement badges (page-level)**: `m_fcImage` / `m_apImage` persisted as top-level `fcImage` / `apImage`. Hierarchy panel shows two 96×96 square drop zones with **aspect-fit display** via `getThumb` → `m_thumbCache` → `Texture.width/height` → `scale = min(zoneSide/imgW, zoneSide/imgH)` centered. Toggle button "Preview Badges in Scene" lives inside the Hierarchy panel.
 - Per-difficulty stats added to `SongInfo`: `scoreEasy / scoreMedium / scoreHard` + `achievementEasy / achievementMedium / achievementHard`. Judgement system writes these; UI is read-only (per-difficulty score/achievement editor was added + removed per user feedback — belongs to the runtime, not the author).
-- **Song wheel card redesign**: layout = `[cover 25%] [text column] [rhombus pair + padding]`. Rhombus sized first (`rhombusH = min(sh*1.6, cardW*0.20)`, rhombusW = rhombusH, 25% overlap), text column takes leftover width. Two Arcaea-style diamonds to the right of name+score drawn via `AddQuadFilled` (backing: cyan tint for FC unlocked, gold for AP, dark-gray when locked) + `AddImageQuad` (badge image clipped to the diamond's 4 vertices using uv `{0.5,0} {1,0.5} {0.5,1} {0,0.5}`; full alpha when unlocked, 25% when locked) + `AddQuad` outline (white unlocked, gray locked). AP implies FC. Per-card `PushClipRect` using the card's screen bounding rect so long names don't spill. Name pinned to `quadCY - sh*0.30`, score to `quadCY + sh*0.15` — overlap fixed. Preview toggle inside Hierarchy panel force-sets `fcUnlocked = apUnlocked = true` in the wheel so every card's slots light up.
+- **Song wheel card redesign** *(superseded 2026-06-09 by the iOS rollers — see "Music Selection — iOS-picker rollers"; the rhombus-badge / uv-clip technique was carried over to the centered roller row)*: layout = `[cover 25%] [text column] [rhombus pair + padding]`. Rhombus sized first (`rhombusH = min(sh*1.6, cardW*0.20)`, rhombusW = rhombusH, 25% overlap), text column takes leftover width. Two Arcaea-style diamonds to the right of name+score drawn via `AddQuadFilled` (backing: cyan tint for FC unlocked, gold for AP, dark-gray when locked) + `AddImageQuad` (badge image clipped to the diamond's 4 vertices using uv `{0.5,0} {1,0.5} {0.5,1} {0,0.5}`; full alpha when unlocked, 25% when locked) + `AddQuad` outline (white unlocked, gray locked). AP implies FC. Per-card `PushClipRect` using the card's screen bounding rect so long names don't spill. Name pinned to `quadCY - sh*0.30`, score to `quadCY + sh*0.15` — overlap fixed. Preview toggle inside Hierarchy panel force-sets `fcUnlocked = apUnlocked = true` in the wheel so every card's slots light up.
 
 ### Audio preview (AI-picked)
 
@@ -447,26 +447,54 @@ The class-name test: if you'd put `Editor` in the name, that file isn't going in
 
 ## Music Selection — wheel sounds (2026-06-04)
 
-The song-select wheel uses **sounds** (not the `ui_tap` particle spark) when changing songs,
-with **separate scroll and click effects**, configured from the **Music Selection editor
-sidebar**.
+The song-select page uses **sounds** (not the `ui_tap` particle spark) for selection feedback,
+configured from the **Music Selection editor sidebar**. **Three** project-level effects (updated
+2026-06-09):
 
-- **Data (shared, in the View):** `MusicSelectionView` gained `m_wheelScrollSfx` /
-  `m_wheelClickSfx` (project-relative paths, protected), round-tripped in `music_selection.json`
-  as `wheelScrollSfx` / `wheelClickSfx` (load + `toUtf8` save, next to `background`/`fcImage`).
-  Helper `playWheelSfx(IPlayerEngine*, rel)` → `audio().playSfxFile(projectPath + "/" + rel)`
-  (concurrent file SFX, see sys2).
-- **Triggers:** `renderSetWheel` / `renderSongWheel` now take `IPlayerEngine* engine`. Scroll
-  handlers play `wheelScrollSfx` **only when the rounded selected index actually changes**;
-  card `InvisibleButton` clicks play `wheelClickSfx`. Wired in both `renderGamePreview`
-  (test/Android) and `MusicSelectionEditor::render` (passes `m_engine`, so authors hear it while
-  scrolling the editor preview).
+- **Data (shared, in the View):** `MusicSelectionView` holds `m_wheelScrollSfx` / `m_difficultySfx`
+  / `m_wheelClickSfx` (project-relative paths, protected), round-tripped in `music_selection.json`
+  as `wheelScrollSfx` / `difficultySfx` / `wheelClickSfx` (load + `toUtf8` save, next to
+  `background`/`fcImage`). Helper `playWheelSfx(IPlayerEngine*, rel)` →
+  `audio().playSfxFile(projectPath + "/" + rel)` (concurrent file SFX, see sys2).
+- **Triggers** (each fires **only on change**, so re-selecting the same item is silent):
+  - **scroll** → played by `tickWheelInput` when a roller's centered row changes (drag / flick /
+    wheel / tap). See "Music Selection — iOS rollers" below.
+  - **difficulty** → `renderDifficultyButtons(…, IPlayerEngine*)` plays it when the player picks a
+    different EASY/MEDIUM/HARD.
+  - **click** → `renderPlayButton` plays it when the player presses **START** (a successful
+    `canPlay` launch). *(Was the per-card tap before 2026-06-09; the rollers removed per-card
+    buttons, and "click = commit" matches the intent.)*
+  All wired in both `renderGamePreview` (test/Android) and `MusicSelectionEditor::render` (passes
+  `m_engine`, so authors hear them in the editor preview).
 - **No spark on the wheel:** `renderGamePreview` calls `engine->suppressUiTapParticle()` (sys3)
-  while the cursor is over either wheel band, so song/set cards don't spark but the center
+  while the cursor is over either roller band, so song/set rows don't spark but the center
   difficulty/Start buttons still do.
 - **Editor control:** a "Wheel Sounds" section in the Music-Selection sidebar (after Achievement
-  Badges) with an inline `sfxDropZone` lambda — two `ASSET_PATH` drag-drop slots ("Scroll Sound"
-  / "Click Sound") showing the filename + a Clear button; empty = silent. Fields are inherited
-  protected members of the base View (the `XxxEditor : public XxxView` pattern above).
+  Badges) with an inline `sfxDropZone` lambda — **three** `ASSET_PATH` drag-drop slots in order
+  **Scroll Sound → Difficulty Sound → Click Sound**, each showing the filename + a Clear button;
+  empty = silent. Fields are inherited protected members of the base View (the
+  `XxxEditor : public XxxView` pattern above).
 - **Android:** not yet wired — `suppressUiTapParticle` is a no-op on the adapter and
   `AndroidEngine` doesn't play these. Follow-up.
+
+## Music Selection — iOS-picker rollers (2026-06-09)
+
+The set (left) and song (right) wheels were reworked from a faked-3D card stack into real
+iPhone-alarm-style rollers (`MusicSelectionView.cpp`). **Supersedes** the "Song wheel card
+redesign" notes above.
+
+- **Cylinder math:** file-local `cylSample(t, centerY, radius, angleStep)` → `{y, depth, alpha}`
+  (`y = centerY + R·sin θ`, `depth = max(0,cos θ)`, `alpha = depth^1.35`, cull past ~85°). Rows
+  bunch + fade toward the rim; center row is biggest/brightest. `rowPitch = clamp(height/7,46,100)`,
+  `angleStep = 0.34`, `radius = rowPitch/sin(angleStep)`.
+- **One input/physics path:** `tickWheelInput(...)` places a single full-band `InvisibleButton`
+  and does 1:1 **drag**, **momentum** (`vel *= exp(-9·dt)`), **snap-to-center**
+  (`cur += (tgt-cur)·min(1,14·dt)`), **mouse-wheel** flick impulse, and **tap-to-select** via
+  inverse projection. Plays the scroll SFX on centered-row change; returns the selected index.
+  State: `m_*ScrollCurrent/Target/Vel` + `DragWheel` drag tracking. The old `update()` lerp was
+  removed.
+- **Center band:** `drawWheelBand` (faint accent fill + two hairlines at `centerY ± rowPitch/2`;
+  set=blue, song=pink). **Rows:** `drawRollerRow` (depth-scaled cover + title via
+  `AddText(font, fontSz, …)`); the centered **song** row also draws score + FC/AP rhombus badges.
+- Per-card `InvisibleButton`s are gone; double-click on the song band still hits
+  `onSongCardDoubleClick`.
