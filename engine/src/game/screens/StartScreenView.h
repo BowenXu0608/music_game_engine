@@ -50,6 +50,8 @@ public:
     const std::string& projectPath() const { return m_projectPath; }
     TransitionEffect   transitionEffect() const { return m_transition; }
     float              transitionDuration() const { return m_transitionDur; }
+    // Dev-supplied tap-to-start sound (project-relative); empty = use default.
+    const char*        tapSfx() const { return m_tapSfx; }
 
 protected:
     // ── project ──────────────────────────────────────────────────────────────

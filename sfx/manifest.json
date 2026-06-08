@@ -1,0 +1,31 @@
+{
+  "version": 1,
+  "_comment": "Bundled default sound-effect library. 'short' = one-shots (note hits, UI buttons); 'long' = sustained loops (held notes). 'defaults' maps each engine role to the library file used when a game dev has not picked one. Files referenced from charts as 'builtin:<file>'. Replace the placeholder entries below with the approved CC0 sounds and keep this manifest in sync.",
+  "short": [
+    { "file": "short/click.wav",   "name": "Click" },
+    { "file": "short/tap.wav",     "name": "Tap" },
+    { "file": "short/blip.wav",    "name": "Blip" },
+    { "file": "short/confirm.wav", "name": "Confirm" },
+    { "file": "short/back.wav",    "name": "Back" },
+    { "file": "short/toggle.wav",  "name": "Toggle" },
+    { "file": "short/scroll.wav",  "name": "Scroll Tick" },
+    { "file": "short/swipe.wav",   "name": "Swipe" }
+  ],
+  "long": [
+    { "file": "long/drone.wav", "name": "Warm Drone" },
+    { "file": "long/pad.wav",   "name": "Soft Pad" }
+  ],
+  "defaults": {
+    "click":      "short/click.wav",
+    "flick":      "short/swipe.wav",
+    "hold_start": "short/tap.wav",
+    "hold_loop":  "long/drone.wav",
+    "hold_tick":  "short/blip.wav",
+    "hold_end":   "short/tap.wav",
+    "ui_tap":     "short/tap.wav",
+    "ui_confirm": "short/confirm.wav",
+    "ui_scroll":  "short/scroll.wav",
+    "ui_back":    "short/back.wav",
+    "ui_toggle":  "short/toggle.wav"
+  }
+}

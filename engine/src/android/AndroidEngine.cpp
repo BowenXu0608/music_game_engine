@@ -3,6 +3,7 @@
 // ============================================================================
 #include "AndroidEngine.h"
 #include "AndroidFileIO.h"
+#include "engine/DefaultSfx.h"
 #include "input/ScreenMetrics.h"
 #include "ui/SettingsPageUI.h"
 #include <android/log.h>
@@ -166,6 +167,15 @@ void AndroidEngine::onWindowInit(ANativeWindow* window) {
         AndroidFileIO::extractToInternal(assetPath);
     }
     m_shaderDir = AndroidFileIO::internalPath() + "shaders";
+
+    // Extract the bundled SFX library: the manifest first, then every file it
+    // lists (short/ + long/). Point DefaultSfx at the extracted dir and preload
+    // the role defaults. Missing files extract/preload as silent no-ops.
+    AndroidFileIO::extractToInternal("sfx/manifest.json");
+    DefaultSfx::setBundleDir(AndroidFileIO::internalPath() + "sfx");
+    for (const auto& rel : DefaultSfx::allLibraryFiles())
+        AndroidFileIO::extractToInternal(std::string("sfx/") + rel);
+    DefaultSfx::preloadDefaults(m_audio);
 
     try {
         m_renderer.init(nullptr, m_shaderDir, false, true);
@@ -604,6 +614,10 @@ void AndroidEngine::renderStartScreen() {
     m_startView.renderGamePreview(origin, displaySz);
 
     if (ImGui::InvisibleButton("##startTap", displaySz)) {
+        if (m_startView.tapSfx()[0] != '\0')
+            m_audio.playSfxFile(m_assetsPath + "/" + m_startView.tapSfx());
+        else
+            m_audio.playCachedSfx(DefaultSfx::cacheKeyForRole(DefaultSfx::Role::UiTap));
         m_screen = GameScreen::MusicSelection;
         LOGI("StartScreen tapped -> MusicSelection");
     }

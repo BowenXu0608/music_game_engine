@@ -54,6 +54,26 @@ public:
     // Empty path or zero SFX volume is a no-op. Path is UTF-8.
     void playSfxFile(const std::string& path);
 
+    // Preload an audio file into an in-memory cache under `key`. Decoded once;
+    // subsequent playCachedSfx(key) plays cheap instances with no disk read or
+    // per-call decode — required for dense SFX (note clicks, hold ticks) that
+    // would otherwise stutter the audio thread (see the no-tick-SFX note that
+    // this replaces in Engine::update). Idempotent: re-preloading an existing
+    // key is a no-op. Path is UTF-8.
+    void preloadSfx(const std::string& key, const std::string& path);
+
+    // Play a one-shot from the preloaded cache. `minIntervalMs` rate-limits a
+    // key (skipped if it last played more recently than that) so dense hold
+    // ticks self-throttle. No-op if muted, volume 0, or `key` not preloaded.
+    void playCachedSfx(const std::string& key, float minIntervalMs = 0.f);
+
+    // Looping SFX, for the sustained tone while a hold note is held.
+    // startLoopingSfx returns a handle (0 on failure) used to stop it later;
+    // the caller keys these by hold note id. Path is UTF-8.
+    uint32_t startLoopingSfx(const std::string& path);
+    void     stopLoopingSfx(uint32_t handle);
+    void     stopAllLoopingSfx();
+
     // Player-settings hooks.
     void setMusicVolume(float v);       // 0..1
     void setSfxVolume(float v);         // 0..1
@@ -68,6 +88,8 @@ public:
                                        uint32_t bucketCount = 65536);
 
 private:
+    void reapFinishedSfx();
+
     struct Impl;
     Impl* m_impl = nullptr;
     bool  m_playing = false;

@@ -299,6 +299,7 @@ void MusicSelectionView::load(const std::string& projectPath) {
                                 GameModeConfig::NoteTypeAssets na;
                                 na.texturePath = it.value().value("texturePath", "");
                                 na.sfxPath     = it.value().value("sfxPath", "");
+                                na.loopSfxPath = it.value().value("loopSfxPath", "");
                                 song.gameMode.noteAssets[it.key()] = na;
                             }
                         }
@@ -432,6 +433,7 @@ void MusicSelectionView::save() {
                     json entry;
                     entry["texturePath"] = toUtf8(kv.second.texturePath);
                     entry["sfxPath"]     = toUtf8(kv.second.sfxPath);
+                    entry["loopSfxPath"] = toUtf8(kv.second.loopSfxPath);
                     naJ[toUtf8(kv.first)] = entry;
                 }
                 gmJ["noteAssets"] = naJ;
@@ -541,9 +543,13 @@ void MusicSelectionView::updateAudioPreview(float dt, IPlayerEngine* engine) {
     }
 }
 
-void MusicSelectionView::playWheelSfx(IPlayerEngine* engine, const std::string& relPath) {
-    if (!engine || relPath.empty()) return;
-    engine->audio().playSfxFile(m_projectPath + "/" + relPath);
+void MusicSelectionView::playWheelSfx(IPlayerEngine* engine, const std::string& relPath,
+                                      DefaultSfx::Role fallback) {
+    if (!engine) return;
+    if (!relPath.empty())
+        engine->audio().playSfxFile(m_projectPath + "/" + relPath);
+    else
+        engine->audio().playCachedSfx(DefaultSfx::cacheKeyForRole(fallback));
 }
 
 void MusicSelectionView::update(float dt, IPlayerEngine* engine) {
@@ -704,7 +710,7 @@ int MusicSelectionView::tickWheelInput(IPlayerEngine* engine, const char* areaId
 
     int centered = (int)std::lround(std::clamp(cur, 0.f, maxIdx));
     if (centered != prevCentered)
-        playWheelSfx(engine, m_wheelScrollSfx);
+        playWheelSfx(engine, m_wheelScrollSfx, DefaultSfx::Role::UiScroll);
     return centered;
 }
 
@@ -974,7 +980,7 @@ void MusicSelectionView::renderDifficultyButtons(ImVec2 origin, float /*width*/,
         snprintf(id, sizeof(id), "##diff_%d", i);
         if (ImGui::InvisibleButton(id, ImVec2(btnW, btnH))) {
             if (diffs[i].diff != m_selectedDifficulty)
-                playWheelSfx(engine, m_difficultySfx);
+                playWheelSfx(engine, m_difficultySfx, DefaultSfx::Role::UiTap);
             m_selectedDifficulty = diffs[i].diff;
         }
     }
@@ -1023,7 +1029,7 @@ void MusicSelectionView::renderPlayButton(ImVec2 origin, float /*width*/, IPlaye
     ImGui::SetCursorScreenPos(ImVec2(bx, by));
     if (ImGui::InvisibleButton("##play_btn", ImVec2(btnW, btnH)) && canPlay) {
         if (engine) {
-            playWheelSfx(engine, m_wheelClickSfx);   // confirm/click SFX on START
+            playWheelSfx(engine, m_wheelClickSfx, DefaultSfx::Role::UiConfirm); // confirm SFX on START
             auto& song = m_sets[m_selectedSet].songs[m_selectedSong];
             engine->launchGameplay(song, m_selectedDifficulty, m_projectPath, m_autoPlay);
         }
@@ -1055,5 +1061,7 @@ void MusicSelectionView::renderPlayButton(ImVec2 origin, float /*width*/, IPlaye
     ImGui::SetCursorScreenPos(ImVec2(abx, aby));
     if (ImGui::InvisibleButton("##autoplay_btn", ImVec2(abtnW, abtnH))) {
         m_autoPlay = !m_autoPlay;
+        if (engine) engine->audio().playCachedSfx(
+            DefaultSfx::cacheKeyForRole(DefaultSfx::Role::UiToggle));
     }
 }

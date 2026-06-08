@@ -1,6 +1,7 @@
 #include "SettingsPageUI.h"
 
 #include "engine/AudioEngine.h"
+#include "engine/DefaultSfx.h"
 
 #include <imgui.h>
 #include <imgui_internal.h>
@@ -113,11 +114,13 @@ void drawCalibrationPanel(PlayerSettings& s, AudioEngine* audio, bool readOnly) 
         ImGui::Separator();
         ImGui::Text("Average tap offset: %+.1f ms", avgMs);
         if (ImGui::Button("Accept", ImVec2(120, 32))) {
+            if (audio) audio->playCachedSfx(DefaultSfx::cacheKeyForRole(DefaultSfx::Role::UiConfirm));
             s.audioOffsetMs = static_cast<float>(avgMs);
             cs.active = false;
         }
         ImGui::SameLine();
         if (ImGui::Button("Retry", ImVec2(120, 32))) {
+            if (audio) audio->playCachedSfx(DefaultSfx::cacheKeyForRole(DefaultSfx::Role::UiTap));
             cs.active = true;
             cs.startTime = ImGui::GetTime() + 1.0;
             cs.beatsTicked = 0;
@@ -125,6 +128,7 @@ void drawCalibrationPanel(PlayerSettings& s, AudioEngine* audio, bool readOnly) 
         }
         ImGui::SameLine();
         if (ImGui::Button("Cancel", ImVec2(120, 32))) {
+            if (audio) audio->playCachedSfx(DefaultSfx::cacheKeyForRole(DefaultSfx::Role::UiBack));
             cs.active = false;
         }
     }
@@ -176,6 +180,8 @@ void SettingsPageUI::render(ImVec2          origin,
     ImGui::SetCursorPosX(ImGui::GetContentRegionAvail().x + ImGui::GetCursorPosX() - backW);
     if (readOnly) ImGui::BeginDisabled();
     if (ImGui::Button("Back", ImVec2(backW, 30))) {
+        if (host.audio) host.audio->playCachedSfx(
+            DefaultSfx::cacheKeyForRole(DefaultSfx::Role::UiBack));
         if (host.onSave) host.onSave();
         if (host.onBack) host.onBack();
     }

@@ -1,4 +1,5 @@
 #include "Engine.h"
+#include "engine/DefaultSfx.h"
 #include "game/modes/Drop2DRenderer.h"
 #include "game/modes/ScanLineRenderer.h"
 #include "game/modes/PhigrosRenderer.h"
@@ -172,6 +173,10 @@ void Engine::init(uint32_t width, uint32_t height, const std::string& title,
 
     m_clock.start();
     m_audio.init();
+    // Preload the bundled UI default SFX so start-screen / music-selection
+    // buttons make sound before any gameplay launch (idempotent; gameplay
+    // re-preloads note defaults + per-song overrides).
+    DefaultSfx::preloadDefaults(m_audio);
     m_imgui.init(m_window, m_renderer.context(), m_renderer.swapchainRenderPass());
 
     // Install crash-safety + window-close hooks once the GLFW window exists.
@@ -456,14 +461,12 @@ void Engine::update(float dt) {
                     m_activeMode->showHitEffect(HitEventKind::HoldTick, t.lane,
                                                 NoteType::Hold, j);
             }
-            // No SFX on hold sample ticks. playClickSfx() allocates a new
-            // ma_audio_buffer + ma_sound per call and leaks them both, which
-            // adds up fast on dense sample-point holds — the leaked source
-            // list keeps growing inside miniaudio's mixer and the audio
-            // thread starts to stutter, which the player hears as music
-            // lag whenever a hold body crosses the judgement line. The
-            // player is already pressing the lane during a hold, so a
-            // per-tick click is unnecessary feedback anyway.
+            // Soft tick at each sample point. Played from the preloaded cache
+            // and throttled to one tick per 60 ms per key, so dense holds no
+            // longer leak/decode per tick (the old reason this was silent).
+            if (j != Judgment::Miss && m_audio.hitSoundEnabled())
+                m_audio.playCachedSfx(DefaultSfx::cacheKeyForRole(DefaultSfx::Role::HoldTick),
+                                      /*minIntervalMs=*/60.f);
         }
         // Holds whose touch wandered off the curve for ≥2 consecutive ticks
         // are marked broken inside the detector. Remove their touch mapping
@@ -511,12 +514,18 @@ void Engine::update(float dt) {
             }
         }
 
-        m_activeMode->setActiveHoldIds(m_hitDetector.activeHoldIds());
+        auto activeHolds = m_hitDetector.activeHoldIds();
+        m_activeMode->setActiveHoldIds(activeHolds);
+        updateHoldLoopSfx(activeHolds);   // sustained tone while holds are held
         m_activeMode->onUpdate(dt, songT);
         // After onUpdate so the renderer's song time is current — the aura
         // tracks the hold's lane at the judgment line, which moves for
         // cross-lane holds.
         m_activeMode->emitHoldAura(dt);   // sustained sparkle for held notes
+    } else {
+        // Paused / stopped: silence any sustained hold tones. The active-set
+        // diff re-starts them for still-held notes when playback resumes.
+        stopAllHoldLoopSfx();
     }
 
     // Update preview mode at editor scene time
@@ -864,6 +873,7 @@ void Engine::launchGameplay(const SongInfo& song, Difficulty difficulty,
     m_audio.stop();
 
     m_gameplayConfig = song.gameMode;
+    preloadGameplaySfx();
     m_preGameplayLayer = m_currentLayer;
     m_gameplayPaused = false;
     m_showResults = false;
@@ -919,6 +929,7 @@ void Engine::launchGameplayDirect(const SongInfo& song, const ChartData& chart,
     m_audio.stop();
 
     m_gameplayConfig = song.gameMode;
+    preloadGameplaySfx();
     m_preGameplayLayer = m_currentLayer;
     m_gameplayPaused = false;
     m_showResults = false;
@@ -949,6 +960,7 @@ void Engine::restartGameplay() {
     if (!m_activeMode) return;
 
     m_audio.stop();
+    stopAllHoldLoopSfx();   // drop any sustained hold tone from the previous run
 
     auto renderer = createRenderer(m_gameplayConfig);
     setMode(renderer.release(), m_currentChart, &m_gameplayConfig);
@@ -1189,6 +1201,24 @@ void Engine::dispatchHitResult(const HitResult& hit, int lane, bool isHoldEnd) {
         m_activeMode->showHitEffect(kind, effLane, hit.noteType, judgment);
     }
 
+    // Note-hit sound: a dev-supplied per-note override wins, otherwise the
+    // bundled default for this note's role. Gated by the player's hit-sound
+    // toggle. Overrides + defaults are preloaded at launch so this is cheap.
+    if (m_audio.hitSoundEnabled()) {
+        std::string ovKey;
+        if (!isHoldEnd) {
+            const char* section = DefaultSfx::sectionKeyForNoteType(hit.noteType);
+            auto it = m_gameplayConfig.noteAssets.find(section);
+            if (it != m_gameplayConfig.noteAssets.end() && !it->second.sfxPath.empty())
+                ovKey = std::string("ov_") + section;
+        }
+        if (!ovKey.empty())
+            m_audio.playCachedSfx(ovKey);
+        else
+            m_audio.playCachedSfx(
+                DefaultSfx::cacheKeyForRole(DefaultSfx::roleForNoteHit(hit.noteType, isHoldEnd)));
+    }
+
     std::cout << "Hit - ";
     switch (judgment) {
         case Judgment::Perfect: std::cout << "Perfect"; break;
@@ -1198,6 +1228,60 @@ void Engine::dispatchHitResult(const HitResult& hit, int lane, bool isHoldEnd) {
     }
     std::cout << " | Score: " << m_score.getScore()
               << " | Combo: " << m_score.getCombo() << "\n";
+}
+
+void Engine::preloadGameplaySfx() {
+    DefaultSfx::preloadDefaults(m_audio);
+
+    // Preload this song's dev-supplied per-note hit overrides under "ov_<section>"
+    // keys so a hit can play them from cache with no disk read. A pick is either
+    // a bundled library ref ("builtin:...") or a project-relative imported file;
+    // resolveRef handles both. The sustained-loop override (loopSfxPath) is not
+    // cached — it is resolved and played via startLoopingSfx in updateHoldLoopSfx.
+    for (const auto& [section, na] : m_gameplayConfig.noteAssets) {
+        if (na.sfxPath.empty()) continue;
+        std::string abs = DefaultSfx::resolveRef(na.sfxPath, m_currentProjectPath);
+        if (!abs.empty()) m_audio.preloadSfx("ov_" + section, abs);
+    }
+}
+
+void Engine::updateHoldLoopSfx(const std::vector<uint32_t>& activeHolds) {
+    const bool soundOn = m_audio.hitSoundEnabled();
+    // Resolve the sustained-loop sound once: the dev's "Hold Note" loop pick if
+    // set, otherwise the bundled default long loop.
+    std::string loopPath;
+    if (soundOn) {
+        auto it = m_gameplayConfig.noteAssets.find("Hold Note");
+        if (it != m_gameplayConfig.noteAssets.end() && !it->second.loopSfxPath.empty())
+            loopPath = DefaultSfx::resolveRef(it->second.loopSfxPath, m_currentProjectPath);
+        else
+            loopPath = DefaultSfx::pathForRole(DefaultSfx::Role::HoldLoop);
+    }
+    // Newly-held notes get a sustained loop. Record even a failed/disabled start
+    // (handle 0) so a missing loop file isn't reopened every held frame.
+    for (uint32_t id : activeHolds) {
+        if (m_holdLoopHandles.count(id)) continue;
+        uint32_t h = (soundOn && !loopPath.empty())
+            ? m_audio.startLoopingSfx(loopPath)
+            : 0;
+        m_holdLoopHandles[id] = h;
+    }
+    // Notes no longer in the active set (ended / broken) stop their loop.
+    for (auto it = m_holdLoopHandles.begin(); it != m_holdLoopHandles.end(); ) {
+        if (std::find(activeHolds.begin(), activeHolds.end(), it->first) == activeHolds.end()) {
+            if (it->second) m_audio.stopLoopingSfx(it->second);
+            it = m_holdLoopHandles.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
+void Engine::stopAllHoldLoopSfx() {
+    if (m_holdLoopHandles.empty()) return;
+    for (auto& [id, h] : m_holdLoopHandles)
+        if (h) m_audio.stopLoopingSfx(h);
+    m_holdLoopHandles.clear();
 }
 
 void Engine::handleGestureLaneBased(const GestureEvent& evt, double songTime) {

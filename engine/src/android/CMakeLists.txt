@@ -83,6 +83,7 @@ set(SHARED_CORE_SOURCES
 
 set(SHARED_ENGINE_SOURCES
     ${ENGINE_SRC}/engine/AudioEngine.cpp
+    ${ENGINE_SRC}/engine/DefaultSfx.cpp
 )
 
 set(SHARED_INPUT_SOURCES

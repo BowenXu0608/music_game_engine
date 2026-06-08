@@ -158,6 +158,15 @@ if(GLSLC)
     )
 endif()
 
+# Bundled default sound effects (fallback SFX). Loaded at runtime from "sfx/"
+# relative to the exe dir (same CWD anchoring as shaders).
+add_custom_command(TARGET MusicGameEngineTest POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+            ${CMAKE_CURRENT_SOURCE_DIR}/sfx
+            $<TARGET_FILE_DIR:MusicGameEngineTest>/sfx
+    COMMENT "Copying default SFX next to test exe"
+)
+
 # ── Tests ────────────────────────────────────────────────────────────────────
 # Phase 1b de-risk gate: confirms ChartLoader recovers every field the
 # Copilot will need to emit in Phase 4-6 (arcs, slides, hold waypoints,

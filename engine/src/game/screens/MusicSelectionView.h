@@ -1,5 +1,6 @@
 #pragma once
 #include "ui/ProjectHub.h"  // GameModeConfig, GameModeType, DropDimension
+#include "engine/DefaultSfx.h"  // DefaultSfx::Role for UI sound fallbacks
 #include "renderer/vulkan/TextureManager.h"
 #include <imgui.h>
 #include <vulkan/vulkan.h>
@@ -94,7 +95,10 @@ protected:
                        float& vel, DragWheel which, int prevCentered);
 
     // Play a configured wheel SFX (project-relative path). No-op if unset.
-    void playWheelSfx(IPlayerEngine* engine, const std::string& relPath);
+    // Play a project-supplied UI sound, falling back to the bundled default for
+    // `fallback` when the project field is empty.
+    void playWheelSfx(IPlayerEngine* engine, const std::string& relPath,
+                      DefaultSfx::Role fallback);
     void renderCoverPhoto(ImVec2 origin, float size);
     void renderDifficultyButtons(ImVec2 origin, float width, IPlayerEngine* engine);
     void renderPlayButton(ImVec2 origin, float width, IPlayerEngine* engine);

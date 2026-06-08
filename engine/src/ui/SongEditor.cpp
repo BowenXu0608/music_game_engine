@@ -1,5 +1,6 @@
 #include "SongEditor.h"
 #include "engine/Engine.h"
+#include "engine/DefaultSfx.h"
 #include "game/chart/ChartLoader.h"
 #include "renderer/vulkan/VulkanContext.h"
 #include "renderer/vulkan/BufferManager.h"
@@ -2198,14 +2199,20 @@ void SongEditor::renderNotePage(Engine* engine) {
     // Small helper for a drag-drop-enabled path input + Browse + Clear row.
     // Used for per-note-type texture and SFX assignments below. Accepts any
     // ASSET_PATH payload so the Assets strip drag works.
+    // `libCat`: -1 = no built-in library button (e.g. textures); 0 = short
+    // sound library; 1 = long (sustained-loop) library. When set, a "Lib"
+    // button opens a picker over the bundled sound library with click-preview;
+    // selecting writes a "builtin:<file>" reference into `out`.
     auto assetRow = [&](const char* fieldId, const wchar_t* filter,
-                        const char* destSubdir, std::string& out) {
+                        const char* destSubdir, std::string& out, int libCat = -1) {
         char buf[256];
         strncpy(buf, out.c_str(), 255); buf[255] = '\0';
         const float browseW = 60.f;
         const float clearW  = 48.f;
+        const float libW    = (libCat >= 0) ? 40.f : 0.f;
         const float gapW    = ImGui::GetStyle().ItemSpacing.x;
-        ImGui::SetNextItemWidth(-(browseW + clearW + gapW * 2));
+        const int   nBtn    = (libCat >= 0) ? 3 : 2;
+        ImGui::SetNextItemWidth(-(browseW + clearW + libW + gapW * nBtn));
         ImGui::PushID(fieldId);
         if (ImGui::InputText("##path", buf, 256)) out = buf;
         // Drag-drop target: Assets strip tiles + OS file drops route here.
@@ -2216,6 +2223,34 @@ void SongEditor::renderNotePage(Engine* engine) {
                                   payload->DataSize - 1);
             }
             ImGui::EndDragDropTarget();
+        }
+        if (libCat >= 0) {
+            ImGui::SameLine();
+            if (ImGui::Button("Lib", ImVec2(libW, 0))) ImGui::OpenPopup("##sfxlib");
+            if (ImGui::BeginPopup("##sfxlib")) {
+                auto cat = (libCat == 1) ? DefaultSfx::Category::Long
+                                         : DefaultSfx::Category::Short;
+                ImGui::TextDisabled(libCat == 1 ? "Sustained loops"
+                                                : "Short sounds");
+                ImGui::Separator();
+                const auto& entries = DefaultSfx::library(cat);
+                if (entries.empty())
+                    ImGui::TextDisabled("(library empty — add sounds to sfx/)");
+                for (const auto& e : entries) {
+                    ImGui::PushID(e.file.c_str());
+                    if (ImGui::SmallButton("Play") && engine)
+                        engine->audio().playSfxFile(
+                            DefaultSfx::resolveRef("builtin:" + e.file, ""));
+                    ImGui::SameLine();
+                    bool sel = (out == "builtin:" + e.file);
+                    if (ImGui::Selectable(e.name.c_str(), sel)) {
+                        out = "builtin:" + e.file;
+                        ImGui::CloseCurrentPopup();
+                    }
+                    ImGui::PopID();
+                }
+                ImGui::EndPopup();
+            }
         }
         ImGui::SameLine();
         if (ImGui::Button("Browse", ImVec2(browseW, 0))) {
@@ -2285,12 +2320,26 @@ void SongEditor::renderNotePage(Engine* engine) {
                  "images", na.texturePath);
 
         ImGui::Spacing();
-        ImGui::Text("Music Effect");
+        ImGui::Text("Hit Sound");
         if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("Audio clip played when this note is hit.\n"
-                              "Drag from the Assets strip or click Browse.");
+            ImGui::SetTooltip("Sound played when this note is hit.\n"
+                              "Pick from the built-in Library, drag your own\n"
+                              "clip from the Assets strip, or Browse. Empty =\n"
+                              "the engine default for this note type.");
         assetRow("sfx", L"Audio\0*.wav;*.ogg;*.mp3;*.flac\0All Files\0*.*\0",
-                 "audio", na.sfxPath);
+                 "audio", na.sfxPath, /*libCat=short*/0);
+
+        // Hold notes also carry a sustained loop played while the note is held.
+        if (std::strcmp(noteType, "Hold Note") == 0) {
+            ImGui::Spacing();
+            ImGui::Text("Sustain Sound");
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Looping sound while the hold is pressed.\n"
+                                  "Pick a long clip from the Library or import\n"
+                                  "your own. Empty = the engine default loop.");
+            assetRow("loopsfx", L"Audio\0*.wav;*.ogg;*.mp3;*.flac\0All Files\0*.*\0",
+                     "audio", na.loopSfxPath, /*libCat=long*/1);
+        }
 
         ImGui::Unindent();
         ImGui::Spacing();

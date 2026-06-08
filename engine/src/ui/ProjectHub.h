@@ -150,7 +150,8 @@ struct GameModeConfig {
     // the renderer/audio system will pick them up once it's wired through.
     struct NoteTypeAssets {
         std::string texturePath;   // image dragged onto the note type
-        std::string sfxPath;       // hit-sound audio for the note type
+        std::string sfxPath;       // hit-sound audio for the note type (short)
+        std::string loopSfxPath;   // sustained loop for held notes (long); Hold only
     };
     std::map<std::string, NoteTypeAssets> noteAssets;
 

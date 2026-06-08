@@ -71,6 +71,13 @@ if exist "%SHADER_SRC%" (
     exit /b 1
 )
 
+:: Step 3b: Copy bundled default SFX library (engine fallback sounds:
+:: manifest.json + short/ + long/). Whole tree so the picker + defaults work.
+if exist "%ROOT%\sfx" (
+    xcopy "%ROOT%\sfx" "%ASSETS_DIR%\sfx" /E /I /Q /Y >nul
+    echo   Copied %ROOT%\sfx -^> assets/sfx/
+)
+
 :: Step 4: Build APK
 echo.
 echo [Step 4/5] Building APK with Gradle...

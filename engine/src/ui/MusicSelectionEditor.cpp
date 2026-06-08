@@ -2,6 +2,7 @@
 #include "SettingsPageUI.h"
 #include "StartScreenEditor.h"
 #include "engine/Engine.h"
+#include "engine/DefaultSfx.h"
 #include "renderer/MaterialAssetLibrary.h"
 #include "renderer/vulkan/VulkanContext.h"
 #include "renderer/vulkan/BufferManager.h"
@@ -609,12 +610,35 @@ void MusicSelectionEditor::renderHierarchy(float width, float height) {
                 ImGui::EndDragDropTarget();
             }
             ImGui::SameLine();
+            if (ImGui::Button("Lib")) ImGui::OpenPopup("##uisfxlib");
+            if (ImGui::BeginPopup("##uisfxlib")) {
+                ImGui::TextDisabled("Short sounds");
+                ImGui::Separator();
+                const auto& entries = DefaultSfx::library(DefaultSfx::Category::Short);
+                if (entries.empty())
+                    ImGui::TextDisabled("(library empty — add sounds to sfx/)");
+                for (const auto& e : entries) {
+                    ImGui::PushID(e.file.c_str());
+                    if (ImGui::SmallButton("Play") && m_engine)
+                        m_engine->audio().playSfxFile(
+                            DefaultSfx::resolveRef("builtin:" + e.file, ""));
+                    ImGui::SameLine();
+                    bool sel = (outPath == "builtin:" + e.file);
+                    if (ImGui::Selectable(e.name.c_str(), sel)) {
+                        outPath = "builtin:" + e.file;
+                        ImGui::CloseCurrentPopup();
+                    }
+                    ImGui::PopID();
+                }
+                ImGui::EndPopup();
+            }
+            ImGui::SameLine();
             if (ImGui::Button("Clear")) outPath.clear();
             ImGui::PopID();
         };
 
         ImGui::TextUnformatted("Wheel Sounds:");
-        ImGui::TextDisabled("Drag an audio asset onto a slot. Empty = silent.");
+        ImGui::TextDisabled("Pick from Library, drag your own, or leave empty for the default.");
         ImGui::Spacing();
         sfxDropZone("Scroll Sound",     "wheelscroll", m_wheelScrollSfx);
         ImGui::Spacing();

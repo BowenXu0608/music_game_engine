@@ -122,6 +122,13 @@ private:
     void refreshSceneTexture();
 
     void dispatchHitResult(const HitResult& hit, int lane = -1, bool isHoldEnd = false);
+    // Preload the default fallback SFX plus this song's per-note overrides into
+    // the AudioEngine cache so note hits / ticks play without disk hits.
+    void preloadGameplaySfx();
+    // Start/stop the sustained hold-loop sound by diffing the active-hold set
+    // each frame (covers begin/end/break/pause across all modes uniformly).
+    void updateHoldLoopSfx(const std::vector<uint32_t>& activeHolds);
+    void stopAllHoldLoopSfx();
     void handleGestureLaneBased(const GestureEvent& evt, double songTime);
     void handleGestureDrop3D(const GestureEvent& evt, double songTime);
     void handleGesturePhigros(const GestureEvent& evt, double songTime);
@@ -169,6 +176,7 @@ private:
     ScoreTracker                       m_score;
     std::unique_ptr<GameModeRenderer>  m_activeMode;
     std::unordered_map<int32_t, uint32_t> m_activeTouches; // touchId → noteId for holds
+    std::unordered_map<uint32_t, uint32_t> m_holdLoopHandles; // noteId → AudioEngine loop handle
     std::unordered_map<int, uint32_t>     m_keyboardHolds; // lane → noteId for keyboard-initiated holds
     EditorLayer                        m_preGameplayLayer = EditorLayer::MusicSelection;
     GameModeConfig                     m_gameplayConfig;  // config for current gameplay session

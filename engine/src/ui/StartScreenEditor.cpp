@@ -1,5 +1,6 @@
 #include "StartScreenEditor.h"
 #include "engine/Engine.h"
+#include "engine/DefaultSfx.h"
 #include "renderer/vulkan/VulkanContext.h"
 #include "renderer/vulkan/BufferManager.h"
 #include "renderer/MaterialAssetLibrary.h"
@@ -175,6 +176,11 @@ void StartScreenEditor::render(Engine* engine) {
 
         // Click anywhere to advance to Music Selection (with transition)
         if (!engine->isTestTransitioning() && ImGui::IsWindowHovered() && ImGui::IsMouseClicked(0)) {
+            if (m_tapSfx[0] != '\0')
+                engine->audio().playSfxFile(m_projectPath + "/" + m_tapSfx);
+            else
+                engine->audio().playCachedSfx(
+                    DefaultSfx::cacheKeyForRole(DefaultSfx::Role::UiTap));
             engine->musicSelectionEditor().load(m_projectPath);
             engine->testTransitionTo(EditorLayer::MusicSelection);
         }
@@ -638,7 +644,8 @@ void StartScreenEditor::renderProperties() {
             m_tapSfxVolume   = 1.f;
         });
         // helper to draw a small audio drop zone
-        auto audioZone = [&](const char* label, char* buf, float& vol, bool* loop) {
+        auto audioZone = [&](const char* label, char* buf, float& vol, bool* loop,
+                             bool showLib) {
             ImGui::TextDisabled("%s", label);
             const float azW = ImGui::GetContentRegionAvail().x - 74.f;
             const float azH = 36.f;
@@ -674,14 +681,40 @@ void StartScreenEditor::renderProperties() {
             ImGui::BeginGroup();
             std::string clearId = std::string("Clear##") + label;
             if (ImGui::Button(clearId.c_str())) buf[0] = '\0';
+            if (showLib) {
+                if (ImGui::Button((std::string("Lib##") + label).c_str()))
+                    ImGui::OpenPopup("##startsfxlib");
+                if (ImGui::BeginPopup("##startsfxlib")) {
+                    ImGui::TextDisabled("Short sounds");
+                    ImGui::Separator();
+                    const auto& entries = DefaultSfx::library(DefaultSfx::Category::Short);
+                    if (entries.empty())
+                        ImGui::TextDisabled("(library empty — add sounds to sfx/)");
+                    for (const auto& e : entries) {
+                        ImGui::PushID(e.file.c_str());
+                        if (ImGui::SmallButton("Play") && m_engine)
+                            m_engine->audio().playSfxFile(
+                                DefaultSfx::resolveRef("builtin:" + e.file, ""));
+                        ImGui::SameLine();
+                        bool sel = (std::string(buf) == "builtin:" + e.file);
+                        if (ImGui::Selectable(e.name.c_str(), sel)) {
+                            std::string ref = "builtin:" + e.file;
+                            strncpy(buf, ref.c_str(), 255); buf[255] = '\0';
+                            ImGui::CloseCurrentPopup();
+                        }
+                        ImGui::PopID();
+                    }
+                    ImGui::EndPopup();
+                }
+            }
             ImGui::EndGroup();
             ImGui::SliderFloat((std::string("Volume##") + label).c_str(), &vol, 0.f, 1.f);
             if (loop) ImGui::Checkbox((std::string("Loop##") + label).c_str(), loop);
             ImGui::Spacing();
         };
 
-        audioZone("Background Music", m_bgMusic, m_bgMusicVolume, &m_bgMusicLoop);
-        audioZone("Tap Sound Effect", m_tapSfx,  m_tapSfxVolume,  nullptr);
+        audioZone("Background Music", m_bgMusic, m_bgMusicVolume, &m_bgMusicLoop, false);
+        audioZone("Tap Sound Effect", m_tapSfx,  m_tapSfxVolume,  nullptr,        true);
     }
 }
 

@@ -1,0 +1,28 @@
+Engine-bundled default sound-effect LIBRARY
+===========================================
+
+A browsable pool of built-in sounds shipped with the engine. Game developers
+pick any of these for a note type / UI control from the in-editor picker, or
+import their own .mp3/.wav into the project. When nothing is picked, each engine
+role falls back to a default entry (see manifest.json "defaults").
+
+Layout
+  short/   one-shot sounds (note hits, UI buttons) — aim for ~20 varied CC0 clips
+  long/    sustained loops for held notes — aim for ~5 CC0 loops (seamless!)
+  manifest.json   library index (short[]/long[]) + per-role defaults
+
+Charts reference a bundled sound as "builtin:short/click.wav"; a project's own
+file is stored as a project-relative path (e.g. "assets/audio/my_hit.mp3").
+
+All bundled sounds MUST be license-clean for redistribution (prefer CC0).
+Record each file's source/license below.
+
+Format guidance: 16-bit PCM WAV, trimmed, peak-normalized. long/ files must
+loop seamlessly (no click at the wrap point).
+
+NOTE: the files currently referenced by manifest.json are PLACEHOLDERS generated
+for pipeline testing. Replace them with the approved CC0 library and update
+manifest.json (add/rename entries + fix the "defaults" map).
+
+Sources / licenses:
+  (placeholders — none yet. e.g. "short/click.wav: Kenney UI Audio, CC0")

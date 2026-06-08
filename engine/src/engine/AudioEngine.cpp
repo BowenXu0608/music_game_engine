@@ -3,10 +3,20 @@
 #include "AudioEngine.h"
 #include <stdexcept>
 #include <algorithm>
+#include <chrono>
+#include <unordered_map>
 #ifdef _WIN32
 #include <windows.h>
 #include <string>
 #endif
+
+namespace {
+// Monotonic milliseconds for SFX throttle bookkeeping.
+double nowMs() {
+    using namespace std::chrono;
+    return duration<double, std::milli>(steady_clock::now().time_since_epoch()).count();
+}
+}
 
 struct AudioEngine::Impl {
     ma_engine   engine;
@@ -17,7 +27,28 @@ struct AudioEngine::Impl {
     // mix over the music stream. Finished one-shots are reaped lazily.
     ma_sound_group        sfxGroup;
     bool                  sfxGroupInit = false;
-    std::vector<ma_sound*> sfxSounds;
+
+    // An active one-shot. `buf` is non-null only for cache-sourced playback
+    // (it must be uninited alongside the sound); file-sourced one-shots own
+    // their data internally and leave `buf` null.
+    struct ActiveSfx { ma_sound* sound = nullptr; ma_audio_buffer* buf = nullptr; };
+    std::vector<ActiveSfx> sfxSounds;
+
+    // Decoded-once PCM kept resident so dense SFX play without disk/decode cost.
+    // Multiple ma_audio_buffers reference the same read-only `frames` with
+    // independent cursors, so simultaneous plays of one key are safe.
+    struct CachedSfx {
+        std::vector<float> frames;
+        ma_uint32 channels   = 0;
+        ma_uint32 sampleRate = 0;
+        ma_uint64 frameCount = 0;
+    };
+    std::unordered_map<std::string, CachedSfx> sfxCache;
+    std::unordered_map<std::string, double>    lastPlayMs;   // throttle by key
+
+    // Looping SFX (sustained hold tone), keyed by an opaque handle.
+    std::unordered_map<uint32_t, ma_sound*> loopSounds;
+    uint32_t nextLoopHandle = 1;
 };
 
 bool AudioEngine::init() {
@@ -36,11 +67,14 @@ bool AudioEngine::init() {
 
 void AudioEngine::shutdown() {
     if (!m_impl) return;
-    for (ma_sound* s : m_impl->sfxSounds) {
-        ma_sound_uninit(s);
-        delete s;
+    stopAllLoopingSfx();
+    for (auto& a : m_impl->sfxSounds) {
+        ma_sound_uninit(a.sound);
+        delete a.sound;
+        if (a.buf) { ma_audio_buffer_uninit(a.buf); delete a.buf; }
     }
     m_impl->sfxSounds.clear();
+    m_impl->sfxCache.clear();
     if (m_impl->sfxGroupInit) {
         ma_sound_group_uninit(&m_impl->sfxGroup);
         m_impl->sfxGroupInit = false;
@@ -213,20 +247,26 @@ void AudioEngine::playClickSfx() {
     // the leak per click is negligible.
 }
 
-void AudioEngine::playSfxFile(const std::string& path) {
-    if (!m_impl || !m_impl->sfxGroupInit) return;
-    if (path.empty() || m_sfxVolume <= 0.f) return;
-
-    // Reap any finished one-shots so the tracking list stays bounded.
+void AudioEngine::reapFinishedSfx() {
+    if (!m_impl) return;
     for (auto it = m_impl->sfxSounds.begin(); it != m_impl->sfxSounds.end(); ) {
-        if (ma_sound_at_end(*it)) {
-            ma_sound_uninit(*it);
-            delete *it;
+        if (ma_sound_at_end(it->sound)) {
+            ma_sound_uninit(it->sound);
+            delete it->sound;
+            if (it->buf) { ma_audio_buffer_uninit(it->buf); delete it->buf; }
             it = m_impl->sfxSounds.erase(it);
         } else {
             ++it;
         }
     }
+}
+
+void AudioEngine::playSfxFile(const std::string& path) {
+    if (!m_impl || !m_impl->sfxGroupInit) return;
+    if (path.empty() || m_sfxVolume <= 0.f) return;
+
+    // Reap any finished one-shots so the tracking list stays bounded.
+    reapFinishedSfx();
 
     ma_sound* s = new ma_sound();
     bool ok = false;
@@ -252,7 +292,141 @@ void AudioEngine::playSfxFile(const std::string& path) {
         }
     }
     ma_sound_start(s);
-    m_impl->sfxSounds.push_back(s);
+    m_impl->sfxSounds.push_back({s, nullptr});
+}
+
+void AudioEngine::preloadSfx(const std::string& key, const std::string& path) {
+    if (!m_impl || key.empty() || path.empty()) return;
+    if (m_impl->sfxCache.count(key)) return;   // idempotent
+
+    // Decode the whole file into native-format interleaved f32 frames.
+    ma_decoder_config cfg = ma_decoder_config_init(ma_format_f32, 0, 0); // native ch/rate
+    ma_decoder decoder;
+    bool decoder_ok = false;
+#ifdef _WIN32
+    int wlen = MultiByteToWideChar(CP_UTF8, 0, path.data(), (int)path.size(), nullptr, 0);
+    if (wlen > 0) {
+        std::wstring wPath(wlen, L'\0');
+        MultiByteToWideChar(CP_UTF8, 0, path.data(), (int)path.size(), &wPath[0], wlen);
+        if (ma_decoder_init_file_w(wPath.c_str(), &cfg, &decoder) == MA_SUCCESS)
+            decoder_ok = true;
+    }
+#endif
+    if (!decoder_ok) {
+        if (ma_decoder_init_file(path.c_str(), &cfg, &decoder) != MA_SUCCESS)
+            return;
+    }
+
+    ma_uint64 totalFrames = 0;
+    ma_decoder_get_length_in_pcm_frames(&decoder, &totalFrames);
+    ma_uint32 channels = decoder.outputChannels;
+    if (totalFrames == 0 || channels == 0) {
+        ma_decoder_uninit(&decoder);
+        return;
+    }
+
+    Impl::CachedSfx c;
+    c.channels   = channels;
+    c.sampleRate = decoder.outputSampleRate;
+    c.frameCount = totalFrames;
+    c.frames.resize((size_t)totalFrames * channels);
+    ma_uint64 framesRead = 0;
+    ma_decoder_read_pcm_frames(&decoder, c.frames.data(), totalFrames, &framesRead);
+    c.frameCount = framesRead;
+    ma_decoder_uninit(&decoder);
+    if (framesRead == 0) return;
+
+    m_impl->sfxCache.emplace(key, std::move(c));
+}
+
+void AudioEngine::playCachedSfx(const std::string& key, float minIntervalMs) {
+    if (!m_impl || !m_impl->sfxGroupInit || m_sfxVolume <= 0.f) return;
+    auto cit = m_impl->sfxCache.find(key);
+    if (cit == m_impl->sfxCache.end()) return;
+
+    if (minIntervalMs > 0.f) {
+        double t = nowMs();
+        auto lit = m_impl->lastPlayMs.find(key);
+        if (lit != m_impl->lastPlayMs.end() && (t - lit->second) < minIntervalMs)
+            return;
+        m_impl->lastPlayMs[key] = t;
+    }
+
+    reapFinishedSfx();
+
+    const Impl::CachedSfx& c = cit->second;
+    // Each play gets its own audio-buffer cursor over the shared read-only PCM.
+    ma_audio_buffer_config bufCfg = ma_audio_buffer_config_init(
+        ma_format_f32, c.channels, c.frameCount, c.frames.data(), nullptr);
+    bufCfg.sampleRate = c.sampleRate;
+    ma_audio_buffer* buf = new ma_audio_buffer();
+    if (ma_audio_buffer_init(&bufCfg, buf) != MA_SUCCESS) {
+        delete buf;
+        return;
+    }
+    ma_sound* s = new ma_sound();
+    if (ma_sound_init_from_data_source(&m_impl->engine, buf,
+            MA_SOUND_FLAG_NO_PITCH | MA_SOUND_FLAG_NO_SPATIALIZATION,
+            &m_impl->sfxGroup, s) != MA_SUCCESS) {
+        ma_audio_buffer_uninit(buf);
+        delete buf;
+        delete s;
+        return;
+    }
+    ma_sound_start(s);
+    m_impl->sfxSounds.push_back({s, buf});
+}
+
+uint32_t AudioEngine::startLoopingSfx(const std::string& path) {
+    if (!m_impl || !m_impl->sfxGroupInit) return 0;
+    if (path.empty() || m_sfxVolume <= 0.f) return 0;
+
+    ma_sound* s = new ma_sound();
+    bool ok = false;
+#ifdef _WIN32
+    int wlen = MultiByteToWideChar(CP_UTF8, 0, path.data(), (int)path.size(), nullptr, 0);
+    if (wlen > 0) {
+        std::wstring wPath(wlen, L'\0');
+        MultiByteToWideChar(CP_UTF8, 0, path.data(), (int)path.size(), &wPath[0], wlen);
+        if (ma_sound_init_from_file_w(&m_impl->engine, wPath.c_str(),
+                                      MA_SOUND_FLAG_NO_SPATIALIZATION,
+                                      &m_impl->sfxGroup, nullptr, s) == MA_SUCCESS)
+            ok = true;
+    }
+#endif
+    if (!ok) {
+        if (ma_sound_init_from_file(&m_impl->engine, path.c_str(),
+                                    MA_SOUND_FLAG_NO_SPATIALIZATION,
+                                    &m_impl->sfxGroup, nullptr, s) != MA_SUCCESS) {
+            delete s;
+            return 0;
+        }
+    }
+    ma_sound_set_looping(s, MA_TRUE);
+    ma_sound_start(s);
+    uint32_t handle = m_impl->nextLoopHandle++;
+    m_impl->loopSounds.emplace(handle, s);
+    return handle;
+}
+
+void AudioEngine::stopLoopingSfx(uint32_t handle) {
+    if (!m_impl || handle == 0) return;
+    auto it = m_impl->loopSounds.find(handle);
+    if (it == m_impl->loopSounds.end()) return;
+    ma_sound_stop(it->second);
+    ma_sound_uninit(it->second);
+    delete it->second;
+    m_impl->loopSounds.erase(it);
+}
+
+void AudioEngine::stopAllLoopingSfx() {
+    if (!m_impl) return;
+    for (auto& [handle, s] : m_impl->loopSounds) {
+        ma_sound_stop(s);
+        ma_sound_uninit(s);
+        delete s;
+    }
+    m_impl->loopSounds.clear();
 }
 
 WaveformData AudioEngine::decodeWaveform(const std::string& path, uint32_t bucketCount) {
