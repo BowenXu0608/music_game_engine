@@ -62,10 +62,10 @@ originSessionId: d4e6dddd-1cc1-4f7b-8da6-079be9eb81c0
 | `Material.h/.cpp` | `Material` struct + `MaterialKind` enum (Unlit/Glow/Scroll/Pulse/Gradient/Custom). Runtime value a batcher consumes |
 | `MaterialAsset.h/.cpp` | On-disk material asset: `.mat` JSON with name, kind, tint, params, texture path, optional custom shader path, and `(targetMode, targetSlotSlug)` compatibility pinning |
 | `MaterialAssetLibrary.h/.cpp` | Per-project registry. Loads `project/assets/materials/*.mat`, seeds built-in-kind defaults for modes in use, migrates chart inline materials into `.mat` files, provides slot-filtered picker lookup |
-| `MaterialSlots.h/.cpp` | Per-mode slot tables (Bandori/Arcaea/Cytus/Lanota/Phigros) with display name, group, default kind/tint/params. Helpers: `materialSlotSlug`, `materialModeName`, `detectChartMode` |
+| `MaterialSlots.h/.cpp` | Per-mode slot tables (Drop 2D/Drop 3D/Scan Line/Circle/Phigros) with display name, group, default kind/tint/params. Helpers: `materialSlotSlug`, `materialModeName`, `detectChartMode` |
 | `ShaderCompiler.h/.cpp` | Runtime glslc invoker for Custom-kind materials. Accepts `.frag` (GLSL), `.spv` (load-verbatim), rejects `.hlsl` with a clear error. mtime-cached |
 | `Camera.h` | Unified ortho + perspective. Header-only. `makePerspective`/`makeOrtho`/`lookAt`/`setView`/`setProj`/`unproject` |
-| `CameraConfig.h/.cpp` | `buildGameplayCamera(const GameModeConfig&, float aspect)` — the **single** builder for the drop-mode gameplay camera (free 3D camera: position + Euler rotation + Perspective/Orthographic + clip planes). Shared by BandoriRenderer (2D), ArcaeaRenderer (3D) and `SongEditor::renderSceneView` preview so they can't diverge. View = `inverse(translate(pos)·mat4_cast(quat(radians(euler))))`; ortho flips `proj[1][1]` to match the perspective Vulkan Y-flip. Added 2026-06-08 |
+| `CameraConfig.h/.cpp` | `buildGameplayCamera(const GameModeConfig&, float aspect)` — the **single** builder for the drop-mode gameplay camera (free 3D camera: position + Euler rotation + Perspective/Orthographic + clip planes). Shared by Drop2DRenderer (2D), Drop3DRenderer (3D) and `SongEditor::renderSceneView` preview so they can't diverge. View = `inverse(translate(pos)·mat4_cast(quat(radians(euler))))`; ortho flips `proj[1][1]` to match the perspective Vulkan Y-flip. Added 2026-06-08 |
 | `Renderer.h/.cpp` | Owns all batchers + TWO `ParticleSystem` instances: `m_particles` (scene pass) and `m_uiParticles` (swapchain pass, UI overlay). Exposes `whiteView()`, `whiteSampler()`, `descriptors()`, `swapchainRenderPass()`, `uiParticles()`, `flushUiParticles()` |
 
 ---
@@ -144,7 +144,7 @@ One `.mat` JSON per material under `<project>/assets/materials/`. Shape:
 
 ```json
 {
-  "name": "default_arcaea_playfield_ground",
+  "name": "default_drop3d_playfield_ground",
   "kind": "gradient",
   "tint":   [0.15, 0.15, 0.25, 1],
   "params": [0.05, 0.05, 0.15, 0],
@@ -178,7 +178,7 @@ Loader parses both shapes. `resolveMaterial(md, lib)` prefers the asset if `asse
 
 ### Slot-filtered picker
 
-Each SongEditor slot dropdown lists only the materials whose `(targetMode, targetSlotSlug)` match the slot's `(mode, slug)` — plus any "universal" assets (both targets empty). Implementation: `MaterialAssetLibrary::namesCompatibleWith(mode, slug)`. Editing an Arcaea chart's Click Note slot shows `default_arcaea_click_note` + any `*__click_note` overrides; Bandori's Click Note is a distinct list.
+Each SongEditor slot dropdown lists only the materials whose `(targetMode, targetSlotSlug)` match the slot's `(mode, slug)` — plus any "universal" assets (both targets empty). Implementation: `MaterialAssetLibrary::namesCompatibleWith(mode, slug)`. Editing a Drop 3D chart's Click Note slot shows `default_drop3d_click_note` + any `*__click_note` overrides; Drop 2D's Click Note is a distinct list.
 
 ### Editor entry points
 
@@ -191,7 +191,7 @@ Each SongEditor slot dropdown lists only the materials whose `(targetMode, targe
 ## Key Design Rules
 - All batchers are **self-contained**: each manages its own per-frame UBOs + descriptor sets
 - `Renderer` is the **single owner** — game modes never allocate Vulkan resources directly
-- **Camera distance critical**: BandoriRenderer eye_z must be >=8 from hit zone (lesson from past debug)
+- **Camera distance critical**: Drop2DRenderer eye_z must be >=8 from hit zone (lesson from past debug)
 - **PostProcess subpass dependency**: must declare BOTH `EXTERNAL->0` AND `0->EXTERNAL` dependencies
 
 ## ImGuiLayer — Descriptor Pool
@@ -232,9 +232,9 @@ Player-facing rendering for the four player screens (start, music selection, gam
 
 The relevant rendering primitives (`ImDrawList::AddImage`, `AddRectFilled`, `AddRectFilledMultiColor`, `AddImageQuad`, `AddImageRounded`, `AddText`, `AddQuadFilled`, `AddTriangleFilled`, `PushClipRect`) all already worked on Android since Round 6 — Round 7 just stops duplicating the call sites between desktop and Android.
 
-## ArcaeaRenderer — `NoteType::Hold` rendering (2026-05-03)
+## Drop3DRenderer — `NoteType::Hold` rendering (2026-05-03)
 
-`ArcaeaRenderer` (3D drop) initially handled only `Tap`/`Flick`/`ArcTap`/`Arc`; `NoteType::Hold` was silently dropped during `onInit`. Charts authored for 3D drop with hold notes (`Aa_drop3d_hard.json` has one) rendered without those holds.
+`Drop3DRenderer` (3D drop) initially handled only `Tap`/`Flick`/`ArcTap`/`Arc`; `NoteType::Hold` was silently dropped during `onInit`. Charts authored for 3D drop with hold notes (`Aa_drop3d_hard.json` has one) rendered without those holds.
 
 Implementation:
 - New `m_holdNotes` (vector of `NoteEvent`) collected in `onInit` alongside taps/arcs.
@@ -247,7 +247,7 @@ Implementation:
   - Default material: `MaterialKind::Glow` with tint `{0.3, 0.8, 1.0, 0.95}` — visually matches Bandori's inactive hold body so 2D/3D drop hold appearance stays consistent.
 - `onShutdown` clears `m_holdNotes` along with the other per-mode collections.
 
-No Arcaea slot was added — chart hold-material overrides for 3D drop are deferred until requested. If/when added, slot 12 is the next free index in the file-local `ArcaeaSlot` enum.
+No Arcaea slot was added — chart hold-material overrides for 3D drop are deferred until requested. If/when added, slot 12 is the next free index in the file-local `Drop3DSlot` enum.
 
 ## Combo HUD — offset glow + bold removed (2026-05-03)
 

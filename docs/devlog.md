@@ -2740,3 +2740,114 @@ world units) since the plane needs real dimensions.
 5. **A clip plane is not a zoom.** Near/Far only clip geometry that actually crosses them; in a
    fixed-plane rhythm scene that ~never happens, so they read as inert — the meaningful "how far you
    see" control is the plane's own length.
+
+## 2026-06-08 — De-brand the engine: real game names → generic mode names (branch `pbr-material-system`)
+
+The engine takes inspiration from existing rhythm games but should not bake their trademarked
+names into the product. This session swept every real game name out of **code and on-disk data**,
+leaving only the generic mode names the UI already uses. Docs are the deliberate exception — they
+(and the doc-generator `tools/generate_summary_docx.py`) still describe the game↔engine
+relationship by name.
+
+### Mapping
+| Real game (was) | Generic mode (now) | Code symbol | On-disk token |
+|---|---|---|---|
+| Bandori | **Drop 2D** | `Drop2D` / `Drop2DRenderer` | `drop2d` |
+| Arcaea  | **Drop 3D** | `Drop3D` / `Drop3DRenderer` | `drop3d` |
+| Cytus   | **Scan Line** | `ScanLine` / `ScanLineRenderer` | `scanline` |
+| Lanota  | **Circle** | `Circle` / `CircleRenderer` | `circle` |
+| Phigros | *(left as-is)* | `Phigros` / `PhigrosRenderer` | `phigros` |
+
+**Phigros is deliberately untouched** — it's a 5th, currently-unimplemented mode (no generic name
+was assigned). Leaving it means `normalizeModeToken` and the enums keep a `phigros`/`Phigros`
+entry; revisit if that mode is ever built out.
+
+### What changed in code (`engine/src`, `engine/include`, `engine/tests`)
+- **Renderer files + classes renamed** via `git mv`: `Bandori/Arcaea/Cytus/Lanota Renderer.{h,cpp}`
+  → `Drop2D/Drop3D/ScanLine/Circle Renderer.{h,cpp}`. The class names, all `#include`s, the
+  `createRenderer` factory in both `Engine.cpp` and `AndroidEngine.cpp`, and `main.cpp`'s direct
+  `new Drop2DRenderer()` all updated. File-local enums followed (`ArcaeaSlot` → `Drop3DSlot`),
+  as did the slot-table statics (`kBandoriSlots` → `kDrop2DSlots`, etc.).
+- **Enums renamed** (order/values preserved so nothing that indexes them shifts):
+  - `MaterialModeKey { Bandori, Phigros, Cytus, Lanota, Arcaea }` → `{ Drop2D, Phigros, ScanLine, Circle, Drop3D }` (`renderer/MaterialSlots.h`).
+  - The **dead** `GameMode { Bandori, Cytus, Phigros, Arcaea, Lanota }` enum in `Engine.h` (0 live
+    references — confirmed by grep) renamed for hygiene; `GameModeType { DropNotes, Circle, ScanLine }`
+    was already generic and untouched.
+- **String tokens + literals**: `materialModeName()` returns `"drop2d"`/`"drop3d"`/`"scanline"`/
+  `"circle"`; `Engine::openProject` particle seeds (`seedDefaultEffects("bandori")` → `"drop2d"`…);
+  `StartScreenEditor` `targetMode == "bandori"` mode-index comparisons; `SongEditor` `wantMode`
+  strings. Editor combo labels were already the generic display names ("Scan Line", "Circle", …).
+- **Comments swept too** (a sed token replace over all `.cpp/.h/.frag/.vert/.comp`), then a manual
+  pass removed now-redundant parentheticals the replace produced (e.g. `Circle (Circle)` →
+  `Circle`, `Scan Line (ScanLine)` → `Scan Line`). Kept the meaningful mode-clarifier comments
+  (`Arc judgment (Drop3D)`).
+- **Back-compat read**: new `normalizeModeToken(const std::string&)` (`MaterialSlots.{h,cpp}`) maps
+  legacy tokens (`bandori`/`arcaea`/`cytus`/`lanota`) → the new ones; pass-through otherwise.
+  Applied to `MaterialAsset::load` and `ParticleEffectAsset::load` right where `targetMode` is read,
+  so a *pre-rename* project's `.mat`/`.pfx` files still resolve their mode. (Both loaders gained
+  `#include "MaterialSlots.h"`.) This is the **only** place legacy game strings legitimately remain
+  in code.
+
+### On-disk data migration (`Projects/test`)
+- **65 files renamed**: `default_<game>_*.mat` / `default_<game>_*.pfx` → `default_<mode>_*`.
+- **76 files content-rewritten**: `"targetMode": "<game>"` → `"<mode>"` inside every `.mat`/`.pfx`
+  (including the per-chart `<stem>__<slug>.mat` overrides, whose filenames were already generic),
+  **and** the chart JSONs' `"asset": "default_<game>_…"` references so they keep pointing at the
+  renamed library assets. All occurrences were in three safe contexts (`targetMode` / `asset` /
+  `name`) — verified no song titles or paths contained the tokens before the blanket replace. The
+  untracked `charts_backup_…` snapshot was excluded.
+
+### Two-layer naming, for future reference
+- **Chart filename token** (`Aa_drop2d_hard`, `Aa_drop3d_hard`) was *already* generic; `detectChartMode`
+  keys off `_drop2d_`/`_drop3d_`/`_circle_`/`_scan_`/`_phigros_`.
+- **Material/particle mode token** (`default_<mode>_…` + `targetMode`) is what this pass changed
+  from game names to `drop2d`/`drop3d`/`scanline`/`circle`. The two layers are independent (a Scan
+  Line chart's per-chart materials are named off the chart stem, not the material token).
+
+### Verification
+- Clean Debug build (`Visual Studio 17 2022`, `cmake --build build --config Debug`) — only the
+  pre-existing CP936 `C4819` and `LNK4098` warnings, no errors. The root `CMakeLists.txt` uses
+  `file(GLOB_RECURSE …)`, so the renamed `.cpp`s were picked up on reconfigure with no edits.
+- **`ChartRoundtripTest` PASS** — but only after the second pass: the first run failed 7 assertions
+  because the test (`engine/tests/chart_roundtrip_test.cpp`) and the public headers under
+  `engine/include/MusicGameEngine/` live *outside* `engine/src` and so missed the first sweep; they
+  pass game-name strings to `isOpAllowedForMode`, which now expects generic tokens. Swept them and
+  it passed.
+- Test-game launched against the migrated `Projects/test` with no startup crash (openProject loads +
+  seeds the migrated material/particle libraries). Full visual verification isn't feasible headless
+  (Vulkan surface → `PrintWindow` is blank), so this is a smoke test.
+
+### Commits (this branch)
+The working tree already carried substantial in-flight work (the 2026-06-04 Ring-particle /
+test-game-crash-fix / wheel-sounds set), entangled line-by-line with the rename in shared files
+(`main.cpp`, `ParticleEffectLibrary.cpp`, `MusicSelectionView.cpp`, `AudioEngine.cpp`), so a clean
+per-concern split wasn't possible. Per the user's call:
+1. `209ea73` — rename + the in-flight WIP, bundled (one honest message).
+2. `c7734bf` — rename applied to the public headers + roundtrip test (swept after #1 was staged).
+3. `e9084f8` — removed the stale `Projects/BandoriSandbox` sample project (7 tracked files + 109 MB
+   untracked build artifacts). Verified unreferenced by the root build; only mentions were archived
+   `.claude/worktrees/*` doc copies. `Projects/test` covers regression smoke testing.
+
+### Docs (this entry)
+The four system docs that describe current architecture had their **code symbols** updated
+(`*Renderer` classes, `MaterialModeKey::*`, `default_<mode>_*`, `k*Slots`, `Drop3DSlot`, the
+per-mode slot/behavior tables in sys1/sys6/sys7). Descriptive prose that references real games to
+explain lineage (`.aff`/`.xml`/`.lan` formats, "Arcaea-style highway", "Bandori-style slot spacing")
+was **left intact** by design. Historical devlog entries above this one keep their original names —
+they're a point-in-time record, not current API.
+
+### Lessons
+1. **`git`'s rename detection lied about the `.pfx` pairing.** The staged diff showed
+   `default_cytus_click_hit.pfx → default_circle_click_hit.pfx` (wrong mode!), because all the
+   `*_click_hit.pfx` files are near-identical and git's similarity heuristic paired deletions to the
+   most-similar *additions*, not to my actual renames. The files on disk were correct — verified by
+   listing them and asserting each filename prefix equals its `targetMode`. Trust the working tree,
+   not git's rename display, after a bulk rename of similar files.
+2. **"Code" is bigger than `engine/src`.** `engine/tests` and `engine/include` (an unreferenced
+   public-header duplicate) both held game names and were missed by the first src-scoped sweep — the
+   roundtrip test caught it. Scope sweeps to *all* compiled trees, not just the main source dir.
+3. **A token replace over comments needs a cleanup pass.** `Cytus → ScanLine` turned hand-written
+   `(Cytus)` clarifiers into redundant `(ScanLine)`; worth a follow-up grep for `(<NewName>)`.
+4. **Keep a back-compat seam at the read boundary.** One `normalizeModeToken` at the two asset
+   loaders means old projects degrade gracefully (mode resolves; a missing renamed asset just falls
+   back to the slot default) instead of the rename being a hard data break.

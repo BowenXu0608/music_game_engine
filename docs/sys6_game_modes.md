@@ -1,6 +1,6 @@
 ---
 name: Game Mode Plugin System
-description: GameModeRenderer interface + 5 mode plugins (Bandori, Phigros, Arcaea, Cytus, Lanota) with all gameplay features
+description: GameModeRenderer interface + 5 mode plugins (Drop 2D, Phigros, Drop 3D, Scan Line, Circle) with all gameplay features
 type: project
 originSessionId: d4e6dddd-1cc1-4f7b-8da6-079be9eb81c0
 ---
@@ -24,7 +24,7 @@ class GameModeRenderer {
 
 Engine creates renderers via `createRenderer(GameModeConfig)` factory.
 
-## BandoriRenderer (2D Drop Notes)
+## Drop2DRenderer (2D Drop Notes)
 
 **Dynamic lane count** from `config->trackCount`. **Lane spacing is world-direct**: `m_laneSpacing = playfieldWidth / laneCount` (world units), computed each `onResize`.
 
@@ -34,12 +34,12 @@ Engine creates renderers via `createRenderer(GameModeConfig)` factory.
 
 The camera is built by the shared **`buildGameplayCamera(const GameModeConfig&, float aspect)`** (`engine/src/renderer/CameraConfig.{h,cpp}`) from per-song fields: `cameraProjection` (Perspective|Orthographic), `cameraPosition[3]`, `cameraRotationDeg[3]` (Euler pitch/yaw/roll, camera looks down its local −Z, up +Y), `cameraFovYDeg`, `cameraOrthoSize`, and the now-fixed `cameraNearClip`/`cameraFarClip`. View = `inverse(translate(pos) · mat4_cast(quat(radians(euler))))`. Ortho flips `proj[1][1]` to match the Vulkan Y-flip `makePerspective` applies.
 
-BandoriRenderer draws in **screen space** (ortho `makeOrtho(0,w,h,0)` batcher camera; everything hand-projected via `w2s(world, m_perspVP, …)`), so the free camera is consumed by simply storing `m_perspVP = buildGameplayCamera(m_camCfg, aspect).viewProjection()` in `onResize` (config copied into `m_camCfg` in `onInit`). The judgment line projects world `z=0` through `m_perspVP`, so it now follows the camera naturally — no Y-shift hack.
+Drop2DRenderer draws in **screen space** (ortho `makeOrtho(0,w,h,0)` batcher camera; everything hand-projected via `w2s(world, m_perspVP, …)`), so the free camera is consumed by simply storing `m_perspVP = buildGameplayCamera(m_camCfg, aspect).viewProjection()` in `onResize` (config copied into `m_camCfg` in `onInit`). The judgment line projects world `z=0` through `m_perspVP`, so it now follows the camera naturally — no Y-shift hack.
 
 - **Plane dimensions** come straight from the config in world units: `m_laneSpacing = playfieldWidth/laneCount`; `m_farCullZ = -playfieldLength` (far draw/cull edge, used by the track quad, lane dividers, hold-body `zFar`, hold sample-tick cull, and note cull).
 - **Near/Far clip** are fixed (near 0 → clamped to 0.001 in the builder; far 300) and **not author-exposed** — `playfieldLength` alone bounds the runway.
 
-`cameraProjection`/`cameraPosition`/`cameraRotationDeg`/`cameraFovYDeg`/`cameraOrthoSize`/`cameraNearClip`/`cameraFarClip`/`playfieldWidth`/`playfieldLength` are per-chart (`GameModeConfig`, saved in `music_selection.json`). The legacy `cameraDistance`/`playfieldWidthPct`/`playfieldHeightPct`/`cameraEye/Target/Fov` fields were **removed**. **`SongEditor::renderSceneView` and ArcaeaRenderer now call the same `buildGameplayCamera`** — no more verbatim-duplicated camera math (that was a recurring divergence bug). Defaults reproduce the legacy framing (see sys7 → camera controls). See devlog 2026-06-08 for the full plan + rationale.
+`cameraProjection`/`cameraPosition`/`cameraRotationDeg`/`cameraFovYDeg`/`cameraOrthoSize`/`cameraNearClip`/`cameraFarClip`/`playfieldWidth`/`playfieldLength` are per-chart (`GameModeConfig`, saved in `music_selection.json`). The legacy `cameraDistance`/`playfieldWidthPct`/`playfieldHeightPct`/`cameraEye/Target/Fov` fields were **removed**. **`SongEditor::renderSceneView` and Drop3DRenderer now call the same `buildGameplayCamera`** — no more verbatim-duplicated camera math (that was a recurring divergence bug). Defaults reproduce the legacy framing (see sys7 → camera controls). See devlog 2026-06-08 for the full plan + rationale.
 
 **Rendering:** Perspective-projected ground-plane notes scrolling toward hit zone. Hold bodies tessellated as ribbon strips with multi-waypoint cross-lane paths (Straight/Angle90/Curve/Rhomboid transitions). Hold sample-point markers along the ribbon.
 
@@ -49,7 +49,7 @@ BandoriRenderer draws in **screen space** (ortho `makeOrtho(0,w,h,0)` batcher ca
 
 **Hold visibility:** Upper Z clip = +12 (vs +2 for taps) so the whole hold shape stays visible.
 
-## LanotaRenderer (Circle Mode)
+## CircleRenderer (Circle Mode)
 
 **Geometry:** Two concentric disks — inner spawn disk (`INNER_RADIUS=0.9`) and outer hit ring (`BASE_RADIUS=2.4`). Notes travel radially outward. Lane 0 at 12 o'clock, clockwise. `angle = PI/2 - (lane/trackCount) * 2PI`.
 
@@ -63,7 +63,7 @@ BandoriRenderer draws in **screen space** (ortho `makeOrtho(0,w,h,0)` batcher ca
 
 **Spatial picker:** `pickNoteAt(screenPx, songTime, pixelTol)` → `PickResult{noteId, ringIdx, type}`. Projects each note's world position to screen via `m_perspVP`, picks nearest within tolerance + timing window.
 
-## CytusRenderer (Scan Line Mode)
+## ScanLineRenderer (Scan Line Mode)
 
 **Variable-speed scan line (2026-04-12):** Base period `T=240/BPM`. `ScanSpeedEvent` keyframes drive a precomputed phase-accumulation table (Simpson's rule integration). `scanLineFrac(t)` binary-searches the table, converts phase to triangle wave [0..1]. Falls back to constant-speed fmod when empty.
 
@@ -81,7 +81,7 @@ BandoriRenderer draws in **screen space** (ortho `makeOrtho(0,w,h,0)` batcher ca
 - Touch: `pickNoteAt(screenPx, songTime, dp(48))` projects each note via `m_perspVP`, picks nearest within fingertip tolerance + 0.15s timing window. Then `consumeNoteById` validates. Visual feedback at the note's exact disk position.
 - Keyboard 1-7: `checkHit(lane, songTime)` lane-based path. `showJudgment(lane, j)` reverse-maps `targetAngle = PI/2 - lane*(2PI/trackCount)`, calls `findNoteByAngle` to locate the note, fires particles at the disk position.
 
-**Game-mode factory fix (2026-04-10):** `Circle` was erroneously wired to `CytusRenderer` and `ScanLine` to `PhigrosRenderer`. Fixed so Circle->LanotaRenderer, ScanLine->CytusRenderer.
+**Game-mode factory fix (2026-04-10):** the `Circle` mode was erroneously wired to the scan-line renderer and `ScanLine` to `PhigrosRenderer`. Fixed so `GameModeType::Circle`->`CircleRenderer` and `ScanLine`->`ScanLineRenderer`. (At the time these classes were named `LanotaRenderer`/`CytusRenderer`; renamed to generic mode names on 2026-06-08 — see devlog.)
 
 **Test Game button unification (2026-04-10):** All three Test Game buttons (StartScreen, MusicSelection, SongEditor) now route through `Engine::spawnTestGameProcess()` — each spawns a child process, editor window stays interactive.
 
@@ -90,7 +90,7 @@ BandoriRenderer draws in **screen space** (ortho `makeOrtho(0,w,h,0)` batcher ca
 1. **Phigros mode unreachable:** No `GameModeType::JudgmentLine` enum value or UI button. `PhigrosRenderer` exists but is dead code. The `dynamic_cast<PhigrosRenderer*>` branches in Engine.cpp gesture dispatch always return null.
 2. **Circle hold-drift cancellation:** `CIRCLE_HOLD_DRIFT_DP = 64` reserved but no `SlideMove` case in `handleGestureCircle` to break holds when the finger drifts off the note's X column.
 
-## ArcaeaRenderer (3D Drop Notes)
+## Drop3DRenderer (3D Drop Notes)
 
 Arcaea-style 3D highway with a ground lane, an elevated sky band, and arc holds that curve between them. Uses `checkHitPosition` / `beginHoldPosition` for spatial input. Arc holds scored holistically on release via `judgeArc(accuracy)`.
 
@@ -106,7 +106,7 @@ m_laneHalfWidth = playfieldWidth * 0.5f   // member, from config (was constexpr 
 m_laneFarZ      = -playfieldLength         // member, from config (was constexpr -60.f)
 ```
 
-`m_laneHalfWidth`/`m_laneFarZ` are now derived from `GameModeConfig::playfieldWidth`/`playfieldLength` in `onInit` **before** the meshes build. The ground mesh, judgment gate, tap-lane mapping, and arc/arctap transforms all reference them; the note-cull `z > 30.f` literals became `z > playfieldLength`. Camera comes from the shared `buildGameplayCamera` (see BandoriRenderer "Camera model"); the old baked eye-dolly (`eye = baseTarget + (baseEye−baseTarget)·cameraDistance`) is gone. **Live playfield-width edits need a renderer re-init** (meshes build once). Default `playfieldWidth=6`/`playfieldLength=60` exactly reproduce the old `LANE_HALF_WIDTH=3`/`LANE_FAR_Z=-60`.
+`m_laneHalfWidth`/`m_laneFarZ` are now derived from `GameModeConfig::playfieldWidth`/`playfieldLength` in `onInit` **before** the meshes build. The ground mesh, judgment gate, tap-lane mapping, and arc/arctap transforms all reference them; the note-cull `z > 30.f` literals became `z > playfieldLength`. Camera comes from the shared `buildGameplayCamera` (see Drop2DRenderer "Camera model"); the old baked eye-dolly (`eye = baseTarget + (baseEye−baseTarget)·cameraDistance`) is gone. **Live playfield-width edits need a renderer re-init** (meshes build once). Default `playfieldWidth=6`/`playfieldLength=60` exactly reproduce the old `LANE_HALF_WIDTH=3`/`LANE_FAR_Z=-60`.
 
 ### Rectangle judgment gate (2026-04-17)
 
@@ -120,7 +120,7 @@ Four thin coplanar quads at `z = JUDGMENT_Z` whose corners are byte-for-byte ide
 
 ### Lane mapping — Bandori-style slot spacing (2026-04-17)
 
-`m_laneCount` starts from `config->trackCount` (default 7) and auto-expands as the chart is scanned — mirrors `BandoriRenderer::onInit`. For each `Tap`/`Flick`, if `lround(laneX) >= m_laneCount`, `m_laneCount` is bumped to `lane + 1`.
+`m_laneCount` starts from `config->trackCount` (default 7) and auto-expands as the chart is scanned — mirrors `Drop2DRenderer::onInit`. For each `Tap`/`Flick`, if `lround(laneX) >= m_laneCount`, `m_laneCount` is bumped to `lane + 1`.
 
 Tap world-x is slot-centered (not edge-based):
 
@@ -175,9 +175,9 @@ This was the root cause of "all notes look the same color (white)" — not a ren
 
 ### Hit particles (2026-04-17)
 
-`ArcaeaRenderer` didn't override `showJudgment` — the no-op base class was being called, so no particles fired. Key details when implementing:
+`Drop3DRenderer` didn't override `showJudgment` — the no-op base class was being called, so no particles fired. Key details when implementing:
 
-1. **Emit in world space, not screen pixels.** `ParticleSystem::flush` runs every particle through `viewProj * vec4(inPos, 0, 1)` in `quad.vert`. BandoriRenderer gets away with pixel coords because it uses a screen-space ortho camera; Arcaea is 3D perspective, so emitting at pixel coords puts particles at nonsense clip positions. Use world-scale size (`0.15`) and velocity (`3 u/s`) as well.
+1. **Emit in world space, not screen pixels.** `ParticleSystem::flush` runs every particle through `viewProj * vec4(inPos, 0, 1)` in `quad.vert`. Drop2DRenderer gets away with pixel coords because it uses a screen-space ortho camera; Arcaea is 3D perspective, so emitting at pixel coords puts particles at nonsense clip positions. Use world-scale size (`0.15`) and velocity (`3 u/s`) as well.
 2. **Route by `lane`, then by a sky-event table.** `Engine::dispatchHitResult` clamps arc/arctap lane from `-1` to `0` before calling `showJudgment`, so lane alone doesn't identify the note type. Solution:
    - `lane > 0` → ground slot for that lane (taps, flicks, hold sample ticks).
    - `lane == 0` → consult `m_hitEvents` (pre-computed list of *sky* events only: arctaps at `(arcX, arcY)` world, arc start/end at `evalArc(arc, 0/1)`). Within a tight ~30 ms window, prefer the sky position. Falls back to lane-0 ground otherwise.

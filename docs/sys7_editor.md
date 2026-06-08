@@ -45,7 +45,7 @@ Each layer = self-contained ImGui panel. Test Game = separate process via `Creat
 
 **Disk Animation (Circle mode):** Keyframed rotate/scale/move events. Per-difficulty storage (`m_diffDiskRot/Move/Scale`). Add/edit/delete UI with easing combo. DiskFX timeline strip.
 
-**Disk Layout (Circle mode, 2026-04-12):** Four sliders in `renderGameModeConfig()` expose per-song disk defaults persisted to `GameModeConfig` (and `music_selection.json`): `diskInnerRadius` (spawn-disk radius, 0.2–3.0), `diskBaseRadius` (hit-ring radius, 1.0–6.0), `diskRingSpacing` (extra-ring gap, 0.1–1.5), `diskInitialScale` (initial scale before keyframes, 0.3–2.0). "Reset disk defaults" button restores the legacy 0.9 / 2.4 / 0.6 / 1.0 values. Each slider marks `m_laneMaskDirty = true` because the reachability predicate reads `diskBaseRadius`. `LanotaRenderer::onInit` seeds its per-instance `INNER_RADIUS / BASE_RADIUS / RING_SPACING / m_diskScale` from these fields.
+**Disk Layout (Circle mode, 2026-04-12):** Four sliders in `renderGameModeConfig()` expose per-song disk defaults persisted to `GameModeConfig` (and `music_selection.json`): `diskInnerRadius` (spawn-disk radius, 0.2–3.0), `diskBaseRadius` (hit-ring radius, 1.0–6.0), `diskRingSpacing` (extra-ring gap, 0.1–1.5), `diskInitialScale` (initial scale before keyframes, 0.3–2.0). "Reset disk defaults" button restores the legacy 0.9 / 2.4 / 0.6 / 1.0 values. Each slider marks `m_laneMaskDirty = true` because the reachability predicate reads `diskBaseRadius`. `CircleRenderer::onInit` seeds its per-instance `INNER_RADIUS / BASE_RADIUS / RING_SPACING / m_diskScale` from these fields.
 
 **Scan Line Speed (ScanLine mode):** `ScanSpeedEvent` keyframes (0.1x-4.0x). Per-difficulty storage (`m_diffScanSpeed`). Phase table rebuilt lazily.
 
@@ -108,7 +108,7 @@ Multi-waypoint arc editor. Only visible/active in DropNotes + ThreeD mode.
 
 Each control has a right-aligned **Reset** button (`labelReset` lambda) that restores just that parameter from **`cameraDefaultsFor(dimension)`** (`ProjectHub.h`) — the *same* per-dimension defaults the JSON loader uses, so reset values, load fallbacks and struct defaults can't drift. Defaults: 2D = pos `{0,5,8}`, pitch −8.882°, FOV 55, width 14, length 50; 3D = pos `{0,3,10}`, pitch −16.699°, FOV 45, width 6, length 60 (chosen to reproduce the legacy framing — 14 world units ≈ 90% of a 16:9 screen at the hit line; 3D 6/60 = old Arcaea `LANE_HALF_WIDTH 3`/`LANE_FAR_Z −60`).
 
-The preview in `renderSceneView` now calls the **same `buildGameplayCamera(gm, aspect)`** as the live renderers (no more verbatim-duplicated camera math). Full model + rationale: sys6_game_modes.md → BandoriRenderer "Camera model" and devlog 2026-06-08.
+The preview in `renderSceneView` now calls the **same `buildGameplayCamera(gm, aspect)`** as the live renderers (no more verbatim-duplicated camera math). Full model + rationale: sys6_game_modes.md → Drop2DRenderer "Camera model" and devlog 2026-06-08.
 
 **FX tab — `ui_tap` button-feedback effect (2026-06-04):** the shared player-screen button-tap particle effect (`"ui_tap"`, `kUiTapEffectName`) is a normal `.pfx` that surfaces in the FX-tab effect list (`renderParticlePage`) and edits through the existing CRUD — color/size/count/kind incl. **Custom** GLSL. No per-button binding (it's uniform); seeded by `ParticleEffectLibrary::seedUiTapEffect()` on project open. Rendering/trigger detail: sys1_rendering.md → "UI button-tap particles".
 
@@ -171,7 +171,7 @@ Follow-up: the `max(kFovHalfX, r) + 0.15` bound from the 2026-04-12 fix was self
 Three related fixes shipped with it:
 
 - `rebuildLaneMaskTimeline` now multiplies the sampled keyframe scale by `gm.diskInitialScale`, so the `Initial scale` slider is an actual base multiplier in the editor's reachability sampling (previously the base was hardcoded to 1.0 in `sampleDiskScale`).
-- `LanotaRenderer` was doing the same thing at runtime — `onInit` seeded `m_diskScale` from `diskInitialScale`, but `onUpdate` overwrote it every frame with `getDiskScale()` (base 1.0). Now stores `m_diskInitialScale` and applies it as `m_diskScale = m_diskInitialScale * getDiskScale(...)` each frame, so the slider actually enlarges the disk in gameplay.
+- `CircleRenderer` was doing the same thing at runtime — `onInit` seeded `m_diskScale` from `diskInitialScale`, but `onUpdate` overwrote it every frame with `getDiskScale()` (base 1.0). Now stores `m_diskInitialScale` and applies it as `m_diskScale = m_diskInitialScale * getDiskScale(...)` each frame, so the slider actually enlarges the disk in gameplay.
 - Raised the scale slider caps: `Target scale` keyframe slider 3.0 → 5.0, `Initial scale` slider 2.0 → 5.0. Previously you couldn't push the disk far enough past the viewport to see meaningful gating.
 
 ### Player Settings page (2026-04-18)
@@ -188,7 +188,7 @@ Added `EditorLayer::Settings` as the fourth layer alongside `ProjectHub → Star
 | Hit-sound volume | slider 0–1 | `AudioEngine::setSfxVolume` (used by `playClickSfx` amplitude) |
 | Hit-sound enabled | checkbox | `AudioEngine::setHitSoundEnabled` (early-exit in `playClickSfx`) |
 | Audio offset (ms) | slider ±200 + **tap-to-calibrate** wizard | `HitDetector::setAudioOffset` applied across every timing check |
-| Note speed | slider 1–10 (5 = 1.0×) | `GameModeRenderer::setNoteSpeedMultiplier` — Bandori/Arcaea multiply `SCROLL_SPEED`, Lanota divides `APPROACH_SECS`. Cytus (Scan Line) + Phigros ignore it |
+| Note speed | slider 1–10 (5 = 1.0×) | `GameModeRenderer::setNoteSpeedMultiplier` — Drop 2D/Drop 3D multiply `SCROLL_SPEED`, Circle divides `APPROACH_SECS`. Scan Line + Phigros ignore it |
 | Background dim | slider 0–1 | Semi-transparent black overlay via `ImGui::GetBackgroundDrawList()` during gameplay |
 | FPS counter | checkbox | Top-left text using `ImGui::GetIO().Framerate` during gameplay |
 | Language | combo (en/zh/ja/ko) | **Store-only** — persisted, not wired to a localization system yet |
@@ -201,7 +201,7 @@ Added `EditorLayer::Settings` as the fourth layer alongside `ProjectHub → Star
 
 ### Material system (2026-04-18)
 
-Per-slot visual overrides in charts. A **slot** is a named visual role within a mode (e.g. Bandori "Tap Note", Cytus "Scan Line", Lanota "Disk Surface"); each slot has a default `MaterialKind` (Unlit / Glow / Scroll / Pulse / Gradient / Custom) and the chart can override kind + tint + params + texture per slot.
+Per-slot visual overrides in charts. A **slot** is a named visual role within a mode (e.g. Drop 2D "Tap Note", Scan Line "Scan Line Core", Circle "Disk Surface"); each slot has a default `MaterialKind` (Unlit / Glow / Scroll / Pulse / Gradient / Custom) and the chart can override kind + tint + params + texture per slot.
 
 **SongEditor → Materials panel** (Config sidebar, below BPM Map). Slots listed via `getMaterialSlotsForMode(currentMode)` with group headers (e.g. all Hold Note slots grouped under one header). Per-slot controls: Kind dropdown (asset-picker in Phase 4), tint, 4 param sliders with kind-specific labels, optional texture picker that accepts `ASSET_PATH` drag-drop. "Reset to default" per slot.
 

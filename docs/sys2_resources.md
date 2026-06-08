@@ -80,7 +80,7 @@ miniaudio-based. `load(path) -> bool`, `play()`, `pause()`, `resume()`, `stop()`
 The JSON unified parser accepts both legacy and new arc field names so charts round-trip through editor export/import:
 - Easing: reads `easeX`/`easeY` (new, written by SongEditor) or falls back to `curveXEase`/`curveYEase`
 - Void flag: reads `void` (new) or falls back to `isVoid`
-- ArcTap position: reads `arcX`/`arcY` into `TapData.laneX`/`scanY` so ArcaeaRenderer can resolve the parent arc
+- ArcTap position: reads `arcX`/`arcY` into `TapData.laneX`/`scanY` so Drop3DRenderer can resolve the parent arc
 
 ## ChartLoader JSON Parser Safety
 
