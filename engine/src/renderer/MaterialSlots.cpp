@@ -2,9 +2,9 @@
 
 namespace {
 
-// Bandori (2D drop). Drag and Slide intentionally excluded — this mode authors
+// Drop2D (2D drop). Drag and Slide intentionally excluded — this mode authors
 // Click + Hold + Flick only.
-const std::vector<MaterialSlotInfo> kBandoriSlots = {
+const std::vector<MaterialSlotInfo> kDrop2DSlots = {
     {0,  "Click Note",       "",           MaterialKind::Unlit, {1.f, 0.8f, 0.2f, 1.f},   {0,0,0,0}},
     {1,  "Body",              "Hold Note", MaterialKind::Unlit, {0.2f, 0.8f, 1.f, 0.85f}, {0,0,0,0}},
     {2,  "Body (Active)",     "Hold Note", MaterialKind::Glow,  {0.3f, 0.8f, 1.f, 0.95f}, {1.f, 0.f, 0.f, 0.f}},
@@ -26,8 +26,8 @@ const std::vector<MaterialSlotInfo> kPhigrosSlots = {
     {0, "Judgment Note", "", MaterialKind::Unlit, {1.f, 1.f, 1.f, 1.f}, {0,0,0,0}},
 };
 
-// Cytus (ScanLine). Slide Path + Scan Line are line-batch consumers (tint only).
-const std::vector<MaterialSlotInfo> kCytusSlots = {
+// ScanLine. Slide Path + Scan Line are line-batch consumers (tint only).
+const std::vector<MaterialSlotInfo> kScanLineSlots = {
     {0,  "Click Note",        "",           MaterialKind::Unlit, {1.f, 1.f, 1.f, 1.f},      {0,0,0,0}},
     {1,  "Body",              "Hold Note",  MaterialKind::Unlit, {0.3f, 0.7f, 1.f, 0.45f},  {0,0,0,0}},
     {2,  "Head",              "Hold Note",  MaterialKind::Unlit, {0.3f, 0.7f, 1.f, 1.f},    {0,0,0,0}},
@@ -41,9 +41,9 @@ const std::vector<MaterialSlotInfo> kCytusSlots = {
     {10, "Hit Ring",          "",           MaterialKind::Unlit, {1.f, 1.f, 1.f, 0.85f},    {0,0,0,0}},
 };
 
-// Lanota (Circle). Note Fill and Note Shadow are shared between Click and
+// Circle. Note Fill and Note Shadow are shared between Click and
 // Flick — both note types use the same curved-tile visual.
-const std::vector<MaterialSlotInfo> kLanotaSlots = {
+const std::vector<MaterialSlotInfo> kCircleSlots = {
     {0,  "Fill",              "Click Note", MaterialKind::Unlit, {1.f, 0.85f, 0.3f, 1.f}, {0,0,0,0}},
     {1,  "Shadow",            "Click Note", MaterialKind::Unlit, {0.f, 0.f, 0.f, 0.5f},   {0,0,0,0}},
     {5,  "Body",              "Hold Note",  MaterialKind::Unlit, {0.55f, 0.8f, 1.f, 0.85f}, {0,0,0,0}},
@@ -55,12 +55,12 @@ const std::vector<MaterialSlotInfo> kLanotaSlots = {
     {11, "Outer Hit Ring",    "Playfield",  MaterialKind::Unlit, {0.5f, 0.7f, 1.f, 0.8f},    {0,0,0,0}},
 };
 
-// Arcaea (3D drop). Notes/taps/arcs are drawn via MeshRenderer's pipeline-per-
+// Drop3D (3D drop). Notes/taps/arcs are drawn via MeshRenderer's pipeline-per-
 // MaterialKind path, so all 5 kinds work on these slots. Arc "Blue"/"Red" and
 // "ArcTap Tile" default to Glow so their outward normals feed rim-lighting;
 // flat surfaces (ground, gate bars, shadows) default to Unlit because their
 // camera-facing normals produce zero rim anyway.
-const std::vector<MaterialSlotInfo> kArcaeaSlots = {
+const std::vector<MaterialSlotInfo> kDrop3DSlots = {
     {0,  "Click Note",    "",             MaterialKind::Unlit,    {1.f,  0.9f,  0.5f,  1.f},    {0,0,0,0}},
     {1,  "Flick Note",    "",             MaterialKind::Unlit,    {1.f,  0.35f, 0.35f, 1.f},    {0,0,0,0}},
     {2,  "Tile",          "ArcTap Note",  MaterialKind::Glow,     {1.f,  1.f,   1.f,   1.f},    {0,0,0,0}},
@@ -81,12 +81,12 @@ const std::vector<MaterialSlotInfo> kArcaeaSlots = {
 
 const std::vector<MaterialSlotInfo>& getMaterialSlotsForMode(MaterialModeKey mode) {
     switch (mode) {
-        case MaterialModeKey::Bandori: return kBandoriSlots;
+        case MaterialModeKey::Drop2D: return kDrop2DSlots;
         case MaterialModeKey::Phigros: return kPhigrosSlots;
-        case MaterialModeKey::Cytus:   return kCytusSlots;
-        case MaterialModeKey::Lanota:  return kLanotaSlots;
-        case MaterialModeKey::Arcaea:  return kArcaeaSlots;
-        default:                       return kBandoriSlots;
+        case MaterialModeKey::ScanLine:   return kScanLineSlots;
+        case MaterialModeKey::Circle:  return kCircleSlots;
+        case MaterialModeKey::Drop3D:  return kDrop3DSlots;
+        default:                       return kDrop2DSlots;
     }
 }
 
@@ -121,21 +121,29 @@ std::string materialSlotSlug(const MaterialSlotInfo& slot) {
 
 const char* materialModeName(MaterialModeKey mode) {
     switch (mode) {
-        case MaterialModeKey::Bandori: return "bandori";
+        case MaterialModeKey::Drop2D: return "drop2d";
         case MaterialModeKey::Phigros: return "phigros";
-        case MaterialModeKey::Cytus:   return "cytus";
-        case MaterialModeKey::Lanota:  return "lanota";
-        case MaterialModeKey::Arcaea:  return "arcaea";
+        case MaterialModeKey::ScanLine:   return "scanline";
+        case MaterialModeKey::Circle:  return "circle";
+        case MaterialModeKey::Drop3D:  return "drop3d";
         default:                       return "unknown";
     }
 }
 
+std::string normalizeModeToken(const std::string& token) {
+    if (token == "bandori") return "drop2d";
+    if (token == "arcaea")  return "drop3d";
+    if (token == "cytus")   return "scanline";
+    if (token == "lanota")  return "circle";
+    return token;
+}
+
 MaterialModeKey detectChartMode(const std::string& stem) {
     // Engine convention: "<song>_<modeKey>_<difficulty>".
-    if (stem.find("_drop3d_")  != std::string::npos) return MaterialModeKey::Arcaea;
-    if (stem.find("_drop2d_")  != std::string::npos) return MaterialModeKey::Bandori;
-    if (stem.find("_circle_")  != std::string::npos) return MaterialModeKey::Lanota;
-    if (stem.find("_scan_")    != std::string::npos) return MaterialModeKey::Cytus;
+    if (stem.find("_drop3d_")  != std::string::npos) return MaterialModeKey::Drop3D;
+    if (stem.find("_drop2d_")  != std::string::npos) return MaterialModeKey::Drop2D;
+    if (stem.find("_circle_")  != std::string::npos) return MaterialModeKey::Circle;
+    if (stem.find("_scan_")    != std::string::npos) return MaterialModeKey::ScanLine;
     if (stem.find("_phigros_") != std::string::npos) return MaterialModeKey::Phigros;
-    return MaterialModeKey::Bandori;
+    return MaterialModeKey::Drop2D;
 }

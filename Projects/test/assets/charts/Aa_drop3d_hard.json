@@ -39,16 +39,16 @@
  "markers": [1.05, 0.36, 1.04, 2.25, 1.45, 1.38, 9.17, 8.93],
  "materials": [
    {"slot": 8, "asset": "Aa_drop3d_hard__playfield_ground"},
-   {"slot": 0, "asset": "default_arcaea_click_note"},
-   {"slot": 11, "asset": "default_arcaea_playfield_side_posts"},
-   {"slot": 3, "asset": "default_arcaea_arctap_note_shadow"},
-   {"slot": 1, "asset": "default_arcaea_flick_note"},
-   {"slot": 2, "asset": "default_arcaea_arctap_note_tile"},
-   {"slot": 4, "asset": "default_arcaea_arc_note_blue"},
-   {"slot": 5, "asset": "default_arcaea_arc_note_red"},
-   {"slot": 6, "asset": "default_arcaea_arc_note_blue_shadow"},
-   {"slot": 7, "asset": "default_arcaea_arc_note_red_shadow"},
-   {"slot": 9, "asset": "default_arcaea_playfield_judgment_bar"},
-   {"slot": 10, "asset": "default_arcaea_playfield_sky_line"}
+   {"slot": 0, "asset": "default_drop3d_click_note"},
+   {"slot": 11, "asset": "default_drop3d_playfield_side_posts"},
+   {"slot": 3, "asset": "default_drop3d_arctap_note_shadow"},
+   {"slot": 1, "asset": "default_drop3d_flick_note"},
+   {"slot": 2, "asset": "default_drop3d_arctap_note_tile"},
+   {"slot": 4, "asset": "default_drop3d_arc_note_blue"},
+   {"slot": 5, "asset": "default_drop3d_arc_note_red"},
+   {"slot": 6, "asset": "default_drop3d_arc_note_blue_shadow"},
+   {"slot": 7, "asset": "default_drop3d_arc_note_red_shadow"},
+   {"slot": 9, "asset": "default_drop3d_playfield_judgment_bar"},
+   {"slot": 10, "asset": "default_drop3d_playfield_sky_line"}
  ]
 }

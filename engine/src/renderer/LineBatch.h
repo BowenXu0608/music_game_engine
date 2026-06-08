@@ -22,7 +22,7 @@ public:
     void drawLine(glm::vec2 a, glm::vec2 b, float width,
                   glm::vec4 color);
 
-    // Draw a polyline (e.g. Lanota ring approximation)
+    // Draw a polyline (e.g. Circle ring approximation)
     void drawPolyline(const std::vector<glm::vec2>& points, float width,
                       glm::vec4 color, bool closed = false);
 

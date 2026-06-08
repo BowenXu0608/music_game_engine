@@ -140,3 +140,37 @@ Everything that's desktop-specific or editor-coupled: `m_sceneViewer` offscreen-
 ### Direction of travel
 
 Player-facing rendering should keep moving toward `engine/src/game/screens/`. Future views (settings overlay, achievement popup, network errors) follow the same pattern: pure rendering + state owned in the view; desktop editor wraps it; Android engine drives it via the adapter. The class-name test is "does the name describe an editor concept?" If yes, extract a game-side counterpart instead of porting the editor class.
+
+## Engine must be heap-allocated (stack-overflow fix, 2026-06-04)
+
+`Engine` embeds `Renderer` **by value**, and `Renderer` embeds **two** `ParticleSystem` pools
+(note + UI), each a `std::array<Particle, 4096>`. `Particle` is 128 B → **512 KB per pool, ~1 MB
+total** living inside an `Engine` instance. Allocating `Engine` as a **stack local** therefore
+sits at the edge of the 1 MB default main-thread stack. The normal editor `main()` (`Engine
+engine;`) barely fit; the Test-Game path (`main → runTestGame → Engine engine;`, one frame
+deeper) overflowed → instant crash, **exit `0xC00000FD` (STATUS_STACK_OVERFLOW)** with no output
+(the overflow happens during the `Engine` constructor, before any print). Fix: both `main()` and
+`runTestGame()` now use **`std::make_unique<Engine>()`** (`engine.` → `engine->`). Heap-backing
+`ParticleSystem::m_pool` (vector) would be a deeper fix; deferred. **Rule:** never place a ~MB
+aggregate as a stack local; diagnose `0xC00000FD`-with-no-output as construct-time stack overflow.
+
+## Test-Game process must call `openProject` (2026-06-04)
+
+`runTestGame` (engine/src/main.cpp) previously loaded only the start/music screens
+(`startScreenEditor().load` + `musicSelectionEditor().load`) and **skipped
+`Engine::openProject()`** — the single place that loads + seeds the **material and particle**
+libraries for a project. Result: in the standalone test process `m_particleLibrary` was empty,
+so the `ui_tap` button effect (and note particles in test gameplay) silently resolved to null.
+Fix: `runTestGame` now calls `engine->openProject(projectPath)` before the screen loads. **Rule:**
+any standalone player entry point must run the same project-open path as the editor, not a subset.
+
+## UI-tap particle suppression hook (2026-06-04)
+
+`IPlayerEngine::suppressUiTapParticle()` (default no-op) + `Engine` override sets
+`m_suppressUiTapParticle`, reset to false each frame in `render()` *before* the per-layer page
+render and checked in `tickUiTapParticles` (skip the spark if set). A player screen raises it
+during its own render — e.g. `MusicSelectionView::renderGamePreview` calls it while the cursor is
+over either song/set wheel band, so the wheel uses a **sound** instead of a spark while the
+center difficulty/Start buttons still spark. Also in `tickUiTapParticles`: the **StartScreen**
+layer now treats any click as a button (`startScreenTap || IsAnyItemHovered()`) because its
+"Tap to Start" is a full-window hover, not an ImGui item.

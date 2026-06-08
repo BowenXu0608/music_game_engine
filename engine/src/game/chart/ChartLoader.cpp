@@ -18,19 +18,19 @@ ChartData ChartLoader::load(const std::string& path) {
     }
 
     if (ext == "pec" || ext == "pgr") return loadPhigros(path);
-    if (ext == "aff")   return loadArcaea(path);
-    if (ext == "xml")   return loadCytus(path);
-    if (ext == "lan")   return loadLanota(path);
+    if (ext == "aff")   return loadDrop3D(path);
+    if (ext == "xml")   return loadScanLine(path);
+    if (ext == "lan")   return loadCircle(path);
 
     // For JSON files, read the whole file and check for "version" field
-    // to distinguish unified format from Bandori format
+    // to distinguish unified format from Drop2D format
     if (ext == "json") {
         std::string content((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
         f.close();
         if (content.find("\"version\"") != std::string::npos) {
             return loadUnified(path);
         }
-        return loadBandori(path);
+        return loadDrop2D(path);
     }
 
     throw std::runtime_error("Unknown chart format: " + ext);
@@ -371,7 +371,7 @@ ChartData ChartLoader::loadUnified(const std::string& path) {
                 int span = getInt("laneSpan");
                 if (span < 1) span = 1;
                 if (span > 3) span = 3;
-                ev.data = LanotaRingData{getFloat("angle"), getInt("ringIndex"), span};
+                ev.data = CircleRingData{getFloat("angle"), getInt("ringIndex"), span};
             } else {
                 // Unknown type — skip
                 pos = objEnd + 1;
@@ -457,7 +457,7 @@ ChartData ChartLoader::loadUnified(const std::string& path) {
         }
     }
 
-    // ── Lanota / circle-mode disk animation ────────────────────────────
+    // ── Circle / circle-mode disk animation ────────────────────────────
     // "diskAnimation": { "rotations": [...], "moves": [...], "scales": [...] }
     // Each entry: {"startTime": 1.0, "duration": 0.5, "target": 3.14 | [x,y] | 0.8, "easing": "sineInOut"}
     {
@@ -818,14 +818,14 @@ ChartData ChartLoader::loadUnified(const std::string& path) {
     return chart;
 }
 
-ChartData ChartLoader::loadBandori(const std::string& path) {
+ChartData ChartLoader::loadDrop2D(const std::string& path) {
     ChartData chart;
     std::ifstream f(path);
     if (!f.is_open()) throw std::runtime_error("Cannot open: " + path);
 
     std::string content((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
 
-    // Minimal JSON parser for Bandori format
+    // Minimal JSON parser for Drop2D format
     auto findValue = [&](const std::string& key) -> std::string {
         auto pos = content.find("\"" + key + "\"");
         if (pos == std::string::npos) return "";
@@ -1097,9 +1097,9 @@ ChartData ChartLoader::loadPhigros(const std::string& path) {
     return chart;
 }
 
-// Map Arcaea easing string to a numeric ease value for ArcData.
-// Arcaea uses: s, b, si, so, sisi, siso, sosi, soso
-static float parseArcaeaEase(const std::string& e) {
+// Map Drop3D easing string to a numeric ease value for ArcData.
+// Drop3D uses: s, b, si, so, sisi, siso, sosi, soso
+static float parseDrop3DEase(const std::string& e) {
     if (e == "s")    return 0.f;   // linear
     if (e == "b")    return 1.f;   // bezier (generic ease)
     if (e == "si")   return 2.f;   // sine-in
@@ -1111,9 +1111,9 @@ static float parseArcaeaEase(const std::string& e) {
     return 0.f; // default linear
 }
 
-ChartData ChartLoader::loadArcaea(const std::string& path) {
+ChartData ChartLoader::loadDrop3D(const std::string& path) {
     ChartData chart;
-    chart.title = "Arcaea Chart";
+    chart.title = "Drop3D Chart";
 
     std::ifstream f(path);
     if (!f.is_open()) throw std::runtime_error("Cannot open: " + path);
@@ -1168,8 +1168,8 @@ ChartData ChartLoader::loadArcaea(const std::string& path) {
                 arc.color      = std::stoi(parts[7]);
                 // parts[8] = fx (sound effect name, not stored)
 
-                arc.curveXEase = parseArcaeaEase(easeType);
-                arc.curveYEase = arc.curveXEase; // Arcaea uses same easing for both axes
+                arc.curveXEase = parseDrop3DEase(easeType);
+                arc.curveYEase = arc.curveXEase; // Drop3D uses same easing for both axes
 
                 ev.time = startMs / 1000.0;
                 arc.duration = (endMs / 1000.0) - ev.time;
@@ -1253,9 +1253,9 @@ ChartData ChartLoader::loadArcaea(const std::string& path) {
     return chart;
 }
 
-ChartData ChartLoader::loadCytus(const std::string& path) {
+ChartData ChartLoader::loadScanLine(const std::string& path) {
     ChartData chart;
-    chart.title = "Cytus Chart";
+    chart.title = "ScanLine Chart";
 
     std::ifstream f(path);
     if (!f.is_open()) throw std::runtime_error("Cannot open: " + path);
@@ -1332,7 +1332,7 @@ ChartData ChartLoader::loadCytus(const std::string& path) {
         float x = getAttrF("x");
         int type = static_cast<int>(getAttrF("type"));
 
-        // Cytus note types: 0=tap, 1=hold, 2=drag
+        // ScanLine note types: 0=tap, 1=hold, 2=drag
         if (type == 0) {
             ev.type = NoteType::Tap;
             ev.data = TapData{x};
@@ -1390,9 +1390,9 @@ void ChartLoader::computeBeatPositions(ChartData& chart) {
             assignBeat(note);
 }
 
-ChartData ChartLoader::loadLanota(const std::string& path) {
+ChartData ChartLoader::loadCircle(const std::string& path) {
     ChartData chart;
-    chart.title = "Lanota Chart";
+    chart.title = "Circle Chart";
 
     std::ifstream f(path);
     if (!f.is_open()) throw std::runtime_error("Cannot open: " + path);
@@ -1427,10 +1427,10 @@ ChartData ChartLoader::loadLanota(const std::string& path) {
             ev.id = noteID++;
             ev.time = time;
 
-            // Lanota note types: 0=tap, 1=hold, 2=flick
+            // Circle note types: 0=tap, 1=hold, 2=flick
             if (type == 0) {
                 ev.type = NoteType::Tap;
-                ev.data = LanotaRingData{angle, ring};
+                ev.data = CircleRingData{angle, ring};
             } else if (type == 1) {
                 ev.type = NoteType::Hold;
                 // Read optional hold duration (5th field)
@@ -1445,7 +1445,7 @@ ChartData ChartLoader::loadLanota(const std::string& path) {
                 ev.data = FlickData{angle, direction};
             } else {
                 ev.type = NoteType::Tap;
-                ev.data = LanotaRingData{angle, ring};
+                ev.data = CircleRingData{angle, ring};
             }
 
             chart.notes.push_back(ev);

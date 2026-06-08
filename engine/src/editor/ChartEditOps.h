@@ -60,7 +60,7 @@ struct ConvertTypeOp {
     float          duration = 0.3f;   // used when toType == Hold
 };
 
-// ── 3D / Arcaea mode-specific ops ───────────────────────────────────────────
+// ── 3D / Drop3D mode-specific ops ───────────────────────────────────────────
 
 // Add one arc. Coordinates are normalized [0..1]; color is 0 (cyan/blue)
 // or 1 (pink/red); void arcs are invisible carriers for ArcTaps. Easing
@@ -108,7 +108,7 @@ struct DeleteArcTapOp {
     float tTo   = 0.f;
 };
 
-// ── ScanLine / Cytus mode-specific ops ──────────────────────────────────────
+// ── ScanLine / ScanLine mode-specific ops ──────────────────────────────────────
 
 // Add one slide. Coordinates are normalized [0..1] in the sweep frame.
 // `scanPath` is the polyline the user drags along; `samplePoints` are
@@ -162,7 +162,7 @@ struct SetHoldTransitionOp {
     std::string style = "curve";
 };
 
-// ── Circle / Lanota disk animation ops ──────────────────────────────────────
+// ── Circle / Circle disk animation ops ──────────────────────────────────────
 // Easing codes: "linear", "sineInOut", "quadInOut", "cubicInOut".
 // Target units: rotation in radians (absolute), move as {x, y} in world
 // coords (float pair), scale as a unit-centered multiplier.
@@ -196,7 +196,7 @@ struct DeleteDiskEventOp {
     float       startTime = 0.f;
 };
 
-// ── ScanLine / Cytus page-speed ops ─────────────────────────────────────────
+// ── ScanLine / ScanLine page-speed ops ─────────────────────────────────────────
 
 // Set (or upsert) the speed multiplier for one scan page. Pages without an
 // override use 1.0. `pageIndex` is 0-based.
@@ -272,7 +272,7 @@ using ChartEditOp = std::variant<
 // Returns true if `op` is allowed in the given game-mode name. Mode-gating
 // is enforced by the Copilot send path: disallowed ops are moved to the
 // `lastError` buffer and never reach apply. `modeName` uses the same
-// strings as buildCopilotSystemPrompt ("bandori"/"arcaea"/"lanota"/"cytus").
+// strings as buildCopilotSystemPrompt ("drop2d"/"drop3d"/"circle"/"scanline").
 bool isOpAllowedForMode(const ChartEditOp& op, const std::string& modeName);
 
 struct ChartEditParseResult {

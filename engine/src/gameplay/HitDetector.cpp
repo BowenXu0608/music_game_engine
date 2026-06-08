@@ -9,7 +9,7 @@ constexpr float kTwoPi = 6.28318530717959f;
 }
 
 int HitDetector::angleToLane(float angle) const {
-    // Reverse of LanotaRenderer: angle = PI/2 - (lane/trackCount) * 2PI
+    // Reverse of CircleRenderer: angle = PI/2 - (lane/trackCount) * 2PI
     float raw = (kPi * 0.5f - angle) / kTwoPi * m_trackCount;
     int lane = static_cast<int>(std::round(raw));
     // Wrap into [0, trackCount)
@@ -39,7 +39,7 @@ std::vector<MissedNote> HitDetector::update(double songTime) {
                 if (auto* tap = std::get_if<TapData>(&note.data))          m.lane = static_cast<int>(std::lround(tap->laneX));
                 else if (auto* hold = std::get_if<HoldData>(&note.data))   m.lane = static_cast<int>(std::lround(hold->laneX));
                 else if (auto* flick = std::get_if<FlickData>(&note.data)) m.lane = static_cast<int>(std::lround(flick->laneX));
-                else if (auto* ring = std::get_if<LanotaRingData>(&note.data)) m.lane = angleToLane(ring->angle);
+                else if (auto* ring = std::get_if<CircleRingData>(&note.data)) m.lane = angleToLane(ring->angle);
                 missed.push_back(m);
                 return true;
             }
@@ -62,8 +62,8 @@ std::optional<HitResult> HitDetector::checkHit(int lane, double songTime) {
                 noteLane = static_cast<int>(std::lround(std::get<HoldData>(it->data).laneX));
             } else if (std::holds_alternative<FlickData>(it->data)) {
                 noteLane = static_cast<int>(std::lround(std::get<FlickData>(it->data).laneX));
-            } else if (std::holds_alternative<LanotaRingData>(it->data)) {
-                noteLane = angleToLane(std::get<LanotaRingData>(it->data).angle);
+            } else if (std::holds_alternative<CircleRingData>(it->data)) {
+                noteLane = angleToLane(std::get<CircleRingData>(it->data).angle);
             }
 
             if (noteLane == lane) {
@@ -106,7 +106,7 @@ std::vector<HitDetector::AutoHit> HitDetector::autoPlayTick(double songTime) {
         if (auto* tap  = std::get_if<TapData>(&it->data))         lane = static_cast<int>(std::lround(tap->laneX));
         else if (auto* hd = std::get_if<HoldData>(&it->data))     lane = static_cast<int>(std::lround(hd->laneX));
         else if (auto* fl = std::get_if<FlickData>(&it->data))    lane = static_cast<int>(std::lround(fl->laneX));
-        else if (auto* rg = std::get_if<LanotaRingData>(&it->data)) lane = angleToLane(rg->angle);
+        else if (auto* rg = std::get_if<CircleRingData>(&it->data)) lane = angleToLane(rg->angle);
 
         const bool isHold  = std::holds_alternative<HoldData>(it->data);
         const bool isSlide = std::holds_alternative<TapData>(it->data) && it->type == NoteType::Slide;
@@ -193,7 +193,7 @@ std::optional<HitResult> HitDetector::checkHitPosition(glm::vec2 screenPos,
 
         if (std::holds_alternative<TapData>(it->data)) {
             float laneX = std::get<TapData>(it->data).laneX;
-            // Arcaea has 5 ground lanes (0-4); map to screen X
+            // Drop3D has 5 ground lanes (0-4); map to screen X
             float noteScreenX = (laneX / 4.0f) * screenSize.x;
             float noteScreenY = screenSize.y * 0.85f; // near bottom hit zone
             glm::vec2 notePos{noteScreenX, noteScreenY};
@@ -372,7 +372,7 @@ std::vector<HoldSampleTick> HitDetector::consumeSampleTicks(double songTime) {
             double absT = hold.noteStartTime + tOff;
             if (songTime < absT) break;
 
-            // Bandori-style gate: at the tick's time, the player must be on
+            // Drop2D-style gate: at the tick's time, the player must be on
             // the lane the hold is *currently expected to be at*. We round
             // the smoothstep value to the nearest lane.
             int expected = static_cast<int>(std::lround(evalHoldLaneAt(hold.holdData, tOff)));

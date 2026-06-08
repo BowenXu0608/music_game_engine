@@ -24,11 +24,11 @@
 #include "AndroidEngineAdapter.h"
 #include "ui/ProjectHub.h"  // for GameModeConfig, GameModeType, DropDimension
 #include "game/modes/GameModeRenderer.h"
-#include "game/modes/BandoriRenderer.h"
-#include "game/modes/CytusRenderer.h"
+#include "game/modes/Drop2DRenderer.h"
+#include "game/modes/ScanLineRenderer.h"
 #include "game/modes/PhigrosRenderer.h"
-#include "game/modes/ArcaeaRenderer.h"
-#include "game/modes/LanotaRenderer.h"
+#include "game/modes/Drop3DRenderer.h"
+#include "game/modes/CircleRenderer.h"
 
 #include "renderer/vulkan/TextureManager.h"
 #include <imgui.h>
@@ -85,16 +85,16 @@ private:
 
     // ── Gameplay gesture dispatch (ported from desktop Engine) ──────────────
     // The desktop Engine routes each gesture to a mode-specific handler; the
-    // old Android callback only ever called checkHitPosition() (Arcaea-only),
+    // old Android callback only ever called checkHitPosition() (Drop3D-only),
     // so lane-based taps were dropped and HoldBegin/HoldEnd were never wired —
     // which also left hold bodies invisible (m_activeHoldIds stayed empty).
     void dispatchHitResult(const HitResult& hit, int lane = -1);
     void handleGestureLaneBased(const GestureEvent& evt, double songTime);
-    void handleGestureArcaea(const GestureEvent& evt, double songTime);
+    void handleGestureDrop3D(const GestureEvent& evt, double songTime);
     void handleGesturePhigros(const GestureEvent& evt, double songTime);
-    void handleGestureCircle(LanotaRenderer& lan,
+    void handleGestureCircle(CircleRenderer& lan,
                              const GestureEvent& evt, double songTime);
-    void handleGestureScanLine(CytusRenderer& cyt,
+    void handleGestureScanLine(ScanLineRenderer& cyt,
                                const GestureEvent& evt, double songTime);
 
     android_app*   m_app = nullptr;

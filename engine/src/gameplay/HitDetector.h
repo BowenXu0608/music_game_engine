@@ -47,7 +47,7 @@ public:
     std::vector<HoldSampleTick> consumeSampleTicks(double songTime);
 
     // Update the lane currently occupied by the touch holding `noteId`.
-    // Bandori-style cross-lane holds compare this against the expected lane
+    // Drop2D-style cross-lane holds compare this against the expected lane
     // at sample-tick time; if they diverge for two consecutive ticks, the
     // hold is broken (see consumeBrokenHolds).
     void updateHoldLane(uint32_t noteId, int lane);
@@ -57,7 +57,7 @@ public:
     // caller should also clear its m_activeTouches mapping for these.
     std::vector<uint32_t> consumeBrokenHolds();
 
-    // Lane-based hit (Bandori, Cytus, Lanota)
+    // Lane-based hit (Drop2D, ScanLine, Circle)
     std::optional<HitResult> checkHit(int lane, double songTime);
 
     // Consume any Drag notes in `lane` within a generous timing window.
@@ -77,13 +77,13 @@ public:
     };
     std::vector<AutoHit> autoPlayTick(double songTime);
 
-    // Id-based hit consumption — used when the caller (e.g. LanotaRenderer's
+    // Id-based hit consumption — used when the caller (e.g. CircleRenderer's
     // touch picker) has already chosen the specific note geometrically and
     // just needs the detector to validate the timing window, build the
     // HitResult, and erase the note from the active list.
     std::optional<HitResult> consumeNoteById(uint32_t noteId, double songTime);
 
-    // Position-based hit for Arcaea ground taps
+    // Position-based hit for Drop3D ground taps
     std::optional<HitResult> checkHitPosition(glm::vec2 screenPos,
                                                glm::vec2 screenSize,
                                                double songTime);
@@ -124,7 +124,7 @@ public:
         int       consecutiveMissedTicks = 0;    // run length of bad sample ticks
         bool      broken = false;                // set when a break threshold is crossed
         HoldData  holdData{};                    // captured for evalHoldLaneAt
-        std::vector<glm::vec2> positionSamples;  // (Arcaea arc sampling / slide tracking)
+        std::vector<glm::vec2> positionSamples;  // (Drop3D arc sampling / slide tracking)
         std::vector<float>     sampleOffsets;    // authored hold sample point times
         size_t                 nextSampleIdx = 0;
     };
@@ -138,7 +138,7 @@ public:
 
 private:
 
-    // Convert LanotaRingData angle to integer lane (keyboard compat)
+    // Convert CircleRingData angle to integer lane (keyboard compat)
     int angleToLane(float angle) const;
 
     std::vector<NoteEvent>                    m_activeNotes;

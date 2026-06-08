@@ -47,4 +47,9 @@ public:
     // Player flow — equivalent of pressing Esc during gameplay. Toggles
     // pause while playing; exits if the results overlay is up.
     virtual void requestStop() = 0;
+
+    // Request that the button-tap particle spark be skipped for the current
+    // frame's click (e.g. the Music Selection song wheel uses a sound instead
+    // of a spark). Default no-op so platforms without UI particles ignore it.
+    virtual void suppressUiTapParticle() {}
 };

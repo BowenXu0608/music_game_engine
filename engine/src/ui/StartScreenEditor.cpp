@@ -1097,13 +1097,13 @@ void StartScreenEditor::renderMaterials(Engine* engine, bool hideSelector) {
     // blank makes the material "universal" (shows up in every slot); common
     // usage is to pin a material to one specific mode+slot pair.
     static const char* kModeLabels[] = {
-        "(any mode)", "bandori", "arcaea", "cytus", "lanota", "phigros"
+        "(any mode)", "drop2d", "drop3d", "scanline", "circle", "phigros"
     };
     int modeIdx = 0;
-    if      (m_editingMaterial.targetMode == "bandori") modeIdx = 1;
-    else if (m_editingMaterial.targetMode == "arcaea")  modeIdx = 2;
-    else if (m_editingMaterial.targetMode == "cytus")   modeIdx = 3;
-    else if (m_editingMaterial.targetMode == "lanota")  modeIdx = 4;
+    if      (m_editingMaterial.targetMode == "drop2d") modeIdx = 1;
+    else if (m_editingMaterial.targetMode == "drop3d")  modeIdx = 2;
+    else if (m_editingMaterial.targetMode == "scanline")   modeIdx = 3;
+    else if (m_editingMaterial.targetMode == "circle")  modeIdx = 4;
     else if (m_editingMaterial.targetMode == "phigros") modeIdx = 5;
     if (ImGui::Combo("Target mode", &modeIdx, kModeLabels, IM_ARRAYSIZE(kModeLabels))) {
         m_editingMaterial.targetMode     = (modeIdx == 0) ? ""
@@ -1120,10 +1120,10 @@ void StartScreenEditor::renderMaterials(Engine* engine, bool hideSelector) {
     slotLabels.push_back("(any slot)");
     if (modeIdx != 0) {
         MaterialModeKey mk =
-              (modeIdx == 1) ? MaterialModeKey::Bandori
-            : (modeIdx == 2) ? MaterialModeKey::Arcaea
-            : (modeIdx == 3) ? MaterialModeKey::Cytus
-            : (modeIdx == 4) ? MaterialModeKey::Lanota
+              (modeIdx == 1) ? MaterialModeKey::Drop2D
+            : (modeIdx == 2) ? MaterialModeKey::Drop3D
+            : (modeIdx == 3) ? MaterialModeKey::ScanLine
+            : (modeIdx == 4) ? MaterialModeKey::Circle
             :                  MaterialModeKey::Phigros;
         for (const auto& s : getMaterialSlotsForMode(mk)) {
             slotSlugs.push_back(materialSlotSlug(s));

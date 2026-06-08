@@ -8,6 +8,7 @@
 #include "renderer/ParticleEffectLibrary.h"
 #include "renderer/ParticleSlots.h"
 #include "renderer/ShaderCompiler.h"
+#include "renderer/CameraConfig.h"
 #include "editor/AIEditorClient.h"
 #include "editor/AIEditorConfig.h"
 #include "editor/ChartAudit.h"
@@ -102,9 +103,9 @@ static std::string canonicalUtf8(const std::string& utf8Path) {
 // ── Disk animation sampling helpers (used by both scene preview and
 //    chart timeline lane-mask builder) ────────────────────────────────────────
 //
-// Mirrors LanotaRenderer::{getDiskCenter, getCurrentRotation, getDiskScale}
+// Mirrors CircleRenderer::{getDiskCenter, getCurrentRotation, getDiskScale}
 // so the editor can evaluate the current disk pose at any song time without
-// instantiating the gameplay renderer.  Keep in sync with LanotaRenderer.cpp.
+// instantiating the gameplay renderer.  Keep in sync with CircleRenderer.cpp.
 
 namespace {
     constexpr float kPi_ = 3.14159265358979f;
@@ -178,7 +179,7 @@ namespace {
             [](const DiskRotationEvent& e){ return e.targetAngle; });
     }
 
-    // Reachability predicate bounds: LanotaRenderer uses FOV_Y=60° with eye
+    // Reachability predicate bounds: CircleRenderer uses FOV_Y=60° with eye
     // at z=4, giving a fixed visible rect of ~±3.0 × ±2.31 at the z=0 hit
     // plane. A lane's hit point is reachable only if it lands inside that
     // rect — the bound must NOT grow with the disk radius, otherwise scaling
@@ -1694,7 +1695,7 @@ void SongEditor::renderAiPanels() {
 // ArcTap) rather than a playfield or UI slot. Tests the group name first
 // (groups like "Hold Note", "Slide Note", "Arc Note", "ArcTap Note", "Click
 // Note"), then the display name for standalone slots that sit at the top
-// level (Bandori's "Click Note" / "Flick Note", Arcaea's "Click Note" /
+// level (Drop2D's "Click Note" / "Flick Note", Drop3D's "Click Note" /
 // "Flick Note", etc.). "Hit Ring" and "Judgment Note" stay out of note
 // sections because they're UI elements, not authorable note types — only
 // names ending in " Note" match for the display-name fallback, and "Hit
@@ -1722,12 +1723,12 @@ static MaterialModeKey currentMaterialModeKey(const GameModeConfig& gm) {
     switch (gm.type) {
         case GameModeType::DropNotes:
             return (gm.dimension == DropDimension::ThreeD)
-                 ? MaterialModeKey::Arcaea
-                 : MaterialModeKey::Bandori;
-        case GameModeType::Circle:   return MaterialModeKey::Lanota;
-        case GameModeType::ScanLine: return MaterialModeKey::Cytus;
+                 ? MaterialModeKey::Drop3D
+                 : MaterialModeKey::Drop2D;
+        case GameModeType::Circle:   return MaterialModeKey::Circle;
+        case GameModeType::ScanLine: return MaterialModeKey::ScanLine;
     }
-    return MaterialModeKey::Bandori;
+    return MaterialModeKey::Drop2D;
 }
 
 MaterialAssetLibrary* SongEditor::copilotMatLib() {
@@ -1736,7 +1737,7 @@ MaterialAssetLibrary* SongEditor::copilotMatLib() {
 
 MaterialModeKey SongEditor::copilotMatMode() const {
     return m_song ? currentMaterialModeKey(m_song->gameMode)
-                  : MaterialModeKey::Bandori;
+                  : MaterialModeKey::Drop2D;
 }
 
 // ── renderMaterialSlotPicker ────────────────────────────────────────────────
@@ -1790,7 +1791,7 @@ void SongEditor::renderMaterialSlotPicker(Engine* engine,
 // Left-sidebar "FX" tab. Three blocks:
 //   1. Particle-effect asset CRUD (create / edit kind+params+custom shader /
 //      save / delete) against the project ParticleEffectLibrary.
-//   2. Per-event slot bindings (Bandori click/flick/hold-head/tick/aura/end)
+//   2. Per-event slot bindings (Drop2D click/flick/hold-head/tick/aura/end)
 //      written into m_song->gameMode.particleEffects.
 //   3. Judgment-text labels (m_song->gameMode.judgmentLabels).
 void SongEditor::renderParticlePage(Engine* engine) {
@@ -1799,13 +1800,13 @@ void SongEditor::renderParticlePage(Engine* engine) {
         return;
     }
     ParticleEffectLibrary& lib = engine->particleLibrary();
-    // Particle slots are mode-specific: ScanLine→cytus (adds slide_tick),
-    // Circle→lanota, 3D drop→arcaea (world-space), 2D drop→bandori.
-    std::string pmode = "bandori";
-    if (m_song->gameMode.type == GameModeType::ScanLine)      pmode = "cytus";
-    else if (m_song->gameMode.type == GameModeType::Circle)   pmode = "lanota";
+    // Particle slots are mode-specific: ScanLine→scanline (adds slide_tick),
+    // Circle→circle, 3D drop→drop3d (world-space), 2D drop→drop2d.
+    std::string pmode = "drop2d";
+    if (m_song->gameMode.type == GameModeType::ScanLine)      pmode = "scanline";
+    else if (m_song->gameMode.type == GameModeType::Circle)   pmode = "circle";
     else if (m_song->gameMode.type == GameModeType::DropNotes &&
-             m_song->gameMode.dimension == DropDimension::ThreeD) pmode = "arcaea";
+             m_song->gameMode.dimension == DropDimension::ThreeD) pmode = "drop3d";
 
     // ── 1. Effect library editor ─────────────────────────────────────────────
     ImGui::SeparatorText("Particle Effects");
@@ -2064,41 +2065,76 @@ void SongEditor::renderNotePage(Engine* engine) {
         }
 
         if (gm.type == GameModeType::DropNotes) {
-            ImGui::Text("Camera Distance");
-            if (ImGui::IsItemHovered())
-                ImGui::SetTooltip("How much of the track is visible ahead.\n"
-                                  "Higher = the highway reaches further into the distance.");
+            // Free 3D camera: the playfield is a plane in world space and this
+            // camera looks at it (Unity-style position/rotation/projection).
+            // Defaults come from cameraDefaultsFor() — the same source the JSON
+            // loader uses — and depend on 2D vs 3D.
+            CameraDefaults cd = cameraDefaultsFor(gm.dimension);
+            // Draws `label` + tooltip, then a right-aligned Reset button on the
+            // same line. Returns true the frame Reset is clicked.
+            auto labelReset = [&](const char* label, const char* id,
+                                  const char* tip) -> bool {
+                ImGui::Text("%s", label);
+                if (tip && ImGui::IsItemHovered()) ImGui::SetTooltip("%s", tip);
+                ImGui::SameLine();
+                float bw = ImGui::CalcTextSize("Reset").x
+                         + ImGui::GetStyle().FramePadding.x * 2.f;
+                float rx = ImGui::GetWindowContentRegionMax().x - bw;
+                if (rx > ImGui::GetCursorPosX()) ImGui::SetCursorPosX(rx);
+                char buf[40]; std::snprintf(buf, sizeof buf, "Reset##rst_%s", id);
+                bool clicked = ImGui::SmallButton(buf);
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Reset to default");
+                return clicked;
+            };
+
+            const char* projItems[] = {"Perspective", "Orthographic"};
+            int projIdx = (gm.cameraProjection == CameraProjection::Orthographic) ? 1 : 0;
+            if (labelReset("Projection", "proj",
+                           "Perspective = tilted highway with depth.\n"
+                           "Orthographic = flat, no foreshortening."))
+                gm.cameraProjection = cd.projection;
             ImGui::SetNextItemWidth(-1);
-            ImGui::SliderFloat("##camDistance", &gm.cameraDistance, 0.5f, 2.0f, "%.2fx");
+            if (ImGui::Combo("##camProj", &projIdx, projItems, 2))
+                gm.cameraProjection = (projIdx == 1) ? CameraProjection::Orthographic
+                                                     : CameraProjection::Perspective;
 
-            ImGui::Text("Field of View");
-            if (ImGui::IsItemHovered())
-                ImGui::SetTooltip("Perspective strength, in degrees.\n"
-                                  "0 = use this mode's default FOV.");
+            if (labelReset("Position", "pos", "Camera world position (X, Y, Z)."))
+                for (int i = 0; i < 3; ++i) gm.cameraPosition[i] = cd.position[i];
             ImGui::SetNextItemWidth(-1);
-            ImGui::SliderFloat("##camFov", &gm.cameraFovDeg, 0.f, 110.f, "%.0f deg");
+            ImGui::DragFloat3("##camPos", gm.cameraPosition, 0.05f, -200.f, 200.f, "%.2f");
 
-            if (gm.dimension == DropDimension::TwoD) {
-                ImGui::Text("Playfield Width");
-                if (ImGui::IsItemHovered())
-                    ImGui::SetTooltip("Fraction of the screen width the lanes\n"
-                                      "occupy at the hit line. Higher = bigger.");
-                ImGui::SetNextItemWidth(-1);
-                float pctDisplay = gm.playfieldWidthPct * 100.f;
-                if (ImGui::SliderFloat("##playfieldW", &pctDisplay,
-                                       30.f, 100.f, "%.0f%%"))
-                    gm.playfieldWidthPct = pctDisplay / 100.f;
+            if (labelReset("Rotation (deg)", "rot",
+                           "Camera Euler rotation in degrees\n"
+                           "(pitch X, yaw Y, roll Z). Camera looks down its local -Z."))
+                for (int i = 0; i < 3; ++i) gm.cameraRotationDeg[i] = cd.rotationDeg[i];
+            ImGui::SetNextItemWidth(-1);
+            ImGui::DragFloat3("##camRot", gm.cameraRotationDeg, 0.25f, -180.f, 180.f, "%.1f");
 
-                ImGui::Text("Playfield Height");
-                if (ImGui::IsItemHovered())
-                    ImGui::SetTooltip("Vertical position of the judgment line.\n"
-                                      "Higher = lower line, more room above it.");
+            if (gm.cameraProjection == CameraProjection::Perspective) {
+                if (labelReset("Field of View", "fov", "Vertical field of view, in degrees."))
+                    gm.cameraFovYDeg = cd.fovYDeg;
                 ImGui::SetNextItemWidth(-1);
-                float hDisplay = gm.playfieldHeightPct * 100.f;
-                if (ImGui::SliderFloat("##playfieldH", &hDisplay,
-                                       30.f, 100.f, "%.0f%%"))
-                    gm.playfieldHeightPct = hDisplay / 100.f;
+                ImGui::DragFloat("##camFov", &gm.cameraFovYDeg, 0.25f, 10.f, 170.f, "%.0f deg");
+            } else {
+                if (labelReset("Ortho Size", "ortho", "Half the view height in world units."))
+                    gm.cameraOrthoSize = cd.orthoSize;
+                ImGui::SetNextItemWidth(-1);
+                ImGui::DragFloat("##camOrtho", &gm.cameraOrthoSize, 0.05f, 0.1f, 100.f, "%.2f");
             }
+
+            if (labelReset("Playfield Width", "pfw",
+                           "Width of the playfield plane in world units."))
+                gm.playfieldWidth = cd.playfieldWidth;
+            ImGui::SetNextItemWidth(-1);
+            ImGui::DragFloat("##playfieldW", &gm.playfieldWidth, 0.05f, 0.5f, 100.f, "%.2f");
+
+            if (labelReset("Playfield Length", "pfl",
+                           "Depth of the playfield plane toward the\n"
+                           "vanishing point, in world units."))
+                gm.playfieldLength = cd.playfieldLength;
+            ImGui::SetNextItemWidth(-1);
+            ImGui::DragFloat("##playfieldL", &gm.playfieldLength, 0.5f, 1.f, 1000.f, "%.0f");
+
             ImGui::Spacing();
         }
 
@@ -2137,7 +2173,7 @@ void SongEditor::renderNotePage(Engine* engine) {
 
     // ── Per-note-type sections ─────────────────────────────────────────────
     // Pick the ordered list of sections for the current mode. "Flick Note"
-    // lives in Lanota even though the slot table has no Flick visuals —
+    // lives in Circle even though the slot table has no Flick visuals —
     // gameplay exposes Flick there, and the section stays in place so future
     // material slots can slot in without touching this list.
     std::vector<const char*> sections;
@@ -2678,7 +2714,7 @@ void SongEditor::renderGameModeConfig(Engine* engine,
         }
     }
 
-    // ── Scan Line Speed (Cytus mode only) ──────────────────────────────────
+    // ── Scan Line Speed (ScanLine mode only) ──────────────────────────────────
     if (gm.type == GameModeType::ScanLine) {
         bool scanOpen = ImGui::CollapsingHeader("Scan Line Speed");
         if (ImGui::IsItemHovered())
@@ -3213,7 +3249,7 @@ void SongEditor::renderChartTimeline(ImDrawList* dl, ImVec2 origin, ImVec2 size,
         renderNotes(dl, origin, size, startTime, tc, skyTrackH, skyTop, true);
         renderNotes(dl, origin, size, startTime, tc, gndTrackH, gndTop, false);
 
-        // Render arc ribbons + arctap diamonds in sky region (Arcaea layout)
+        // Render arc ribbons + arctap diamonds in sky region (Drop3D layout)
         renderArcNotes(dl, origin, size, startTime, tc, skyTrackH, skyTop);
 
         // Handle note placement in sky or ground based on mouse Y
@@ -3748,70 +3784,16 @@ void SongEditor::renderSceneView(ImDrawList* dl, ImVec2 origin, ImVec2 size,
 
     if (gm.type == GameModeType::DropNotes) {
         // ── Camera-based perspective highway ────────────────────────────────
-        // Build a real perspective VP matrix from the SAME baked baseline the
-        // renderers use (Bandori 2D vs Arcaea 3D), so the preview matches
-        // gameplay. cameraDistance/FovDeg are the relative knobs on top.
+        // Build the gameplay VP from the SAME shared free-camera builder the
+        // renderers use, so the preview matches gameplay exactly at any pose.
         float aspect = size.x / std::max(size.y, 1.f);
-        bool  preview3D = (gm.dimension == DropDimension::ThreeD);
-        // 2D camera: FIXED position/pitch/FOV (no scaling of the field).
-        //   Camera Distance  -> far draw distance (how much track is visible).
-        //   Playfield Height -> vertical position of the judgment line.
-        // 3D keeps its dolly. Mirrors BandoriRenderer::onResize (dual-site).
-        float hN = (std::clamp(gm.playfieldHeightPct, 0.3f, 1.f) - 0.3f) / 0.7f;
-        float dN = (std::clamp(gm.cameraDistance, 0.5f, 2.0f) - 0.5f) / 1.5f;
-        float approachZ  = preview3D ? -55.f : -glm::mix(20.f, 110.f, dN);
-        float anchorNdcY = glm::mix(0.2f, 0.85f, hN);
-        glm::vec3 camTarget    = preview3D
-            ? glm::vec3{0.f, 0.f, 0.f}
-            : glm::vec3{0.f, 0.f, -24.f};
-        glm::vec3 camBaseEye   = preview3D
-            ? glm::vec3{0.f, 3.f, 10.f}
-            : glm::vec3{0.f, 5.f, 8.f};
-        // 3D dollies the eye along the view ray; 2D keeps the eye fixed.
-        glm::vec3 camEye = preview3D
-            ? camTarget + (camBaseEye - camTarget) * std::max(gm.cameraDistance, 0.01f)
-            : camBaseEye;
-        float     baseFovDeg = preview3D ? 45.f : 55.f;
-        float fovDeg = gm.cameraFovDeg > 0.f ? gm.cameraFovDeg : baseFovDeg;
-        float     camFov = glm::radians(std::clamp(fovDeg, 20.f, 120.f));
-        glm::mat4 proj = glm::perspective(camFov, aspect, 0.1f, 300.f);
-        // Flip Y for screen coords (top=0)
-        proj[1][1] *= -1.f;
-        glm::mat4 view = glm::lookAt(camEye, camTarget, glm::vec3(0.f, 1.f, 0.f));
+        Camera cam = buildGameplayCamera(gm, aspect);
+        glm::mat4 vp = cam.viewProjection();
 
-        constexpr float HIT_ZONE_Z  = 0.f;
-        float APPROACH_Z = approachZ;
-
-        if (!preview3D) {
-            // Pin the judgment line (z=0) to anchorNdcY (vertical shift only).
-            glm::vec4 hitClip = (proj * view) * glm::vec4(0.f, 0.f, 0.f, 1.f);
-            if (std::abs(hitClip.w) > 1e-5f) {
-                float delta = anchorNdcY - hitClip.y / hitClip.w;
-                for (int k = 0; k < 4; ++k) proj[k][1] += delta * proj[k][3];
-            }
-        }
-        glm::mat4 vp = proj * view;
-
+        constexpr float HIT_ZONE_Z   = 0.f;
+        float APPROACH_Z = -gm.playfieldLength;   // far edge of the plane
         constexpr float SCROLL_SPEED = 14.f;
-        float laneSpacing = 1.2f;
-        {
-            glm::mat4 mvp = vp;
-            auto bw2s = [&](glm::vec3 p) -> float {
-                glm::vec4 c = mvp * glm::vec4(p, 1.f);
-                if (c.w <= 0.f) return 0.f;
-                return origin.x + (c.x / c.w * 0.5f + 0.5f) * size.x;
-            };
-            float lx = bw2s({-1.f, 0.f, HIT_ZONE_Z});
-            float rx = bw2s({ 1.f, 0.f, HIT_ZONE_Z});
-            float pxPerUnit = (rx - lx) * 0.5f;
-            if (pxPerUnit > 0.f) {
-                float widthPct = (gm.dimension == DropDimension::TwoD)
-                                     ? std::clamp(gm.playfieldWidthPct, 0.2f, 1.f)
-                                     : 0.30f;
-                float desiredPx = size.x * widthPct;
-                laneSpacing = desiredPx / pxPerUnit / tc;
-            }
-        }
+        float laneSpacing = gm.playfieldWidth / std::max(1, tc);
 
         auto w2s = [&](glm::vec3 pos) -> ImVec2 {
             glm::vec4 clip = vp * glm::vec4(pos, 1.f);
@@ -3868,7 +3850,7 @@ void SongEditor::renderSceneView(ImDrawList* dl, ImVec2 origin, ImVec2 size,
         }
 
         // Draw actual notes on the highway
-        float proj11 = std::abs(proj[1][1]);
+        float proj11 = std::abs(cam.projection()[1][1]);
         for (const auto& note : curNotes) {
             // Arcs and ArcTaps are drawn by the dedicated sky block below —
             // skip the lane-rect path so we don't duplicate them as drops.
@@ -3939,7 +3921,7 @@ void SongEditor::renderSceneView(ImDrawList* dl, ImVec2 origin, ImVec2 size,
                 // drawn as one long diagonal quad slashing across the lanes
                 // (the "wedge"); the pre-corner sample pins the previous lane
                 // so the step renders as a crisp near-vertical edge — exactly
-                // how BandoriRenderer anchors its hold ribbon.
+                // how Drop2DRenderer anchors its hold ribbon.
                 std::vector<float> tSamples;
                 tSamples.reserve(N + 2 * note.waypoints.size() + 2);
                 for (int i = 0; i <= N; ++i)
@@ -3957,7 +3939,7 @@ void SongEditor::renderSceneView(ImDrawList* dl, ImVec2 origin, ImVec2 size,
                 for (float tOff : tSamples) {
                     float absDt = (note.time + tOff) - curTime;
                     float wz = -absDt * SCROLL_SPEED;
-                    if (wz > 12.f || wz < -60.f) { havePrev = false; continue; }
+                    if (wz > 12.f || wz < APPROACH_Z) { havePrev = false; continue; }
                     float wx = laneToWorldX(laneAt(tOff));
                     glm::vec3 wp{wx, worldY, wz};
                     glm::vec4 wc = vp * glm::vec4(wp, 1.f);
@@ -3992,7 +3974,7 @@ void SongEditor::renderSceneView(ImDrawList* dl, ImVec2 origin, ImVec2 size,
                               noteColor(note.type), 2.f);
         }
 
-        // ── Arcs + ArcTaps (Arcaea-style, sky-space ribbons) ───────────────
+        // ── Arcs + ArcTaps (Drop3D-style, sky-space ribbons) ───────────────
         if (is3D) {
             float laneHalfW = (tc * 0.5f) * laneSpacing;
             auto arcToWorld = [&](float ax, float ay, float dt) -> glm::vec3 {
@@ -4099,7 +4081,7 @@ void SongEditor::renderSceneView(ImDrawList* dl, ImVec2 origin, ImVec2 size,
         dl->AddCircleFilled(ImVec2(centerX, centerY), innerR * 0.3f,
                             IM_COL32(100, 80, 50, 120));
 
-        // Gameplay LanotaRenderer places lane 0 at 12 o'clock and counts
+        // Gameplay CircleRenderer places lane 0 at 12 o'clock and counts
         // clockwise (matches onRender: angle = π/2 − lane·Δ + diskRotation).
         // ImGui y grows downward, so clockwise in screen space corresponds
         // to *increasing* angle in this coordinate system. We negate the
@@ -4888,7 +4870,7 @@ void SongEditor::rebuildScanPageTable() {
     m_scanPageTable = buildScanPageTable(tps, scanPages(), songEnd, fallbackBpm);
 
     // Regenerate runtime-facing speed events from overrides so legacy
-    // consumers (m_scanPhaseTable, CytusRenderer) reflect edits immediately.
+    // consumers (m_scanPhaseTable, ScanLineRenderer) reflect edits immediately.
     auto regenerated = expandScanPagesToSpeedEvents(m_scanPageTable, scanPages());
     if (!regenerated.empty() || !scanPages().empty()) {
         scanSpeed() = regenerated;
@@ -5454,7 +5436,7 @@ void SongEditor::renderGameModePreview(ImDrawList* dl, ImVec2 origin, ImVec2 siz
                         IM_COL32(200, 200, 200, 180), "2D Drop Notes");
         } else {
             // ── 3D: Sky input line above ground ──
-            // Sky judge line at a higher position (like Arcaea's "Sky Input")
+            // Sky judge line at a higher position (like Drop3D's "Sky Input")
             float skyFrac = 0.55f;
             float skyY = vpY + (baseY - vpY) * skyFrac;
             float skySpread = baseW * skyFrac;
@@ -5497,7 +5479,7 @@ void SongEditor::renderGameModePreview(ImDrawList* dl, ImVec2 origin, ImVec2 siz
         }
 
     } else if (gm.type == GameModeType::Circle) {
-        // ── Circle mode (Lanota-style: outer hit circle + inner spawn circle + radial tracks) ──
+        // ── Circle mode (Circle-style: outer hit circle + inner spawn circle + radial tracks) ──
         float centerX = origin.x + size.x * 0.5f;
         float centerY = origin.y + size.y * 0.52f;
         float minDim = (size.x < size.y) ? size.x : size.y;
@@ -5559,7 +5541,7 @@ void SongEditor::renderGameModePreview(ImDrawList* dl, ImVec2 origin, ImVec2 siz
                     IM_COL32(200, 200, 200, 180), "Circle Mode");
 
     } else {
-        // ── Scan Line mode (Cytus-style) ──
+        // ── Scan Line mode (ScanLine-style) ──
         // Horizontal scan line sweeping vertically
         float scanY = origin.y + size.y * 0.45f;
         dl->AddLine(ImVec2(origin.x + 10, scanY), ImVec2(pMax.x - 10, scanY),
@@ -5614,7 +5596,7 @@ void SongEditor::renderGameModePreview(ImDrawList* dl, ImVec2 origin, ImVec2 siz
             IM_COL32(255, 255, 255, 100));
 
         dl->AddText(ImVec2(origin.x + 8, origin.y + 6),
-                    IM_COL32(200, 200, 200, 180), "Scan Line Mode (Cytus)");
+                    IM_COL32(200, 200, 200, 180), "Scan Line Mode");
     }
 
     dl->PopClipRect();
@@ -5831,10 +5813,10 @@ void SongEditor::renderAssets() {
         switch (m_song->gameMode.type) {
             case GameModeType::DropNotes:
                 wantMode = (m_song->gameMode.dimension == DropDimension::ThreeD)
-                           ? "arcaea" : "bandori";
+                           ? "drop3d" : "drop2d";
                 break;
-            case GameModeType::Circle:   wantMode = "lanota"; break;
-            case GameModeType::ScanLine: wantMode = "cytus";  break;
+            case GameModeType::Circle:   wantMode = "circle"; break;
+            case GameModeType::ScanLine: wantMode = "scanline";  break;
         }
     }
     auto matFitsMode = [&](const std::string& stem) -> bool {
@@ -6103,7 +6085,7 @@ ChartData SongEditor::buildChartFromNotes() const {
               [](const NoteEvent& a, const NoteEvent& b) { return a.time < b.time; });
 
     // Disk animation (circle mode). Safe to emit for any mode — the
-    // runtime simply ignores it when the renderer isn't LanotaRenderer.
+    // runtime simply ignores it when the renderer isn't CircleRenderer.
     chart.diskAnimation.rotations = diskRot();
     chart.diskAnimation.moves     = diskMove();
     chart.diskAnimation.scales    = diskScale();
@@ -6597,7 +6579,7 @@ void SongEditor::renderNoteToolbar() {
     toolBtn("Click",  NoteTool::Tap, ImVec4(0.2f, 0.5f, 0.8f, 1.f));
     toolBtn("Hold",   NoteTool::Hold, ImVec4(0.2f, 0.7f, 0.3f, 1.f));
 
-    // Flick: 2D drop (Bandori), 3D drop (Arcaea), and Circle (Lanota) all
+    // Flick: 2D drop, 3D drop, and Circle all
     // support Flick in their renderers.
     const bool twoDDrop = (gm.type == GameModeType::DropNotes
                            && gm.dimension != DropDimension::ThreeD);
@@ -6744,7 +6726,7 @@ void SongEditor::renderNoteToolbar() {
         int tc = m_song ? m_song->gameMode.trackCount : 7;
         const auto& mks  = markers();
         const auto& fts  = features();
-        // This branch handles 2D drop (Bandori), 3D drop (Arcaea), Circle (Lanota).
+        // This branch handles 2D drop, 3D drop, Circle.
         // All three support Click/Hold/Flick. Slide is ScanLine-only; Arc/ArcTap
         // are 3D-drop extras intentionally left for the chart author.
         const bool supportsFlick = true;
@@ -7195,7 +7177,7 @@ void SongEditor::handleNotePlacement(ImVec2 origin, ImVec2 size, float startTime
     } else if (io.MouseClicked[0]) {
         // Tap placement: if the click lands inside an existing Hold's zone
         // (same lane at that moment in time), convert it into a sample point
-        // on that hold — Bandori-style inline tick — instead of placing a
+        // on that hold — Drop2D-style inline tick — instead of placing a
         // standalone tap note.
         if (effectiveTool == NoteTool::Tap) {
             auto editorHoldLaneAt = [](const EditorNote& h, float tOff) -> float {
@@ -7881,7 +7863,7 @@ void SongEditor::renderNotes(ImDrawList* dl, ImVec2 origin, ImVec2 size,
 
     ImGuiIO& io = ImGui::GetIO();
     // Note click-selection opens the Note Properties popup. Allowed in all
-    // modes so authors can edit Hold transition/sample points in Bandori too.
+    // modes so authors can edit Hold transition/sample points in Drop2D too.
     bool clickable = (m_noteTool == NoteTool::None)
                   && !io.KeyCtrl && !io.KeyShift && !io.KeyAlt;
 
@@ -8617,16 +8599,16 @@ static std::string buildCopilotSystemPrompt(const SongInfo* song,
             default: ++other; break;
         }
     }
-    // Use the skill-file / mode-gate names (bandori/arcaea/cytus/lanota) so
+    // Use the skill-file / mode-gate names (drop2d/drop3d/scanline/circle) so
     // loadCopilotSkill() actually finds the per-mode doc — "circle"/"scanline"
     // have no skill file and would drop the whole skill prompt (incl. the
     // shared _common ops like set_material).
-    const char* modeName = "bandori";
+    const char* modeName = "drop2d";
     if (song) {
-        if (song->gameMode.type == GameModeType::Circle)            modeName = "lanota";
-        else if (song->gameMode.type == GameModeType::ScanLine)     modeName = "cytus";
-        else if (song->gameMode.dimension == DropDimension::ThreeD) modeName = "arcaea";
-        else modeName = "bandori";
+        if (song->gameMode.type == GameModeType::Circle)            modeName = "circle";
+        else if (song->gameMode.type == GameModeType::ScanLine)     modeName = "scanline";
+        else if (song->gameMode.dimension == DropDimension::ThreeD) modeName = "drop3d";
+        else modeName = "drop2d";
     }
     const char* diffName = (diff == Difficulty::Easy) ? "easy"
                          : (diff == Difficulty::Medium) ? "medium" : "hard";
@@ -8858,10 +8840,10 @@ void SongEditor::renderCopilotPanel() {
                 // user sees why an op didn't make it into the preview.
                 const char* modeName = "dropnotes";
                 if (m_song) {
-                    if (m_song->gameMode.type == GameModeType::Circle)          modeName = "lanota";
-                    else if (m_song->gameMode.type == GameModeType::ScanLine)   modeName = "cytus";
-                    else if (m_song->gameMode.dimension == DropDimension::ThreeD) modeName = "arcaea";
-                    else modeName = "bandori";
+                    if (m_song->gameMode.type == GameModeType::Circle)          modeName = "circle";
+                    else if (m_song->gameMode.type == GameModeType::ScanLine)   modeName = "scanline";
+                    else if (m_song->gameMode.dimension == DropDimension::ThreeD) modeName = "drop3d";
+                    else modeName = "drop2d";
                 }
                 std::vector<ChartEditOp> kept;
                 std::string rejectLog;
@@ -8979,16 +8961,16 @@ void SongEditor::pollAudit() {
 
 static std::string buildAuditSystemPrompt(const SongInfo* song,
                                            Difficulty diff) {
-    // Use the skill-file / mode-gate names (bandori/arcaea/cytus/lanota) so
+    // Use the skill-file / mode-gate names (drop2d/drop3d/scanline/circle) so
     // loadCopilotSkill() actually finds the per-mode doc — "circle"/"scanline"
     // have no skill file and would drop the whole skill prompt (incl. the
     // shared _common ops like set_material).
-    const char* modeName = "bandori";
+    const char* modeName = "drop2d";
     if (song) {
-        if (song->gameMode.type == GameModeType::Circle)            modeName = "lanota";
-        else if (song->gameMode.type == GameModeType::ScanLine)     modeName = "cytus";
-        else if (song->gameMode.dimension == DropDimension::ThreeD) modeName = "arcaea";
-        else modeName = "bandori";
+        if (song->gameMode.type == GameModeType::Circle)            modeName = "circle";
+        else if (song->gameMode.type == GameModeType::ScanLine)     modeName = "scanline";
+        else if (song->gameMode.dimension == DropDimension::ThreeD) modeName = "drop3d";
+        else modeName = "drop2d";
     }
     const char* diffName = (diff == Difficulty::Easy) ? "easy"
                          : (diff == Difficulty::Medium) ? "medium" : "hard";

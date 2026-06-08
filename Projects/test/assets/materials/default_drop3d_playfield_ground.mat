@@ -1,0 +1,10 @@
+{
+  "version": 2,
+  "class": "effect",
+  "name": "default_drop3d_playfield_ground",
+  "kind": "gradient",
+  "tint": [0.15, 0.15, 0.25, 1],
+  "params": [0.05, 0.05, 0.15, 0],
+  "targetMode": "drop3d",
+  "targetSlot": "playfield_ground"
+}

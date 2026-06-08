@@ -1,0 +1,13 @@
+{
+  "version": 2,
+  "class": "pbr",
+  "name": "default_drop3d_playfield_side_posts",
+  "baseColor": [0.8, 0.82, 0.92, 0.5],
+  "metallic": 0,
+  "roughness": 1,
+  "emissiveColor": [0, 0, 0],
+  "emissiveIntensity": 0,
+  "useNormalMap": false,
+  "targetMode": "drop3d",
+  "targetSlot": "playfield_side_posts"
+}

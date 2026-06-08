@@ -413,10 +413,10 @@ void MusicSelectionEditor::renderPreview(float width, float height) {
     float coverSize  = std::min(centerW * 0.7f, ph * 0.55f);
 
     // ── Left wheel: Music Sets ───────────────────────────────────────────────
-    renderSetWheel(ImVec2(p.x, p.y), wheelW, ph);
+    renderSetWheel(ImVec2(p.x, p.y), wheelW, ph, m_engine);
 
     // ── Right wheel: Songs ───────────────────────────────────────────────────
-    renderSongWheel(ImVec2(p.x + pw - wheelW, p.y), wheelW, ph);
+    renderSongWheel(ImVec2(p.x + pw - wheelW, p.y), wheelW, ph, m_engine);
 
     // ── Center: Cover + difficulty + play, centered vertically ──────────────
     const float diffGap   = std::max(ph * 0.04f, 28.f);
@@ -568,6 +568,57 @@ void MusicSelectionEditor::renderHierarchy(float width, float height) {
             ? "Hide Badge Preview" : "Preview Badges in Scene";
         if (ImGui::Button(btnLabel, ImVec2(-1, 0)))
             m_showAchievementPreview = !m_showAchievementPreview;
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+    }
+
+    // ── Wheel sounds (page-level) ────────────────────────────────────────────
+    // Played when the song/set wheel moves. Scroll and click are separate so
+    // authors can use a soft tick for scrolling and a confirm sound for clicks.
+    {
+        auto sfxDropZone = [&](const char* label, const char* idBase,
+                                std::string& outPath) {
+            ImGui::PushID(idBase);
+            ImGui::TextUnformatted(label);
+            const float zoneW = ImGui::GetContentRegionAvail().x - 60.f;
+            const float zoneH = 30.f;
+            ImVec2 zonePos = ImGui::GetCursorScreenPos();
+            ImGui::InvisibleButton("##sfxzone", ImVec2(zoneW, zoneH));
+            ImDrawList* dl = ImGui::GetWindowDrawList();
+            ImU32 border = ImGui::IsItemHovered()
+                ? IM_COL32(100, 160, 255, 255) : IM_COL32(100, 100, 120, 180);
+            dl->AddRectFilled(zonePos, ImVec2(zonePos.x + zoneW, zonePos.y + zoneH),
+                              IM_COL32(30, 30, 45, 200), 4.f);
+            std::string shown = outPath.empty() ? std::string("Drop sound file here")
+                                                : outPath.substr(outPath.find_last_of("/\\") + 1);
+            ImU32 txtCol = outPath.empty() ? IM_COL32(120, 120, 140, 200)
+                                           : IM_COL32(210, 210, 225, 255);
+            ImVec2 tsz = ImGui::CalcTextSize(shown.c_str());
+            dl->AddText(ImVec2(zonePos.x + 8.f,
+                               zonePos.y + zoneH * 0.5f - tsz.y * 0.5f),
+                        txtCol, shown.c_str());
+            dl->AddRect(zonePos, ImVec2(zonePos.x + zoneW, zonePos.y + zoneH),
+                        border, 4.f, 0, 1.5f);
+            if (ImGui::BeginDragDropTarget()) {
+                if (const ImGuiPayload* payload =
+                        ImGui::AcceptDragDropPayload("ASSET_PATH")) {
+                    outPath = std::string(static_cast<const char*>(payload->Data),
+                                          payload->DataSize - 1);
+                }
+                ImGui::EndDragDropTarget();
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Clear")) outPath.clear();
+            ImGui::PopID();
+        };
+
+        ImGui::TextUnformatted("Wheel Sounds:");
+        ImGui::TextDisabled("Drag an audio asset onto a slot. Empty = silent.");
+        ImGui::Spacing();
+        sfxDropZone("Scroll Sound", "wheelscroll", m_wheelScrollSfx);
+        ImGui::Spacing();
+        sfxDropZone("Click Sound",  "wheelclick",  m_wheelClickSfx);
         ImGui::Spacing();
         ImGui::Separator();
         ImGui::Spacing();

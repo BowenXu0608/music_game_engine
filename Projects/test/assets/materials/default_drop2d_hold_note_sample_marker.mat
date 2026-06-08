@@ -1,0 +1,13 @@
+{
+  "version": 2,
+  "class": "pbr",
+  "name": "default_drop2d_hold_note_sample_marker",
+  "baseColor": [1, 0.95, 0.3, 0.95],
+  "metallic": 0,
+  "roughness": 1,
+  "emissiveColor": [0, 0, 0],
+  "emissiveIntensity": 0,
+  "useNormalMap": false,
+  "targetMode": "drop2d",
+  "targetSlot": "hold_note_sample_marker"
+}

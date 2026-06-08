@@ -1,4 +1,5 @@
 #include "ParticleEffectAsset.h"
+#include "MaterialSlots.h"
 #include <fstream>
 #include <sstream>
 
@@ -170,7 +171,7 @@ bool loadParticleEffectAsset(const std::filesystem::path& loadPath,
     scanFloatArr<4>(src, "color",    out.color,    {0.3f, 1.f, 0.5f, 1.f});
     scanFloatArr<4>(src, "colorEnd", out.colorEnd, {0.3f, 1.f, 0.5f, 0.f});
     out.customShaderPath = scanStringField(src, "shader");
-    out.targetMode       = scanStringField(src, "targetMode");
+    out.targetMode       = normalizeModeToken(scanStringField(src, "targetMode"));
     out.targetSlotSlug   = scanStringField(src, "targetSlot");
     return true;
 }

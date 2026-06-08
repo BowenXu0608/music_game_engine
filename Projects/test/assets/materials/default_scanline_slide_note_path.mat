@@ -1,0 +1,13 @@
+{
+  "version": 2,
+  "class": "pbr",
+  "name": "default_scanline_slide_note_path",
+  "baseColor": [0.85, 0.5, 1, 0.55],
+  "metallic": 0,
+  "roughness": 1,
+  "emissiveColor": [0, 0, 0],
+  "emissiveIntensity": 0,
+  "useNormalMap": false,
+  "targetMode": "scanline",
+  "targetSlot": "slide_note_path"
+}

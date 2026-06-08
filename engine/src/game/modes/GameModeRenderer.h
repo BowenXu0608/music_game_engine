@@ -41,7 +41,7 @@ public:
     virtual void showJudgment(int lane, Judgment judgment, float timingDelta = 0.f) {}
 
     // Active floating judgment-text entries for the HUD to draw. Default empty
-    // (modes without a judgment-text overlay). Bandori populates this.
+    // (modes without a judgment-text overlay). Drop2D populates this.
     virtual const std::vector<JudgmentDisplay>& judgmentDisplays() const {
         static const std::vector<JudgmentDisplay> kEmpty;
         return kEmpty;
@@ -87,8 +87,8 @@ public:
     ParticleEffectLibrary* particleLibrary() const { return m_particleLibrary; }
 
     // Player-facing note-speed multiplier (1.0 = default). Drop modes and
-    // Circle (Lanota) scale scroll speed / approach time by this value;
-    // ScanLine (Cytus) and Phigros ignore it entirely.
+    // Circle scale scroll speed / approach time by this value;
+    // ScanLine and Phigros ignore it entirely.
     void setNoteSpeedMultiplier(float m) { m_noteSpeedMul = (m > 0.01f) ? m : 0.01f; }
     float noteSpeedMultiplier() const { return m_noteSpeedMul; }
 

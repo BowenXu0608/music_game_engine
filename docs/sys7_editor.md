@@ -37,7 +37,7 @@ Each layer = self-contained ImGui panel. Test Game = separate process via `Creat
 
 **Game Mode:** DropNotes/Circle/ScanLine + 2D/3D dimension + track count.
 
-**Camera:** Eye position, look-at target, FOV (20-120 deg).
+**Camera:** Free 3D camera (drop modes) — see "Drop-mode camera controls" below.
 
 **HUD:** Score + Combo position/font/color/glow/bold per-element via `HudTextConfig`.
 
@@ -104,7 +104,11 @@ Multi-waypoint arc editor. Only visible/active in DropNotes + ThreeD mode.
 
 **Sky Height:** Configurable via `GameModeConfig::skyHeight` slider in Game Mode Config panel (range -1 to 3, default 1.0). Saved in `music_selection.json`.
 
-**Drop-mode camera sliders (Note tab → Lane Layout):** `Camera Distance` (0.5–2.0×) and `Field of View` (0–110°, 0 = mode default) for all DropNotes; `Playfield Width` (30–100%) and `Playfield Height` (30–100%) for 2D drop only. Reworked 2026-06-04 — for 2D drop the camera is **fixed** (no scaling, angle constant): **Camera Distance** sets how much track is visible ahead (far-draw distance), **Playfield Height** sets the judgment-line screen position (vertical shift), **Playfield Width** sets the bottom width. The preview math in `renderSceneView` (2D branch) mirrors `BandoriRenderer::onResize` verbatim — edit both. Full model + rationale: sys6_game_modes.md → BandoriRenderer "Camera model" and devlog 2026-06-04.
+**Drop-mode camera controls (Note tab, `renderNotePage`, gated to DropNotes — both 2D and 3D):** a free 3D camera, replacing the old `Camera Distance`/`Playfield Width%`/`Height%` knobs (reworked 2026-06-08). Controls: **Projection** (Perspective | Orthographic combo), **Position** (`DragFloat3` X/Y/Z), **Rotation (deg)** (`DragFloat3` Euler pitch/yaw/roll), **Field of View** (10–170°, perspective) *or* **Ortho Size** (0.1–100, orthographic — shown per projection), **Playfield Width** (0.5–100 world units) and **Playfield Length** (1–1000 world units). Near/Far clip are fixed (near 0, far 300) and **not exposed** — `Playfield Length` bounds the runway.
+
+Each control has a right-aligned **Reset** button (`labelReset` lambda) that restores just that parameter from **`cameraDefaultsFor(dimension)`** (`ProjectHub.h`) — the *same* per-dimension defaults the JSON loader uses, so reset values, load fallbacks and struct defaults can't drift. Defaults: 2D = pos `{0,5,8}`, pitch −8.882°, FOV 55, width 14, length 50; 3D = pos `{0,3,10}`, pitch −16.699°, FOV 45, width 6, length 60 (chosen to reproduce the legacy framing — 14 world units ≈ 90% of a 16:9 screen at the hit line; 3D 6/60 = old Arcaea `LANE_HALF_WIDTH 3`/`LANE_FAR_Z −60`).
+
+The preview in `renderSceneView` now calls the **same `buildGameplayCamera(gm, aspect)`** as the live renderers (no more verbatim-duplicated camera math). Full model + rationale: sys6_game_modes.md → BandoriRenderer "Camera model" and devlog 2026-06-08.
 
 **FX tab — `ui_tap` button-feedback effect (2026-06-04):** the shared player-screen button-tap particle effect (`"ui_tap"`, `kUiTapEffectName`) is a normal `.pfx` that surfaces in the FX-tab effect list (`renderParticlePage`) and edits through the existing CRUD — color/size/count/kind incl. **Custom** GLSL. No per-button binding (it's uniform); seeded by `ParticleEffectLibrary::seedUiTapEffect()` on project open. Rendering/trigger detail: sys1_rendering.md → "UI button-tap particles".
 
@@ -440,3 +444,29 @@ For future editor screens that want a player-facing twin, the pattern is:
 4. Sidebar widgets read/write inherited protected fields directly.
 
 The class-name test: if you'd put `Editor` in the name, that file isn't going into the Android lib.
+
+## Music Selection — wheel sounds (2026-06-04)
+
+The song-select wheel uses **sounds** (not the `ui_tap` particle spark) when changing songs,
+with **separate scroll and click effects**, configured from the **Music Selection editor
+sidebar**.
+
+- **Data (shared, in the View):** `MusicSelectionView` gained `m_wheelScrollSfx` /
+  `m_wheelClickSfx` (project-relative paths, protected), round-tripped in `music_selection.json`
+  as `wheelScrollSfx` / `wheelClickSfx` (load + `toUtf8` save, next to `background`/`fcImage`).
+  Helper `playWheelSfx(IPlayerEngine*, rel)` → `audio().playSfxFile(projectPath + "/" + rel)`
+  (concurrent file SFX, see sys2).
+- **Triggers:** `renderSetWheel` / `renderSongWheel` now take `IPlayerEngine* engine`. Scroll
+  handlers play `wheelScrollSfx` **only when the rounded selected index actually changes**;
+  card `InvisibleButton` clicks play `wheelClickSfx`. Wired in both `renderGamePreview`
+  (test/Android) and `MusicSelectionEditor::render` (passes `m_engine`, so authors hear it while
+  scrolling the editor preview).
+- **No spark on the wheel:** `renderGamePreview` calls `engine->suppressUiTapParticle()` (sys3)
+  while the cursor is over either wheel band, so song/set cards don't spark but the center
+  difficulty/Start buttons still do.
+- **Editor control:** a "Wheel Sounds" section in the Music-Selection sidebar (after Achievement
+  Badges) with an inline `sfxDropZone` lambda — two `ASSET_PATH` drag-drop slots ("Scroll Sound"
+  / "Click Sound") showing the filename + a Clear button; empty = silent. Fields are inherited
+  protected members of the base View (the `XxxEditor : public XxxView` pattern above).
+- **Android:** not yet wired — `suppressUiTapParticle` is a no-op on the adapter and
+  `AndroidEngine` doesn't play these. Follow-up.

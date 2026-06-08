@@ -47,7 +47,7 @@ struct ParticleEffectAsset {
     std::string          customShaderPath;      // Custom-kind, project-relative
 
     // Slot-aware picker constraints (see MaterialAsset). Empty = "any".
-    std::string          targetMode;            // "bandori"/...
+    std::string          targetMode;            // "drop2d"/...
     std::string          targetSlotSlug;        // e.g. "click_hit"
 };
 

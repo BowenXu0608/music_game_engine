@@ -249,7 +249,7 @@ struct PhigrosNoteData {
     float    duration;
 };
 
-struct LanotaRingData {
+struct CircleRingData {
     float angle;
     int   ringIndex;
     int   laneSpan = 1; // how many adjacent lanes the note covers (1, 2, or 3)
@@ -261,7 +261,7 @@ struct NoteEvent {
     uint32_t id;
     double   beatPosition = 0.0;  // accumulated beats from song start (set by computeBeatPositions)
     std::variant<TapData, HoldData, FlickData,
-                 ArcData, PhigrosNoteData, LanotaRingData> data;
+                 ArcData, PhigrosNoteData, CircleRingData> data;
 };
 
 // ── Timing ───────────────────────────────────────────────────────────────────
@@ -282,7 +282,7 @@ struct JudgmentLineEvent {
     std::vector<NoteEvent> attachedNotes;
 };
 
-// ── Lanota / circle-mode disk animation ─────────────────────────────────────
+// ── Circle / circle-mode disk animation ─────────────────────────────────────
 //
 // Segment-based keyframes: each event describes a transform change that
 // starts at `startTime` and finishes `duration` seconds later. Between the
@@ -320,7 +320,7 @@ struct DiskAnimation {
 
 // ── Scan-line speed events ──────────────────────────────────────────────────
 //
-// Segment-based speed multiplier changes for the Cytus-style scan line.
+// Segment-based speed multiplier changes for the ScanLine-style scan line.
 // Identical shape to disk animation events: the speed transitions from
 // the previous value to targetSpeed over `duration` seconds starting at
 // `startTime`.  Between events the speed holds.  Before the first event,
@@ -349,7 +349,7 @@ struct ScanPageOverride {
 // ── Shared Catmull-Rom path interpolation ───────────────────────────────────
 //
 // Evaluate a Catmull-Rom spline along a path of (x,y) pairs.
-// `u` is in [0,1] spanning the entire path.  Used by both CytusRenderer
+// `u` is in [0,1] spanning the entire path.  Used by both ScanLineRenderer
 // (gameplay) and SongEditor (preview) for smooth slide curve evaluation.
 
 inline std::pair<float,float> catmullRomPathEval(
@@ -391,9 +391,9 @@ struct ChartData {
     std::vector<NoteEvent>         notes;
     std::vector<JudgmentLineEvent> judgmentLines;  // Phigros only
 
-    DiskAnimation diskAnimation;                   // Lanota / circle mode
-    std::vector<ScanSpeedEvent>    scanSpeedEvents;    // Cytus scan-line speed
-    std::vector<ScanPageOverride>  scanPageOverrides;  // Cytus per-page speed
+    DiskAnimation diskAnimation;                   // Circle / circle mode
+    std::vector<ScanSpeedEvent>    scanSpeedEvents;    // ScanLine scan-line speed
+    std::vector<ScanPageOverride>  scanPageOverrides;  // ScanLine per-page speed
 
     // Beat markers authored for this (mode, difficulty). Mirrors what the
     // editor keeps in m_diffMarkers; persisted per chart file so reopening a

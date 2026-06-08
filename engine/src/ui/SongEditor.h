@@ -77,7 +77,7 @@ struct EditorNote {
     int   scanHoldSweeps = 0; // extra sweeps the hold crosses (0 = single sweep)
     std::vector<std::pair<float,float>> scanPath; // slide drag path
 
-    // ── Arc fields (Arcaea 3D mode only) ──────────────────────────────────
+    // ── Arc fields (Drop3D 3D mode only) ──────────────────────────────────
     // Multi-waypoint arc path. When >=2 entries, this is the authoritative
     // arc shape and the legacy 2-endpoint fields below are ignored.
     std::vector<ArcWaypoint> arcWaypoints;
@@ -342,7 +342,7 @@ public:  // Phase 7: Copilot extended apply path mutates these.
     }
 private:
 
-    // Per-difficulty scan-line speed events (Cytus mode only).
+    // Per-difficulty scan-line speed events (ScanLine mode only).
     std::unordered_map<int, std::vector<ScanSpeedEvent>> m_diffScanSpeed;
 public:  // Phase 7: Copilot extended apply path mutates these.
     std::vector<ScanSpeedEvent>& scanSpeed() { return m_diffScanSpeed[(int)m_currentDifficulty]; }
@@ -486,7 +486,7 @@ private:
     AuditHighlight m_auditHover;
     AuditHighlight m_auditPin;
 
-    // ── Arc editing state (Arcaea 3D mode) ──────────────────────────────────
+    // ── Arc editing state (Drop3D 3D mode) ──────────────────────────────────
     bool       m_arcPlacing     = false;  // click-to-place in progress
     EditorNote m_arcDraft;                // in-progress arc with waypoints
     int        m_arcDraftColor  = 0;      // 0=cyan, 1=pink (toolbar pick)

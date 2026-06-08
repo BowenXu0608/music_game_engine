@@ -5,7 +5,7 @@
 
 namespace fs = std::filesystem;
 
-const std::vector<ParticleSlotInfo>& bandoriParticleSlots() {
+const std::vector<ParticleSlotInfo>& drop2dParticleSlots() {
     static const std::vector<ParticleSlotInfo> slots = {
         {"click_hit", "Click Hit"},
         {"flick_hit", "Flick Hit"},
@@ -17,7 +17,7 @@ const std::vector<ParticleSlotInfo>& bandoriParticleSlots() {
     return slots;
 }
 
-const std::vector<ParticleSlotInfo>& cytusParticleSlots() {
+const std::vector<ParticleSlotInfo>& scanlineParticleSlots() {
     static const std::vector<ParticleSlotInfo> slots = {
         {"click_hit",  "Click Hit"},
         {"flick_hit",  "Flick Hit"},
@@ -28,7 +28,7 @@ const std::vector<ParticleSlotInfo>& cytusParticleSlots() {
     return slots;
 }
 
-const std::vector<ParticleSlotInfo>& arcaeaParticleSlots() {
+const std::vector<ParticleSlotInfo>& drop3dParticleSlots() {
     static const std::vector<ParticleSlotInfo> slots = {
         {"click_hit", "Ground Tap"},
         {"flick_hit", "Flick"},
@@ -41,7 +41,7 @@ const std::vector<ParticleSlotInfo>& arcaeaParticleSlots() {
     return slots;
 }
 
-const std::vector<ParticleSlotInfo>& lanotaParticleSlots() {
+const std::vector<ParticleSlotInfo>& circleParticleSlots() {
     static const std::vector<ParticleSlotInfo> slots = {
         {"click_hit", "Note Hit"},
         {"flick_hit", "Flick Hit"},
@@ -51,10 +51,10 @@ const std::vector<ParticleSlotInfo>& lanotaParticleSlots() {
 }
 
 const std::vector<ParticleSlotInfo>& particleSlotsForMode(const std::string& mode) {
-    if (mode == "cytus")  return cytusParticleSlots();
-    if (mode == "arcaea") return arcaeaParticleSlots();
-    if (mode == "lanota") return lanotaParticleSlots();
-    return bandoriParticleSlots();
+    if (mode == "scanline")  return scanlineParticleSlots();
+    if (mode == "drop3d") return drop3dParticleSlots();
+    if (mode == "circle") return circleParticleSlots();
+    return drop2dParticleSlots();
 }
 
 fs::path ParticleEffectLibrary::particlesDir() const {
@@ -129,7 +129,7 @@ std::vector<std::string> ParticleEffectLibrary::namesCompatibleWith(
 }
 
 namespace {
-// Built-in default for one Bandori event slot. Distinct hue + pattern per slot
+// Built-in default for one Drop2D event slot. Distinct hue + pattern per slot
 // so every gameplay moment reads differently out of the box.
 ParticleEffectAsset defaultForSlot(const std::string& mode, const std::string& slug) {
     ParticleEffectAsset a;
@@ -179,7 +179,7 @@ ParticleEffectAsset defaultForSlot(const std::string& mode, const std::string& s
         a.sizeStart = 9.f; a.sizeEnd = 2.f; a.lifeMin = 0.30f; a.lifeMax = 0.5f;
         a.color = {0.5f, 0.7f, 1.0f, 1.f}; a.colorEnd = {0.5f, 0.7f, 1.0f, 0.f};
     } else if (slug == "arc") {
-        // Arc trace hit — Arcaea arcs are blue/pink; default to a soft cyan ring.
+        // Arc trace hit — Drop3D arcs are blue/pink; default to a soft cyan ring.
         a.kind = ParticleEffectKind::Ring;
         a.count = 20; a.speedMin = 180.f; a.speedMax = 180.f;
         a.sizeStart = 8.f; a.sizeEnd = 2.f; a.lifeMin = 0.30f; a.lifeMax = 0.45f;
@@ -192,9 +192,9 @@ ParticleEffectAsset defaultForSlot(const std::string& mode, const std::string& s
         a.color = {1.0f, 0.55f, 0.95f, 1.f}; a.colorEnd = {1.0f, 0.55f, 0.95f, 0.f};
     }
 
-    // Arcaea emits particles in WORLD space (its camera is 3D perspective),
+    // Drop3D emits particles in WORLD space (its camera is 3D perspective),
     // not screen pixels — rescale the screen-tuned defaults to world units.
-    if (mode == "arcaea") {
+    if (mode == "drop3d") {
         constexpr float kWorld = 0.012f;   // ~200px -> 2.4 world units
         a.speedMin  *= kWorld; a.speedMax *= kWorld;
         a.sizeStart *= 0.02f;  a.sizeEnd  *= 0.02f;
@@ -217,11 +217,11 @@ void ParticleEffectLibrary::seedUiTapEffect() {
     if (m_assets.find(kUiTapEffectName) != m_assets.end()) return;  // preserve edits
     ParticleEffectAsset a;
     a.name      = kUiTapEffectName;
-    a.kind      = ParticleEffectKind::Burst;
-    a.count     = 12;
-    a.speedMin  = 90.f;   a.speedMax = 180.f;
-    a.sizeStart = 8.f;    a.sizeEnd  = 1.f;
-    a.lifeMin   = 0.22f;  a.lifeMax  = 0.4f;
+    a.kind      = ParticleEffectKind::Ring;
+    a.count     = 24;
+    a.speedMin  = 150.f;  a.speedMax = 170.f;   // near-uniform → clean expanding ring
+    a.sizeStart = 6.f;    a.sizeEnd  = 1.f;
+    a.lifeMin   = 0.28f;  a.lifeMax  = 0.42f;
     a.color     = {1.0f, 1.0f, 1.0f, 0.95f};
     a.colorEnd  = {0.8f, 0.9f, 1.0f, 0.f};
     // Mode-independent: leave targetMode/targetSlotSlug empty.

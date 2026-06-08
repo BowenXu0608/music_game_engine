@@ -1,0 +1,13 @@
+{
+  "version": 2,
+  "class": "pbr",
+  "name": "default_drop3d_arctap_note_tile",
+  "baseColor": [1, 1, 1, 1],
+  "metallic": 0,
+  "roughness": 0.5,
+  "emissiveColor": [1, 1, 1],
+  "emissiveIntensity": 1,
+  "useNormalMap": false,
+  "targetMode": "drop3d",
+  "targetSlot": "arctap_note_tile"
+}

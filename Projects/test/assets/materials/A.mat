@@ -4,6 +4,6 @@
   "tint": [1, 1, 1, 1],
   "params": [0, 0, 0, 0],
   "shader": "assets/shaders/A.frag",
-  "targetMode": "bandori",
+  "targetMode": "drop2d",
   "targetSlot": "hold_note_body"
 }

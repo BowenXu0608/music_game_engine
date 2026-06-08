@@ -38,16 +38,16 @@ void AndroidEngine::init(android_app* app, const std::string& shaderDir) {
         double t = m_clock.songTime();
 
         // Mirror the desktop Engine's per-mode dispatch. checkHitPosition()
-        // (the old single path) only matches Arcaea-style position notes, so
-        // lane-based modes (Bandori 2D/3D drop, etc.) never registered taps
+        // (the old single path) only matches Drop3D-style position notes, so
+        // lane-based modes (Drop2D 2D/3D drop, etc.) never registered taps
         // and never began holds.
-        if (dynamic_cast<ArcaeaRenderer*>(m_activeMode.get()))
-            handleGestureArcaea(evt, t);
+        if (dynamic_cast<Drop3DRenderer*>(m_activeMode.get()))
+            handleGestureDrop3D(evt, t);
         else if (dynamic_cast<PhigrosRenderer*>(m_activeMode.get()))
             handleGesturePhigros(evt, t);
-        else if (auto* lan = dynamic_cast<LanotaRenderer*>(m_activeMode.get()))
+        else if (auto* lan = dynamic_cast<CircleRenderer*>(m_activeMode.get()))
             handleGestureCircle(*lan, evt, t);
-        else if (auto* cyt = dynamic_cast<CytusRenderer*>(m_activeMode.get()))
+        else if (auto* cyt = dynamic_cast<ScanLineRenderer*>(m_activeMode.get()))
             handleGestureScanLine(*cyt, evt, t);
         else
             handleGestureLaneBased(evt, t);
@@ -414,7 +414,7 @@ void AndroidEngine::update(float dt) {
         }
         auto broken = m_hitDetector.consumeBrokenHolds();
         (void)broken;
-        // Sync active-hold ids so BandoriRenderer keeps drawing the hold body
+        // Sync active-hold ids so Drop2DRenderer keeps drawing the hold body
         // (and lights up the active glow). Without this, holds disappear the
         // instant their head crosses the judgement line — even with autoplay,
         // because the renderer's m_activeHoldIds stays empty and the stale-hold
@@ -1075,21 +1075,21 @@ std::unique_ptr<GameModeRenderer> AndroidEngine::createRenderer(const GameModeCo
     switch (config.type) {
         case GameModeType::DropNotes:
             if (config.dimension == DropDimension::ThreeD)
-                return std::make_unique<ArcaeaRenderer>();
-            return std::make_unique<BandoriRenderer>();
+                return std::make_unique<Drop3DRenderer>();
+            return std::make_unique<Drop2DRenderer>();
         case GameModeType::Circle:
             // Match desktop Engine::createRenderer: Circle is always the
-            // Lanota rotating-disk renderer (the dimension toggle is not
+            // Circle rotating-disk renderer (the dimension toggle is not
             // exposed for this mode in the editor).
-            return std::make_unique<LanotaRenderer>();
+            return std::make_unique<CircleRenderer>();
         case GameModeType::ScanLine:
-            // Match desktop: ScanLine = Cytus sweep-line renderer. Mapping
+            // Match desktop: ScanLine = ScanLine sweep-line renderer. Mapping
             // this to PhigrosRenderer (a stubbed mode) is why Scan Line was
-            // unplayable on Android. CytusRenderer.cpp is shared, so the
+            // unplayable on Android. ScanLineRenderer.cpp is shared, so the
             // legacy-flat note-draw fix applies here too.
-            return std::make_unique<CytusRenderer>();
+            return std::make_unique<ScanLineRenderer>();
     }
-    return std::make_unique<BandoriRenderer>();
+    return std::make_unique<Drop2DRenderer>();
 }
 
 // ============================================================================
@@ -1169,7 +1169,7 @@ void AndroidEngine::handleGestureLaneBased(const GestureEvent& evt, double songT
     }
 }
 
-void AndroidEngine::handleGestureArcaea(const GestureEvent& evt, double songTime) {
+void AndroidEngine::handleGestureDrop3D(const GestureEvent& evt, double songTime) {
     glm::vec2 screenSize{static_cast<float>(m_renderer.width()),
                          static_cast<float>(m_renderer.height())};
 
@@ -1225,7 +1225,7 @@ void AndroidEngine::handleGesturePhigros(const GestureEvent& evt, double songTim
     }
 }
 
-void AndroidEngine::handleGestureCircle(LanotaRenderer& lan,
+void AndroidEngine::handleGestureCircle(CircleRenderer& lan,
                                         const GestureEvent& evt, double songTime) {
     constexpr float CIRCLE_PICK_DP = 48.f;
     const float pickPx = ScreenMetrics::dp(CIRCLE_PICK_DP);
@@ -1282,7 +1282,7 @@ void AndroidEngine::handleGestureCircle(LanotaRenderer& lan,
     }
 }
 
-void AndroidEngine::handleGestureScanLine(CytusRenderer& cyt,
+void AndroidEngine::handleGestureScanLine(ScanLineRenderer& cyt,
                                           const GestureEvent& evt, double songTime) {
     constexpr float SCAN_PICK_DP = 48.f;
     const float pickPx = ScreenMetrics::dp(SCAN_PICK_DP);

@@ -89,3 +89,19 @@ All `findValue`/`getVal` lambdas have bounds checks: `pos >= size()` guard after
 ## AudioEngine seek + duration (2026-04-23)
 
 `AudioEngine::playFrom(startSec)` and `AudioEngine::durationSeconds()` added. `playFrom` reads the loaded sound's sample rate via `ma_sound_get_data_format(&m_impl->sound, nullptr, nullptr, &sampleRate, nullptr, 0)` (falls back to 44100 if the format call fails), clamps negative start to 0, computes `frame = startSec * sampleRate`, calls `ma_sound_seek_to_pcm_frame` followed by `ma_sound_start`, sets `m_playing = true`. `durationSeconds()` uses `ma_sound_get_length_in_seconds` on a `const_cast`'d `&m_impl->sound` (miniaudio's signature is non-const). Used by `MusicSelectionEditor::updateAudioPreview` to play a 30-second preview clip starting at `SongInfo::previewStart` when the player dwells on a song — the preview start is auto-detected by summing `MarkerFeature.strength` over a sliding window in SongEditor's new "Preview Clip" section.
+
+## AudioEngine concurrent file SFX — `playSfxFile` (2026-06-04)
+
+`AudioEngine::playSfxFile(path)` plays an **audio file** as a fire-and-forget one-shot that
+**layers over** the music/preview stream (the single `m_impl->sound`). Implementation:
+`Impl` gained a dedicated `ma_sound_group sfxGroup` (inited in `init` via `ma_sound_group_init`,
+volume tracked by `setSfxVolume` → `ma_sound_group_set_volume`) plus a `std::vector<ma_sound*>
+sfxSounds` of live one-shots. Each call: reap finished sounds (`ma_sound_at_end` →
+`ma_sound_uninit`+`delete`+erase), then `ma_sound_init_from_file[_w]` into `sfxGroup`
+(`MA_SOUND_FLAG_NO_SPATIALIZATION`; wide-path UTF-8 handling mirrors `load()`), `ma_sound_start`,
+push to `sfxSounds`. No-op when path empty or `m_sfxVolume <= 0`. `shutdown` uninits the group +
+all tracked sounds. Unlike the legacy `playClickSfx` (which intentionally leaks a synthesized
+buffer), this reaps, so it's safe for arbitrary-length user clips. **Used by** the Music
+Selection wheel sounds (`MusicSelectionView::playWheelSfx` → `wheelScrollSfx` / `wheelClickSfx`,
+see sys7). Routing through a `ma_sound_group` (not the music `ma_sound`) is what allows
+concurrent playback over the preview + independent SFX volume.

@@ -1,0 +1,13 @@
+{
+  "version": 2,
+  "class": "pbr",
+  "name": "default_drop3d_arctap_note_shadow",
+  "baseColor": [0.05, 0.08, 0.15, 0.55],
+  "metallic": 0,
+  "roughness": 1,
+  "emissiveColor": [0, 0, 0],
+  "emissiveIntensity": 0,
+  "useNormalMap": false,
+  "targetMode": "drop3d",
+  "targetSlot": "arctap_note_shadow"
+}

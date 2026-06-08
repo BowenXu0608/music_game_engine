@@ -27,7 +27,7 @@
 #include <string>
 #include <unordered_map>
 
-enum class GameMode { Bandori, Cytus, Phigros, Arcaea, Lanota };
+enum class GameMode { Drop2D, ScanLine, Phigros, Drop3D, Circle };
 enum class EditorLayer { ProjectHub, StartScreen, MusicSelection, Settings, SongEditor, GamePlay };
 
 class Engine : public IPlayerEngine {
@@ -52,6 +52,7 @@ public:
                               const std::string& projectPath);
     void exitGameplay() override;
     void requestStop() override;
+    void suppressUiTapParticle() override { m_suppressUiTapParticle = true; }
     void restartGameplay();
     StartScreenEditor& startScreenEditor() { return m_startScreenEditor; }
     MusicSelectionEditor& musicSelectionEditor() { return m_musicSelectionEditor; }
@@ -122,11 +123,11 @@ private:
 
     void dispatchHitResult(const HitResult& hit, int lane = -1, bool isHoldEnd = false);
     void handleGestureLaneBased(const GestureEvent& evt, double songTime);
-    void handleGestureArcaea(const GestureEvent& evt, double songTime);
+    void handleGestureDrop3D(const GestureEvent& evt, double songTime);
     void handleGesturePhigros(const GestureEvent& evt, double songTime);
-    void handleGestureCircle(class LanotaRenderer& lan,
+    void handleGestureCircle(class CircleRenderer& lan,
                              const GestureEvent& evt, double songTime);
-    void handleGestureScanLine(class CytusRenderer& cyt,
+    void handleGestureScanLine(class ScanLineRenderer& cyt,
                                const GestureEvent& evt, double songTime);
 
     static std::unique_ptr<GameModeRenderer> createRenderer(const GameModeConfig& config);
@@ -212,6 +213,10 @@ private:
     // ── Test/Play mode (full-screen game, no editor panels) ─────────────────
     bool        m_testMode = false;
     EditorLayer m_testReturnLayer = EditorLayer::SongEditor;
+
+    // Set by a player screen (e.g. Music Selection song wheel) to skip the
+    // button-tap particle for this frame's click. Reset every frame.
+    bool        m_suppressUiTapParticle = false;
 
     // Transition state for test mode page changes
     bool        m_testTransitioning = false;

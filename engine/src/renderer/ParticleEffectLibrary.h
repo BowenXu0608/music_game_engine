@@ -34,7 +34,7 @@ public:
 
     const std::unordered_map<std::string, ParticleEffectAsset>& all() const { return m_assets; }
 
-    // Ensure each Bandori event slot has a `default_bandori_<slug>.pfx` on disk.
+    // Ensure each Drop2D event slot has a `default_drop2d_<slug>.pfx` on disk.
     // Pre-existing files are left untouched so user edits persist. Idempotent.
     void seedDefaultEffects(const std::string& mode);
 

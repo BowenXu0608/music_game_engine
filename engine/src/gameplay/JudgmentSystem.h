@@ -8,8 +8,8 @@ enum class InputType {
     Hold,     // Press and hold
     Flick,    // Swipe/flick gesture
     Slide,    // Continuous slide
-    Arc,      // Arcaea arc (sky note with finger tracking)
-    SkyNote   // Arcaea sky tap
+    Arc,      // Drop3D arc (sky note with finger tracking)
+    SkyNote   // Drop3D sky tap
 };
 
 struct JudgmentStats {
@@ -66,7 +66,7 @@ public:
         return Judgment::Miss;
     }
 
-    // Arc judgment (Arcaea) - continuous sky note tracking
+    // Arc judgment (Drop3D) - continuous sky note tracking
     Judgment judgeArc(float averageTrackingError, float completionRatio) {
         // Similar to slide but for sky notes with finger tracking
         if (completionRatio < 0.85f) return Judgment::Miss;
@@ -77,7 +77,7 @@ public:
         return Judgment::Miss;
     }
 
-    // Sky note judgment (Arcaea) - timing only, no position requirement
+    // Sky note judgment (Drop3D) - timing only, no position requirement
     Judgment judgeSkyNote(float timingDelta) {
         float absDelta = std::abs(timingDelta);
         // Sky notes are more lenient than ground taps

@@ -12,6 +12,12 @@ struct AudioEngine::Impl {
     ma_engine   engine;
     ma_sound    sound;
     bool        soundLoaded = false;
+
+    // Dedicated group for fire-and-forget file SFX (wheel sounds, etc.) so they
+    // mix over the music stream. Finished one-shots are reaped lazily.
+    ma_sound_group        sfxGroup;
+    bool                  sfxGroupInit = false;
+    std::vector<ma_sound*> sfxSounds;
 };
 
 bool AudioEngine::init() {
@@ -21,11 +27,24 @@ bool AudioEngine::init() {
         m_impl = nullptr;
         return false;
     }
+    if (ma_sound_group_init(&m_impl->engine, 0, nullptr, &m_impl->sfxGroup) == MA_SUCCESS) {
+        m_impl->sfxGroupInit = true;
+        ma_sound_group_set_volume(&m_impl->sfxGroup, m_sfxVolume);
+    }
     return true;
 }
 
 void AudioEngine::shutdown() {
     if (!m_impl) return;
+    for (ma_sound* s : m_impl->sfxSounds) {
+        ma_sound_uninit(s);
+        delete s;
+    }
+    m_impl->sfxSounds.clear();
+    if (m_impl->sfxGroupInit) {
+        ma_sound_group_uninit(&m_impl->sfxGroup);
+        m_impl->sfxGroupInit = false;
+    }
     if (m_impl->soundLoaded) {
         ma_sound_uninit(&m_impl->sound);
         m_impl->soundLoaded = false;
@@ -132,6 +151,8 @@ void AudioEngine::setSfxVolume(float v) {
     if (v < 0.f) v = 0.f;
     if (v > 1.f) v = 1.f;
     m_sfxVolume = v;
+    if (m_impl && m_impl->sfxGroupInit)
+        ma_sound_group_set_volume(&m_impl->sfxGroup, v);
 }
 
 void AudioEngine::setHitSoundEnabled(bool on) {
@@ -190,6 +211,48 @@ void AudioEngine::playClickSfx() {
     // We intentionally leak the sound+buffer here (30ms of audio, ~5KB).
     // A production engine would track and clean these up, but for editor SFX
     // the leak per click is negligible.
+}
+
+void AudioEngine::playSfxFile(const std::string& path) {
+    if (!m_impl || !m_impl->sfxGroupInit) return;
+    if (path.empty() || m_sfxVolume <= 0.f) return;
+
+    // Reap any finished one-shots so the tracking list stays bounded.
+    for (auto it = m_impl->sfxSounds.begin(); it != m_impl->sfxSounds.end(); ) {
+        if (ma_sound_at_end(*it)) {
+            ma_sound_uninit(*it);
+            delete *it;
+            it = m_impl->sfxSounds.erase(it);
+        } else {
+            ++it;
+        }
+    }
+
+    ma_sound* s = new ma_sound();
+    bool ok = false;
+#ifdef _WIN32
+    // Same UTF-8 path handling as load(): the narrow init goes through
+    // CreateFileA / CP_ACP and fails on non-ASCII paths stored as UTF-8.
+    int wlen = MultiByteToWideChar(CP_UTF8, 0, path.data(), (int)path.size(), nullptr, 0);
+    if (wlen > 0) {
+        std::wstring wPath(wlen, L'\0');
+        MultiByteToWideChar(CP_UTF8, 0, path.data(), (int)path.size(), &wPath[0], wlen);
+        if (ma_sound_init_from_file_w(&m_impl->engine, wPath.c_str(),
+                                      MA_SOUND_FLAG_NO_SPATIALIZATION,
+                                      &m_impl->sfxGroup, nullptr, s) == MA_SUCCESS)
+            ok = true;
+    }
+#endif
+    if (!ok) {
+        if (ma_sound_init_from_file(&m_impl->engine, path.c_str(),
+                                    MA_SOUND_FLAG_NO_SPATIALIZATION,
+                                    &m_impl->sfxGroup, nullptr, s) != MA_SUCCESS) {
+            delete s;
+            return;
+        }
+    }
+    ma_sound_start(s);
+    m_impl->sfxSounds.push_back(s);
 }
 
 WaveformData AudioEngine::decodeWaveform(const std::string& path, uint32_t bucketCount) {

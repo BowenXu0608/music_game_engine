@@ -24,18 +24,20 @@
             "backgroundImage": "",
             "badMs": 150.0,
             "badScore": 1,
-            "cameraDistance": 2.0,
-            "cameraEye": [
+            "cameraFarClip": 300.0,
+            "cameraFovYDeg": 86.0,
+            "cameraNearClip": 0.0010000000474974513,
+            "cameraOrthoSize": 6.0,
+            "cameraPosition": [
               0.0,
-              12.0,
-              14.0
+              5.0,
+              8.0
             ],
-            "cameraFov": 55.0,
-            "cameraFovDeg": 43.0,
-            "cameraTarget": [
+            "cameraProjection": "perspective",
+            "cameraRotationDeg": [
+              -8.881999969482422,
               0.0,
-              0.0,
-              -20.0
+              0.0
             ],
             "comboHud": {
               "bold": false,
@@ -95,8 +97,8 @@
             },
             "perfectMs": 50.0,
             "perfectScore": 6,
-            "playfieldHeightPct": 0.9700000286102295,
-            "playfieldWidthPct": 0.7799999713897705,
+            "playfieldLength": 50.0,
+            "playfieldWidth": 14.0,
             "scoreHud": {
               "bold": true,
               "color": [
@@ -150,18 +152,20 @@
             "backgroundImage": "",
             "badMs": 150.0,
             "badScore": 200,
-            "cameraDistance": 1.0,
-            "cameraEye": [
+            "cameraFarClip": 200.0,
+            "cameraFovYDeg": 45.0,
+            "cameraNearClip": 0.10000000149011612,
+            "cameraOrthoSize": 6.0,
+            "cameraPosition": [
               0.0,
-              12.0,
-              14.0
+              3.0,
+              10.0
             ],
-            "cameraFov": 55.0,
-            "cameraFovDeg": 0.0,
-            "cameraTarget": [
+            "cameraProjection": "perspective",
+            "cameraRotationDeg": [
+              -16.698999404907227,
               0.0,
-              0.0,
-              -20.0
+              0.0
             ],
             "comboHud": {
               "bold": true,
@@ -207,8 +211,8 @@
             },
             "perfectMs": 50.0,
             "perfectScore": 1000,
-            "playfieldHeightPct": 0.8500000238418579,
-            "playfieldWidthPct": 0.8999999761581421,
+            "playfieldLength": 60.0,
+            "playfieldWidth": 6.0,
             "scoreHud": {
               "bold": true,
               "color": [
@@ -262,18 +266,20 @@
             "backgroundImage": "",
             "badMs": 150.0,
             "badScore": 200,
-            "cameraDistance": 1.0,
-            "cameraEye": [
+            "cameraFarClip": 300.0,
+            "cameraFovYDeg": 55.0,
+            "cameraNearClip": 0.10000000149011612,
+            "cameraOrthoSize": 6.0,
+            "cameraPosition": [
               0.0,
-              12.0,
-              14.0
+              5.0,
+              8.0
             ],
-            "cameraFov": 55.0,
-            "cameraFovDeg": 0.0,
-            "cameraTarget": [
+            "cameraProjection": "perspective",
+            "cameraRotationDeg": [
+              -8.881999969482422,
               0.0,
-              0.0,
-              -20.0
+              0.0
             ],
             "comboHud": {
               "bold": true,
@@ -332,8 +338,8 @@
             },
             "perfectMs": 50.0,
             "perfectScore": 1000,
-            "playfieldHeightPct": 0.8500000238418579,
-            "playfieldWidthPct": 0.8999999761581421,
+            "playfieldLength": 50.0,
+            "playfieldWidth": 14.0,
             "scoreHud": {
               "bold": true,
               "color": [
@@ -393,18 +399,20 @@
             "backgroundImage": "",
             "badMs": 150.0,
             "badScore": 200,
-            "cameraDistance": 1.0,
-            "cameraEye": [
+            "cameraFarClip": 300.0,
+            "cameraFovYDeg": 55.0,
+            "cameraNearClip": 0.10000000149011612,
+            "cameraOrthoSize": 6.0,
+            "cameraPosition": [
               0.0,
-              12.0,
-              14.0
+              5.0,
+              8.0
             ],
-            "cameraFov": 55.0,
-            "cameraFovDeg": 0.0,
-            "cameraTarget": [
+            "cameraProjection": "perspective",
+            "cameraRotationDeg": [
+              -8.881999969482422,
               0.0,
-              0.0,
-              -20.0
+              0.0
             ],
             "comboHud": {
               "bold": false,
@@ -449,8 +457,8 @@
             },
             "perfectMs": 50.0,
             "perfectScore": 1000,
-            "playfieldHeightPct": 0.8500000238418579,
-            "playfieldWidthPct": 0.8999999761581421,
+            "playfieldLength": 50.0,
+            "playfieldWidth": 14.0,
             "scoreHud": {
               "bold": true,
               "color": [
@@ -489,5 +497,7 @@
         }
       ]
     }
-  ]
+  ],
+  "wheelClickSfx": "",
+  "wheelScrollSfx": ""
 }

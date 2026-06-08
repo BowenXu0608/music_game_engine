@@ -2508,3 +2508,235 @@ window (Engine.cpp:1059; Android `renderGameplayHUD`), which registers no ImGui 
 3. **Android lagged the desktop particle work.** It had no particle library and never extracted
    `particle.*.spv` — adding the UI feature surfaced that note particles wouldn't have worked on
    device either. Both fixed here.
+
+## 2026-06-04 (later still) — ui_tap → Ring, Test-Game crash + particle fixes, Music-Selection wheel sounds (branch `pbr-material-system`)
+
+A follow-on session after the UI button-tap particles landed. Five threads, in order of
+discovery.
+
+### 1. Button tap effect: Burst → Ring
+User disliked the radial Burst on buttons. Changed the seeded `ui_tap` default in
+`ParticleEffectLibrary::seedUiTapEffect()` from `Burst` to **`Ring`** (a clean expanding
+ripple): `kind=Ring`, `count` 12→24 (smoother ring), `speedMin/Max` 90–180 → **150–170**
+(near-uniform so all particles expand together into a clean circle), `sizeStart` 8→6,
+`life` .22–.4 → **.28–.42**. The seed is still edit-safe (`if (find != end) return;`), so
+existing projects keep their edits; fresh/seed-on-open projects get Ring. The five kinds are
+`Burst/Spark/Ring/Aura/Custom` (`ParticleEffectAsset.h`).
+
+### 2. Test Game crashed instantly — stack overflow (`0xC00000FD`)
+`MusicGameEngineTest.exe --test <proj>` died immediately with **exit code -1073741571 =
+`0xC00000FD` (STATUS_STACK_OVERFLOW)** and no console output. Reproduced on every project
+(so not data-related), while the **normal editor ran fine**.
+
+Root cause: `Particle` is **128 B** (3×vec2 + 2×vec4 + 8 floats + u16, padded to vec4
+alignment) × `MAX_PARTICLES` (4096) = **512 KB per pool**. The earlier commit added a
+**second** pool (note + UI particles) to `Renderer`, which `Engine` embeds **by value** → ~1 MB
+of particle pools sitting on the stack as part of an `Engine` local. That sits right at the
+edge of the 1 MB default main-thread stack: the normal `main()` path (`Engine engine;`) just
+fit; the test path goes one frame deeper (`main → runTestGame → Engine engine;`) and tipped
+over. Diagnosis was blind (no `cdb`/`gdb`/`procdump` on the box) — narrowed via checkpoint
+prints (which revealed nothing prints before the `Engine` ctor, pointing at construction) plus
+`Particle`-size arithmetic.
+
+Fix: **heap-allocate `Engine`** via `std::make_unique<Engine>()` in **both** `runTestGame`
+*and* normal `main()` (`engine.` → `engine->` throughout, incl. the hub launch lambda). The
+1 MB of pools now lives on the heap, so neither path can overflow. (A deeper fix —
+`std::vector`-back `ParticleSystem::m_pool` so `Engine` is small everywhere — was offered and
+deferred.)
+
+### 3. Test Game showed no button particles — `ui_tap` asset NULL in the test process
+After the crash fix, the test game ran but sparks never appeared. Verified by a temporary
+DIAG force-emit at screen-center every 20 frames + a one-shot stdout print: `[DIAG] ui_tap
+asset=NULL`. Cause: `runTestGame` loads the start/music screens but **never calls
+`Engine::openProject()`**, which is where the material **and** particle libraries are loaded +
+seeded — so `m_particleLibrary.get("ui_tap")` returned null (and note particles would have
+been broken in test gameplay too). Fix: call **`engine->openProject(projectPath)`** in
+`runTestGame` before the screen loads. DIAG then read `asset=FOUND count=24` (the Ring seed).
+
+### 4. Start-screen tap still didn't spark — gate too strict
+`tickUiTapParticles` required `io.MouseClicked[0] && ImGui::IsAnyItemHovered()`. The Start
+Screen's "Tap to Start" is a **full-window hover** (`IsWindowHovered`), not an ImGui item, so
+the most prominent tap in the flow never qualified. Fix: treat any click on the **StartScreen**
+layer as a button press (`startScreenTap || IsAnyItemHovered()`); gameplay note-taps stay
+excluded (scene is a `NoInputs` image → no item). Verified by injecting a real click via
+Win32 `mouse_event` + a screen-rect capture: the click advanced StartScreen → MusicSelection,
+confirming taps register and spark.
+
+**Verification tooling note:** the app is a console-subsystem exe that also opens a GLFW Vulkan
+window. `Start-Process -RedirectStandardOutput` captured nothing (the background-task harness
+captures stdout but not stderr); `PrintWindow` returns **blank** for Vulkan (GDI surface only).
+What worked: launch with `Start-Process -WindowStyle Hidden` (hides the console so the GLFW
+window takes foreground) + full-screen `CopyFromScreen`, and drive input with Win32
+`SetCursorPos`/`mouse_event`. Note `mouse_event` WHEEL delta must be the unsigned-32 bit
+pattern of a signed value (`-120` → `0xFFFFFF88`), not `[uint32](-120)`.
+
+### 5. "You deleted all my charts!" — false alarm, no data lost
+User believed the Music-Selection charts were wiped. Proved otherwise: `git diff HEAD` on the
+charts dir was **empty** (working tree byte-identical to last commit); the "empty" charts
+(`Ac_drop2d_*`, `Ab_drop2d_easy/medium`, `demo`, …) were **already 0 notes in HEAD** (never
+charted); `Ab_drop2d_hard` = **1568 notes**, valid JSON, last modified the day before (untouched
+this session). The real confusion: the SongEditor loads **one song's three difficulties at a
+time**, and easy/medium of `Ab` were simply never charted. Made a safety copy at
+`Projects/test/assets/charts_backup_<ts>/` regardless. No code change. (Lesson reinforced:
+auto-save in a Test-Game child whose SongEditor has no charts loaded does **not** wipe — it
+exports nothing — but it remains a latent risk worth hardening; offered, not yet done.)
+
+### 6. Music-Selection wheel sounds (new feature)
+User: on the song-select page, **don't** spark the tap particle when changing songs — instead
+play a **sound** on wheel movement, with **separate sounds for scroll vs click**, configured
+from the **Music Selection editor sidebar**. (Initial answer said "Song Editor sidebar"; user
+corrected to the Music-Selection page sidebar.)
+
+- **Concurrent file SFX:** new `AudioEngine::playSfxFile(path)` — a fire-and-forget one-shot
+  routed through a dedicated `ma_sound_group` (`Impl::sfxGroup`, inited in `init`, volume
+  tracked by `setSfxVolume`) so it mixes **over** the music/preview stream without touching the
+  single `m_impl->sound` music stream. Honors `m_sfxVolume`, UTF-8 path handling mirrors
+  `load()` (`ma_sound_init_from_file_w` on Windows), and finished one-shots are **reaped**
+  (`ma_sound_at_end` → `uninit`+`delete`) into a tracked `Impl::sfxSounds` vector (cleaned in
+  `shutdown`). No leak, unlike the legacy `playClickSfx`.
+- **Two project-level paths** on `MusicSelectionView`: `m_wheelScrollSfx` / `m_wheelClickSfx`,
+  round-tripped in `music_selection.json` as `wheelScrollSfx` / `wheelClickSfx` (load + `toUtf8`
+  save). Helper `playWheelSfx(engine, rel)` → `audio().playSfxFile(projectPath + "/" + rel)`.
+- **Triggers** (in `renderSetWheel`/`renderSongWheel`, which now take `IPlayerEngine* engine`):
+  scroll handlers play `m_wheelScrollSfx` only when the **rounded selected index actually
+  changes** (`prevSel != selected`); card `InvisibleButton` clicks play `m_wheelClickSfx`. Wired
+  in both render paths — `MusicSelectionView::renderGamePreview` (test/Android) and
+  `MusicSelectionEditor::render` (passes `m_engine`, so authors hear it in the editor preview).
+- **No spark on the wheel:** added `IPlayerEngine::suppressUiTapParticle()` (default no-op) +
+  `Engine` override setting `m_suppressUiTapParticle` (reset each frame before page render,
+  checked in `tickUiTapParticles`). The view calls it while the cursor is over **either wheel
+  band** — so song/set cards don't spark, but the center difficulty/Start buttons still do.
+- **Editor UI:** a "Wheel Sounds" section in the Music-Selection sidebar (after Achievement
+  Badges) with an inline `sfxDropZone` lambda — two `ASSET_PATH` drag-drop slots ("Scroll
+  Sound" / "Click Sound") showing the filename + Clear; empty = silent.
+- **Verified:** clean build; JSON round-trips the two keys (editor auto-save wrote them);
+  scripted scroll (5 notches) + card click in the test game ran with no crash; temporary test
+  config reverted to empty afterward. **Android parity is a no-op** for now (the adapter's
+  `suppressUiTapParticle` default does nothing and `AndroidEngine` doesn't play these) — offered
+  as follow-up.
+
+### Files
+- `engine/src/renderer/ParticleEffectLibrary.cpp` — `seedUiTapEffect` Burst→Ring + tuned params.
+- `engine/src/main.cpp` — `make_unique<Engine>()` in `runTestGame` + `main`; `openProject()` in `runTestGame`.
+- `engine/src/engine/AudioEngine.{h,cpp}` — `playSfxFile`; `Impl` sfx group + tracked one-shots; `setSfxVolume`/`init`/`shutdown` updates.
+- `engine/src/engine/IPlayerEngine.h` — `+ virtual void suppressUiTapParticle() {}`.
+- `engine/src/engine/Engine.{h,cpp}` — `m_suppressUiTapParticle` + override; reset in `render`; StartScreen-tap allowance + suppression check in `tickUiTapParticles`.
+- `engine/src/game/screens/MusicSelectionView.{h,cpp}` — wheel SFX fields + `playWheelSfx`; `engine` param on wheel helpers; scroll/click triggers; wheel-band suppression; JSON load/save.
+- `engine/src/ui/MusicSelectionEditor.cpp` — pass `m_engine` to wheel helpers; "Wheel Sounds" sidebar drop zones.
+
+### Lessons
+1. **A by-value member that's ~1 MB is a stack landmine.** `Engine` embedding two
+   `std::array<Particle,4096>` pools pushed an `Engine` local to the edge of the 1 MB stack; the
+   bug only fired on the deeper `--test` call path. Heap-allocate big aggregates (or heap-back
+   the pool). Exit `0xC00000FD` with *no output before the first ctor* = construct-time stack
+   overflow.
+2. **Standalone player processes must run the same project-load path.** `runTestGame` skipped
+   `openProject`, silently breaking every library (materials + particles). Player entry points
+   should share one "open project" call, not re-implement a subset.
+3. **A spark gate keyed on `IsAnyItemHovered()` misses draw-list "buttons."** Full-window tap
+   surfaces (Start Screen) and any custom hit-tested region won't register an ImGui item; gate
+   such screens explicitly.
+4. **Prove data safety with `git diff HEAD`, then explain the UI.** The "lost charts" was a
+   per-difficulty display expectation, not deletion — `git diff` + per-file HEAD note counts
+   settled it instantly; a backup copy bought trust.
+5. **Layer SFX through a `ma_sound_group`, not the music stream.** A dedicated group gives
+   concurrent playback over the preview + per-group volume + lets one-shots be reaped, all
+   without disturbing the single music `ma_sound`.
+
+## 2026-06-08 — Free 3D camera for drop modes (replaces the angle-locked knobs) (branch `pbr-material-system`)
+
+The user reconceived gameplay as a real **3D space** where the playfield is a **plane** and a
+**free camera** looks at it — exactly Unity's model (Transform Position/Rotation + Projection +
+Clip planes). This **completely replaces** the 2026-06-04 angle-locked design (Camera Distance /
+Playfield Width%/Height% knobs + the clip-space Y-shift judgment-line hack) for **both** drop
+modes (2D Bandori + 3D Arcaea), adds a **Perspective/Orthographic** toggle, and gives **full
+position + Euler rotation** control. Four clarifying questions up front pinned the scope (both
+modes / full replacement / projection toggle / full rotation).
+
+### Which Unity camera params are meaningful here
+Kept: Transform **Position**, Transform **Rotation** (Euler), **Projection**, **FOV / Ortho
+Size**, **Clip Near/Far**. Dropped as engine-internal/URP-only: Render Type, Rendering flags,
+Stack, Volumes, Output, Culling Mask, Scale. Plus two plane params (**Playfield Width/Length**,
+world units) since the plane needs real dimensions.
+
+### The plan (approved)
+1. **`GameModeConfig` (`ProjectHub.h`)** — add `enum class CameraProjection`; replace the camera
+   block with `cameraProjection`, `cameraPosition[3]`, `cameraRotationDeg[3]` (Euler pitch/yaw/
+   roll), `cameraFovYDeg`, `cameraOrthoSize`, `cameraNearClip`, `cameraFarClip`, `playfieldWidth`,
+   `playfieldLength`. Keep `skyHeight`. Remove `cameraDistance`/`cameraFovDeg`/`playfieldWidthPct`/
+   `playfieldHeightPct` and legacy `cameraEye/Target/Fov`. Defaults reproduce the legacy framing;
+   loader substitutes 3D defaults when `dimension==ThreeD` and keys absent.
+2. **Shared builder (`renderer/CameraConfig.{h,cpp}`)** — `Camera buildGameplayCamera(gm, aspect)`.
+   View from quat (`glm::quat`+`mat4_cast`, avoiding `GLM_ENABLE_EXPERIMENTAL`); perspective via
+   `makePerspective`, ortho via `makeOrtho` + a `proj[1][1]*=-1` Vulkan Y-flip. Kills the 3-site
+   camera-math duplication that had bitten this code before. Each renderer stores a
+   `GameModeConfig m_camCfg` (copied in `onInit`) because `onResize` has no config param.
+3. **BandoriRenderer** — 2D draws in **screen space** (ortho batcher + hand-projected `w2s`), so
+   the free camera = just recompute `m_perspVP = buildGameplayCamera(...).viewProjection()`. Lane
+   spacing = `playfieldWidth/laneCount`; `m_approachZ`→`m_farCullZ = -playfieldLength`; delete the
+   clip-Y-shift hack (judgment line now follows the camera). Particles/HUD unaffected (world→`w2s`).
+4. **ArcaeaRenderer** — recompute `m_camera = buildGameplayCamera(...)`; `LANE_HALF_WIDTH`/
+   `LANE_FAR_Z` constexpr → members `m_laneHalfWidth=playfieldWidth*0.5`/`m_laneFarZ=-playfieldLength`
+   computed in `onInit` before mesh builds; `z>30.f` note culls → `z>playfieldLength`.
+5. **`SongEditor::renderSceneView`** — replace the duplicated 2D+3D camera block (incl. clip-Y-shift
+   + `playfieldWidthPct` lane-solve) with `buildGameplayCamera(gm, aspect)`. Preview == runtime.
+6. **Editor UI (`renderNotePage`)** — replace the 4 sliders (+ TwoD gate) with Projection combo,
+   Position/Rotation `DragFloat3`, conditional FOV/Ortho Size, Playfield Width/Length, gated to
+   DropNotes (both dims).
+7. **JSON (`MusicSelectionView.cpp`)** — load/save the new keys with per-dimension defaults; drop
+   the old keys.
+
+### Implementation notes & findings
+- **Euler sign / default rotations.** 2D `lookAt({0,5,8}→{0,0,-24})` ⇒ pitch `atan2(5,32)=−8.882°`;
+  3D `lookAt({0,3,10}→{0,0,0})` ⇒ `−16.699°`. Verified the convention by reasoning (rotation about
+  +X maps forward `(0,0,−1)`→`(0,sinθ,−cosθ)`; negative θ tilts the look down) — confirmed by the
+  parity render.
+- **Default width is a measurement, not a guess.** The old 2D default filled 90% of screen width
+  via a per-frame solve. Computed (numpy, replicating `lookAt`/`perspective`) that 90% of a 16:9
+  screen at the hit line = **14.45 world units**; the runway drew to z≈−50 (old `cameraDistance=1`
+  → `approachZ=−50`). So 2D defaults became **width 14 / length 50** (3D stays 6/60 = exact old
+  Arcaea constants). Initial 7/110 would have looked too narrow + too long.
+- **Reset buttons (follow-up request).** Each control got a right-aligned **Reset** button
+  (`labelReset` lambda) sourcing from a new single-source-of-truth **`cameraDefaultsFor(dimension)`**
+  (`ProjectHub.h`), which the JSON loader was refactored to share — so reset values, load
+  fallbacks and struct defaults can't drift.
+- **Near/Far clip: "looks dead" → made functional → then removed (user calls).** First report:
+  adjusting Near/Far did nothing. **Two reasons:** (a) the 2D path's `w2s` only rejected points
+  behind the camera (`clip.w<=0`) and used x/y — it never depth-clipped; (b) the highway sits ~9–58
+  world units away while near=0.1/far=300 are outside that band, so nothing is ever clipped (and
+  Playfield Length, not far, is the real runway bound). Fixed it to genuinely clip — `w2s` drops
+  points outside the NDC depth band and the far draw edge clamps to the far-plane ground crossing
+  (`farClipGroundZ` helper). **Critical convention catch:** no `GLM_FORCE_DEPTH_ZERO_TO_ONE` is
+  defined, so GLM uses OpenGL **[-1,1]** NDC depth (near=−1, far=+1), not Vulkan [0,1]; the reject
+  threshold had to be `[-1,1]` or it would have culled the near half of the highway. Verified
+  numerically (far<~60 shortens the runway; near>~8 cuts the hit line). The user then decided
+  Near/Far aren't useful controls — so they were **fixed (near 0 → clamped to 0.001, far 300),
+  hidden from the UI, and the now-inert clip machinery (`farClipGroundZ` + `w2s` depth reject) was
+  removed** rather than left as dead code.
+
+### Files
+- `engine/src/ui/ProjectHub.h` — `CameraProjection` enum, new `GameModeConfig` camera fields,
+  `CameraDefaults` + `cameraDefaultsFor()`.
+- `engine/src/renderer/CameraConfig.{h,cpp}` — NEW `buildGameplayCamera`.
+- `engine/src/game/modes/BandoriRenderer.{cpp,h}` — `m_camCfg`, recompute `m_perspVP`,
+  `m_approachZ`→`m_farCullZ`, lane spacing from `playfieldWidth`, clip-Y-shift removed.
+- `engine/src/game/modes/ArcaeaRenderer.{cpp,h}` — `m_camCfg`, recompute `m_camera`,
+  `LANE_*`→config members, `30.f` culls → `playfieldLength`.
+- `engine/src/ui/SongEditor.cpp` — `renderSceneView` dedup; `renderNotePage` controls +
+  `labelReset` Reset buttons.
+- `engine/src/game/screens/MusicSelectionView.cpp` — JSON load/save via `cameraDefaultsFor`.
+
+### Lessons
+1. **One camera builder, three consumers.** The old 2D/3D camera math was copy-pasted across
+   BandoriRenderer, ArcaeaRenderer and the editor preview and silently diverged. A single
+   `buildGameplayCamera` makes preview == runtime by construction.
+2. **Know your NDC depth convention before depth-clipping.** GLM defaults to OpenGL [-1,1]; a Vulkan
+   [0,1] assumption silently clips half the scene. Grep for `GLM_FORCE_DEPTH_ZERO_TO_ONE`.
+3. **Measure default framing, don't eyeball it.** Reproducing a screen-fraction default as a
+   world-unit value needs the actual projection math (14 world units, not a guessed 7).
+4. **Don't drive the editor sidebar with blind Win32 clicks for screenshots.** Automated clicks
+   landed on `DragFloat` widgets and silently mutated + auto-saved camera values. Verify by reading
+   JSON / computing geometry, or let the user eyeball it.
+5. **A clip plane is not a zoom.** Near/Far only clip geometry that actually crosses them; in a
+   fixed-plane rhythm scene that ~never happens, so they read as inert — the meaningful "how far you
+   see" control is the plane's own length.

@@ -64,7 +64,8 @@ originSessionId: d4e6dddd-1cc1-4f7b-8da6-079be9eb81c0
 | `MaterialAssetLibrary.h/.cpp` | Per-project registry. Loads `project/assets/materials/*.mat`, seeds built-in-kind defaults for modes in use, migrates chart inline materials into `.mat` files, provides slot-filtered picker lookup |
 | `MaterialSlots.h/.cpp` | Per-mode slot tables (Bandori/Arcaea/Cytus/Lanota/Phigros) with display name, group, default kind/tint/params. Helpers: `materialSlotSlug`, `materialModeName`, `detectChartMode` |
 | `ShaderCompiler.h/.cpp` | Runtime glslc invoker for Custom-kind materials. Accepts `.frag` (GLSL), `.spv` (load-verbatim), rejects `.hlsl` with a clear error. mtime-cached |
-| `Camera.h` | Unified ortho + perspective. Header-only |
+| `Camera.h` | Unified ortho + perspective. Header-only. `makePerspective`/`makeOrtho`/`lookAt`/`setView`/`setProj`/`unproject` |
+| `CameraConfig.h/.cpp` | `buildGameplayCamera(const GameModeConfig&, float aspect)` — the **single** builder for the drop-mode gameplay camera (free 3D camera: position + Euler rotation + Perspective/Orthographic + clip planes). Shared by BandoriRenderer (2D), ArcaeaRenderer (3D) and `SongEditor::renderSceneView` preview so they can't diverge. View = `inverse(translate(pos)·mat4_cast(quat(radians(euler))))`; ortho flips `proj[1][1]` to match the perspective Vulkan Y-flip. Added 2026-06-08 |
 | `Renderer.h/.cpp` | Owns all batchers + TWO `ParticleSystem` instances: `m_particles` (scene pass) and `m_uiParticles` (swapchain pass, UI overlay). Exposes `whiteView()`, `whiteSampler()`, `descriptors()`, `swapchainRenderPass()`, `uiParticles()`, `flushUiParticles()` |
 
 ---
@@ -354,12 +355,22 @@ is always the player (no gate), and scales emit size/speed/gravity by
 `ImGui::Image` inside a `ImGuiWindowFlags_NoInputs` window, so lane/note taps
 register no hovered item — only real widgets (incl. the Stop button) fire.
 
+**Gate refinements (2026-06-04):** the **StartScreen** now also fires on any click
+(`startScreenTap || IsAnyItemHovered()`) because its "Tap to Start" is a full-window
+hover, not an ImGui item. And a per-frame **`m_suppressUiTapParticle`** flag
+(`IPlayerEngine::suppressUiTapParticle()`, default no-op; reset each frame before page
+render) lets a player screen veto the spark — the Music-Selection song/set wheel raises
+it while the cursor is over a wheel band, so the wheel plays a **sound** instead of a
+spark (sys2 `playSfxFile`, sys7), while the center difficulty/Start buttons still spark.
+
 ### Asset
 `kUiTapEffectName="ui_tap"` (`ParticleSlots.h`, mode-independent) seeded by
-`ParticleEffectLibrary::seedUiTapEffect()` (guarded Burst default, edit-safe).
-Resolved per tap via `particleEmitFromAsset`; Custom kind →
-`uiParticles().registerCustomPipeline(absFragPath)`. Surfaces + edits through the
-existing FX-tab CRUD.
+`ParticleEffectLibrary::seedUiTapEffect()` — **default kind is `Ring`** as of 2026-06-04
+(was Burst; user preferred a clean expanding ripple on buttons): `count 24`, `speed
+150–170` (near-uniform → clean ring), `size 6→1`, `life .28–.42`, soft white. Still
+edit-safe (`if (find != end) return;`). Resolved per tap via `particleEmitFromAsset`;
+Custom kind → `uiParticles().registerCustomPipeline(absFragPath)`. Surfaces + edits
+through the existing FX-tab CRUD.
 
 ### Android catch-up
 Android had no particle library and never extracted `particle.*.spv` — note

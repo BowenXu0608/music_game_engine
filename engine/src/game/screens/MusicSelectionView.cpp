@@ -124,6 +124,8 @@ void MusicSelectionView::load(const std::string& projectPath) {
     m_pageBackground = j.value("background", "");
     m_fcImage        = j.value("fcImage", "");
     m_apImage        = j.value("apImage", "");
+    m_wheelScrollSfx = j.value("wheelScrollSfx", "");
+    m_wheelClickSfx  = j.value("wheelClickSfx", "");
 
     if (j.contains("sets") && j["sets"].is_array()) {
         for (auto& sj : j["sets"]) {
@@ -191,15 +193,27 @@ void MusicSelectionView::load(const std::string& projectPath) {
                         loadHud(gm, "scoreHud", song.gameMode.scoreHud);
                         loadHud(gm, "comboHud", song.gameMode.comboHud);
 
-                        if (gm.contains("cameraEye") && gm["cameraEye"].is_array() && gm["cameraEye"].size() >= 3)
-                            for (int i = 0; i < 3; ++i) song.gameMode.cameraEye[i] = gm["cameraEye"][i].get<float>();
-                        if (gm.contains("cameraTarget") && gm["cameraTarget"].is_array() && gm["cameraTarget"].size() >= 3)
-                            for (int i = 0; i < 3; ++i) song.gameMode.cameraTarget[i] = gm["cameraTarget"][i].get<float>();
-                        song.gameMode.cameraFov = gm.value("cameraFov", 55.f);
-                        song.gameMode.cameraDistance = gm.value("cameraDistance", 1.f);
-                        song.gameMode.cameraFovDeg   = gm.value("cameraFovDeg", 0.f);
-                        song.gameMode.playfieldWidthPct = gm.value("playfieldWidthPct", 0.9f);
-                        song.gameMode.playfieldHeightPct = gm.value("playfieldHeightPct", 0.85f);
+                        // Free camera. Defaults reproduce the legacy per-mode
+                        // framing when the keys are absent (2D vs 3D drop).
+                        {
+                            CameraDefaults cd = cameraDefaultsFor(song.gameMode.dimension);
+                            auto& mc  = song.gameMode;
+                            mc.cameraProjection =
+                                (gm.value("cameraProjection", std::string("perspective")) == "orthographic")
+                                    ? CameraProjection::Orthographic : CameraProjection::Perspective;
+                            if (gm.contains("cameraPosition") && gm["cameraPosition"].is_array() && gm["cameraPosition"].size() >= 3)
+                                for (int i = 0; i < 3; ++i) mc.cameraPosition[i] = gm["cameraPosition"][i].get<float>();
+                            else for (int i = 0; i < 3; ++i) mc.cameraPosition[i] = cd.position[i];
+                            if (gm.contains("cameraRotationDeg") && gm["cameraRotationDeg"].is_array() && gm["cameraRotationDeg"].size() >= 3)
+                                for (int i = 0; i < 3; ++i) mc.cameraRotationDeg[i] = gm["cameraRotationDeg"][i].get<float>();
+                            else for (int i = 0; i < 3; ++i) mc.cameraRotationDeg[i] = cd.rotationDeg[i];
+                            mc.cameraFovYDeg   = gm.value("cameraFovYDeg",   cd.fovYDeg);
+                            mc.cameraOrthoSize = gm.value("cameraOrthoSize", cd.orthoSize);
+                            mc.cameraNearClip  = gm.value("cameraNearClip",  cd.nearClip);
+                            mc.cameraFarClip   = gm.value("cameraFarClip",   cd.farClip);
+                            mc.playfieldWidth  = gm.value("playfieldWidth",  cd.playfieldWidth);
+                            mc.playfieldLength = gm.value("playfieldLength", cd.playfieldLength);
+                        }
 
                         song.gameMode.backgroundImage = gm.value("backgroundImage", "");
                         song.gameMode.skyHeight = gm.value("skyHeight", 1.f);
@@ -323,13 +337,16 @@ void MusicSelectionView::save() {
             saveHud(gmJ, "scoreHud", song.gameMode.scoreHud);
             saveHud(gmJ, "comboHud", song.gameMode.comboHud);
 
-            gmJ["cameraEye"]    = {song.gameMode.cameraEye[0], song.gameMode.cameraEye[1], song.gameMode.cameraEye[2]};
-            gmJ["cameraTarget"] = {song.gameMode.cameraTarget[0], song.gameMode.cameraTarget[1], song.gameMode.cameraTarget[2]};
-            gmJ["cameraFov"]    = song.gameMode.cameraFov;
-            gmJ["cameraDistance"] = song.gameMode.cameraDistance;
-            gmJ["cameraFovDeg"]   = song.gameMode.cameraFovDeg;
-            gmJ["playfieldWidthPct"] = song.gameMode.playfieldWidthPct;
-            gmJ["playfieldHeightPct"] = song.gameMode.playfieldHeightPct;
+            gmJ["cameraProjection"] =
+                (song.gameMode.cameraProjection == CameraProjection::Orthographic) ? "orthographic" : "perspective";
+            gmJ["cameraPosition"]    = {song.gameMode.cameraPosition[0], song.gameMode.cameraPosition[1], song.gameMode.cameraPosition[2]};
+            gmJ["cameraRotationDeg"] = {song.gameMode.cameraRotationDeg[0], song.gameMode.cameraRotationDeg[1], song.gameMode.cameraRotationDeg[2]};
+            gmJ["cameraFovYDeg"]   = song.gameMode.cameraFovYDeg;
+            gmJ["cameraOrthoSize"] = song.gameMode.cameraOrthoSize;
+            gmJ["cameraNearClip"]  = song.gameMode.cameraNearClip;
+            gmJ["cameraFarClip"]   = song.gameMode.cameraFarClip;
+            gmJ["playfieldWidth"]  = song.gameMode.playfieldWidth;
+            gmJ["playfieldLength"] = song.gameMode.playfieldLength;
 
             gmJ["backgroundImage"] = toUtf8(song.gameMode.backgroundImage);
             gmJ["skyHeight"] = song.gameMode.skyHeight;
@@ -379,9 +396,11 @@ void MusicSelectionView::save() {
         setsArr.push_back(sj);
     }
     j["sets"]       = setsArr;
-    j["background"] = toUtf8(m_pageBackground);
-    j["fcImage"]    = toUtf8(m_fcImage);
-    j["apImage"]    = toUtf8(m_apImage);
+    j["background"]     = toUtf8(m_pageBackground);
+    j["fcImage"]        = toUtf8(m_fcImage);
+    j["apImage"]        = toUtf8(m_apImage);
+    j["wheelScrollSfx"] = toUtf8(m_wheelScrollSfx);
+    j["wheelClickSfx"]  = toUtf8(m_wheelClickSfx);
 
     std::ofstream out(m_projectPath + "/music_selection.json");
     if (!out.is_open()) return;
@@ -451,6 +470,11 @@ void MusicSelectionView::updateAudioPreview(float dt, IPlayerEngine* engine) {
     }
 }
 
+void MusicSelectionView::playWheelSfx(IPlayerEngine* engine, const std::string& relPath) {
+    if (!engine || relPath.empty()) return;
+    engine->audio().playSfxFile(m_projectPath + "/" + relPath);
+}
+
 void MusicSelectionView::update(float dt, IPlayerEngine* engine) {
     float lerpSpeed = 8.f;
     m_setScrollCurrent  += (m_setScrollTarget  - m_setScrollCurrent)  * std::min(1.f, lerpSpeed * dt);
@@ -517,8 +541,20 @@ void MusicSelectionView::renderGamePreview(ImVec2 p, ImVec2 size, IPlayerEngine*
     float centerW   = pw - wheelW * 2.f;
     float coverSize = std::min(centerW * 0.7f, ph * 0.50f);
 
-    renderSetWheel(ImVec2(p.x, p.y), wheelW, ph);
-    renderSongWheel(ImVec2(p.x + pw - wheelW, p.y), wheelW, ph);
+    renderSetWheel(ImVec2(p.x, p.y), wheelW, ph, engine);
+    renderSongWheel(ImVec2(p.x + pw - wheelW, p.y), wheelW, ph, engine);
+
+    // The song/set wheels use a sound (not a particle spark) for selection
+    // feedback. Suppress the button-tap spark while the cursor is over either
+    // wheel band; the center buttons (difficulty / play) still spark.
+    if (engine) {
+        ImVec2 mp = ImGui::GetIO().MousePos;
+        bool overLeftWheel  = mp.x >= p.x && mp.x <= p.x + wheelW;
+        bool overRightWheel = mp.x >= p.x + pw - wheelW && mp.x <= p.x + pw;
+        bool inVert         = mp.y >= p.y && mp.y <= p.y + ph;
+        if (inVert && (overLeftWheel || overRightWheel))
+            engine->suppressUiTapParticle();
+    }
 
     float centerX = p.x + wheelW + centerW * 0.5f;
     float coverY  = p.y + ph * 0.08f;
@@ -531,7 +567,7 @@ void MusicSelectionView::renderGamePreview(ImVec2 p, ImVec2 size, IPlayerEngine*
     renderPlayButton(ImVec2(centerX, playY), centerW, engine);
 }
 
-void MusicSelectionView::renderSetWheel(ImVec2 origin, float width, float height) {
+void MusicSelectionView::renderSetWheel(ImVec2 origin, float width, float height, IPlayerEngine* engine) {
     ImDrawList* dl = ImGui::GetWindowDrawList();
 
     dl->AddRectFilled(origin, ImVec2(origin.x + width, origin.y + height),
@@ -558,11 +594,13 @@ void MusicSelectionView::renderSetWheel(ImVec2 origin, float width, float height
         mousePos.y >= origin.y && mousePos.y <= origin.y + height) {
         float wheel = ImGui::GetIO().MouseWheel;
         if (wheel != 0.f) {
+            int prevSel = m_selectedSet;
             m_setScrollTarget -= wheel;
             m_setScrollTarget = std::clamp(m_setScrollTarget, 0.f, (float)(count - 1));
             m_selectedSet = (int)std::round(m_setScrollTarget);
             m_selectedSong = -1;
             m_songScrollTarget = 0.f;
+            if (m_selectedSet != prevSel) playWheelSfx(engine, m_wheelScrollSfx);
         }
     }
 
@@ -667,11 +705,12 @@ void MusicSelectionView::renderSetWheel(ImVec2 origin, float width, float height
             m_setScrollTarget = (float)card.index;
             m_selectedSong = -1;
             m_songScrollTarget = 0.f;
+            playWheelSfx(engine, m_wheelClickSfx);
         }
     }
 }
 
-void MusicSelectionView::renderSongWheel(ImVec2 origin, float width, float height) {
+void MusicSelectionView::renderSongWheel(ImVec2 origin, float width, float height, IPlayerEngine* engine) {
     ImDrawList* dl = ImGui::GetWindowDrawList();
 
     dl->AddRectFilled(origin, ImVec2(origin.x + width, origin.y + height),
@@ -707,9 +746,11 @@ void MusicSelectionView::renderSongWheel(ImVec2 origin, float width, float heigh
         mousePos.y >= origin.y && mousePos.y <= origin.y + height) {
         float wheel = ImGui::GetIO().MouseWheel;
         if (wheel != 0.f) {
+            int prevSel = m_selectedSong;
             m_songScrollTarget -= wheel;
             m_songScrollTarget = std::clamp(m_songScrollTarget, 0.f, (float)(count - 1));
             m_selectedSong = (int)std::round(m_songScrollTarget);
+            if (m_selectedSong != prevSel) playWheelSfx(engine, m_wheelScrollSfx);
         }
     }
 
@@ -907,6 +948,7 @@ void MusicSelectionView::renderSongWheel(ImVec2 origin, float width, float heigh
         if (ImGui::InvisibleButton(btnId, ImVec2(maxX - minX, maxY - minY))) {
             m_selectedSong = card.index;
             m_songScrollTarget = (float)card.index;
+            playWheelSfx(engine, m_wheelClickSfx);
         }
         if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
             m_selectedSong = card.index;

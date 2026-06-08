@@ -25,11 +25,11 @@ struct MaterialSlotInfo {
 // `getMaterialSlotsForMode()` below so SongEditor can query generically.
 
 enum class MaterialModeKey : int {
-    Bandori = 0,
+    Drop2D = 0,
     Phigros,
-    Cytus,
-    Lanota,
-    Arcaea,     // Phase 3 placeholder — empty slot list for now
+    ScanLine,
+    Circle,
+    Drop3D,     // Phase 3 placeholder — empty slot list for now
     Count
 };
 
@@ -39,7 +39,7 @@ const std::vector<MaterialSlotInfo>& getMaterialSlotsForMode(MaterialModeKey mod
 
 // Filename-safe slug for a slot. Lowercase alphanumeric + underscores; group
 // name is prefixed when present so distinct slots that happen to share a
-// display name (e.g. "Head" under both Hold Note and Slide Note in Cytus)
+// display name (e.g. "Head" under both Hold Note and Slide Note in ScanLine)
 // don't collide. Used to build `default_<mode>_<slug>.mat` and
 // `<chartStem>__<slug>.mat`.
 std::string materialSlotSlug(const MaterialSlotInfo& slot);
@@ -47,7 +47,12 @@ std::string materialSlotSlug(const MaterialSlotInfo& slot);
 // Short identifier for a mode, used in default file names.
 const char* materialModeName(MaterialModeKey mode);
 
+// Maps legacy mode tokens from older project files to the current generic
+// tokens (drop2d/drop3d/scanline/circle). Pass-through for already-current or
+// unrecognized tokens. Lets pre-rename .mat/.pfx files keep resolving.
+std::string normalizeModeToken(const std::string& token);
+
 // Infer a chart's MaterialModeKey from its filename stem. Relies on the
 // engine's `<song>_<modeKey>_<difficulty>` convention (drop2d/drop3d/
-// circle/scan/phigros). Defaults to Bandori for unrecognized stems.
+// circle/scan/phigros). Defaults to Drop2D for unrecognized stems.
 MaterialModeKey detectChartMode(const std::string& chartStem);

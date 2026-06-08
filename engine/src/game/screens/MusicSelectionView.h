@@ -78,8 +78,11 @@ protected:
     virtual void onSongCardDoubleClick(int /*songIdx*/) {}
 
     // ── Sub-element render helpers ───────────────────────────────────────────
-    void renderSetWheel(ImVec2 origin, float width, float height);
-    void renderSongWheel(ImVec2 origin, float width, float height);
+    void renderSetWheel(ImVec2 origin, float width, float height, IPlayerEngine* engine);
+    void renderSongWheel(ImVec2 origin, float width, float height, IPlayerEngine* engine);
+
+    // Play a configured wheel SFX (project-relative path). No-op if unset.
+    void playWheelSfx(IPlayerEngine* engine, const std::string& relPath);
     void renderCoverPhoto(ImVec2 origin, float size);
     void renderDifficultyButtons(ImVec2 origin, float width);
     void renderPlayButton(ImVec2 origin, float width, IPlayerEngine* engine);
@@ -111,6 +114,11 @@ protected:
     std::string m_pageBackground;
     std::string m_fcImage;  // Full Combo badge
     std::string m_apImage;  // All Perfect badge
+
+    // Project-level wheel sounds (relative paths). Played when the song/set
+    // wheel scrolls to a new entry / when a card is clicked. Empty = silent.
+    std::string m_wheelScrollSfx;
+    std::string m_wheelClickSfx;
 
     // Audio preview state (dwell-then-play 30 s clip).
     int         m_previewSetIdx  = -1;

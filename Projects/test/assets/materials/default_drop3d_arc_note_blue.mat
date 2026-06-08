@@ -1,0 +1,13 @@
+{
+  "version": 2,
+  "class": "pbr",
+  "name": "default_drop3d_arc_note_blue",
+  "baseColor": [0.4, 0.8, 1, 0.9],
+  "metallic": 0,
+  "roughness": 0.5,
+  "emissiveColor": [0.4, 0.8, 1],
+  "emissiveIntensity": 1,
+  "useNormalMap": false,
+  "targetMode": "drop3d",
+  "targetSlot": "arc_note_blue"
+}

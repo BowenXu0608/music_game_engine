@@ -8,6 +8,6 @@
   "emissiveColor": [0, 0, 0],
   "emissiveIntensity": 0,
   "useNormalMap": false,
-  "targetMode": "bandori",
+  "targetMode": "drop2d",
   "targetSlot": "playfield_lane_divider"
 }

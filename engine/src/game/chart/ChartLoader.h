@@ -9,11 +9,11 @@ public:
 
 private:
     static ChartData loadUnified(const std::string& path);
-    static ChartData loadBandori(const std::string& path);
+    static ChartData loadDrop2D(const std::string& path);
     static ChartData loadPhigros(const std::string& path);
-    static ChartData loadArcaea(const std::string& path);
-    static ChartData loadCytus(const std::string& path);
-    static ChartData loadLanota(const std::string& path);
+    static ChartData loadDrop3D(const std::string& path);
+    static ChartData loadScanLine(const std::string& path);
+    static ChartData loadCircle(const std::string& path);
 
     // Fills NoteEvent::beatPosition for every note using chart.timingPoints.
     // Must be called after both timingPoints and notes are populated.

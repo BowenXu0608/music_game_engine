@@ -48,6 +48,12 @@ public:
     // Play a short synthesized click sound (for editor note placement).
     void playClickSfx();
 
+    // Fire-and-forget playback of an audio file as a one-shot SFX. Mixed on a
+    // dedicated SFX group so it layers over the music/preview stream without
+    // interrupting it (used for the Music Selection wheel move/click sounds).
+    // Empty path or zero SFX volume is a no-op. Path is UTF-8.
+    void playSfxFile(const std::string& path);
+
     // Player-settings hooks.
     void setMusicVolume(float v);       // 0..1
     void setSfxVolume(float v);         // 0..1

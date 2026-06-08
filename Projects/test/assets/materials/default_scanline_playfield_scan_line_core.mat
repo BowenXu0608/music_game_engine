@@ -1,0 +1,13 @@
+{
+  "version": 2,
+  "class": "pbr",
+  "name": "default_scanline_playfield_scan_line_core",
+  "baseColor": [1, 1, 1, 0.9],
+  "metallic": 0,
+  "roughness": 1,
+  "emissiveColor": [0, 0, 0],
+  "emissiveIntensity": 0,
+  "useNormalMap": false,
+  "targetMode": "scanline",
+  "targetSlot": "playfield_scan_line_core"
+}

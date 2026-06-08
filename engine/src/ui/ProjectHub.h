@@ -11,6 +11,41 @@ class Engine;
 
 enum class GameModeType { DropNotes, Circle, ScanLine };
 enum class DropDimension { TwoD, ThreeD };
+enum class CameraProjection { Perspective, Orthographic };
+
+// Per-dimension default free-camera values for drop modes. Single source of
+// truth for the JSON loader's fallbacks AND the editor's per-control Reset
+// buttons, so they can never drift. Defaults reproduce the legacy framing.
+struct CameraDefaults {
+    CameraProjection projection = CameraProjection::Perspective;
+    float position[3]{};
+    float rotationDeg[3]{};
+    float fovYDeg{};
+    float orthoSize{};
+    float nearClip{};
+    float farClip{};
+    float playfieldWidth{};
+    float playfieldLength{};
+};
+
+inline CameraDefaults cameraDefaultsFor(DropDimension dim) {
+    bool is3D = (dim == DropDimension::ThreeD);
+    CameraDefaults d;
+    d.projection      = CameraProjection::Perspective;
+    d.position[0]     = 0.f;
+    d.position[1]     = is3D ? 3.f : 5.f;
+    d.position[2]     = is3D ? 10.f : 8.f;
+    d.rotationDeg[0]  = is3D ? -16.699f : -8.882f;
+    d.rotationDeg[1]  = 0.f;
+    d.rotationDeg[2]  = 0.f;
+    d.fovYDeg         = is3D ? 45.f : 55.f;
+    d.orthoSize       = 6.f;
+    d.nearClip        = 0.f;     // fixed; not author-exposed
+    d.farClip         = 300.f;   // fixed; not author-exposed
+    d.playfieldWidth  = is3D ? 6.f : 14.f;
+    d.playfieldLength = is3D ? 60.f : 50.f;
+    return d;
+}
 
 // ── HUD text element (logo-style text rendering config) ─────────────────────
 struct HudTextConfig {
@@ -74,25 +109,24 @@ struct GameModeConfig {
     // Audio offset: delay (seconds) before notes start to sync with audio
     float audioOffset = 0.f;
 
-    // Camera settings for gameplay view
-    float cameraEye[3]    = {0.f, 12.f, 14.f};
-    float cameraTarget[3] = {0.f, 0.f, -20.f};
-    float cameraFov       = 55.f;
+    // ── Free 3D camera (drop modes) ──────────────────────────────────────
+    // The game world is a real 3D space; the playfield is a plane in it, and
+    // this camera looks at it (Unity-style). Defaults reproduce the legacy 2D
+    // framing (lookAt eye{0,5,8} -> target{0,0,-24}, FOV 55). The JSON loader
+    // substitutes the 3D defaults when dimension==ThreeD and keys are absent.
+    CameraProjection cameraProjection = CameraProjection::Perspective;
+    float cameraPosition[3]    = {0.f, 5.f, 8.f};       // world eye position
+    float cameraRotationDeg[3] = {-8.882f, 0.f, 0.f};   // Euler XYZ (pitch,yaw,roll)
+    float cameraFovYDeg   = 55.f;     // perspective vertical FOV
+    float cameraOrthoSize = 6.f;      // ortho half view-height (world units)
+    float cameraNearClip  = 0.f;      // fixed (not author-exposed)
+    float cameraFarClip   = 300.f;    // fixed (not author-exposed)
 
-    // Author-adjustable relative camera knobs (drop modes). Each renderer
-    // keeps its own baked baseline framing; these scale it.
-    //   cameraDistance: multiplier on the baseline eye-distance (1 = default)
-    //   cameraFovDeg:   absolute FOV in degrees; 0 = use the mode's baseline
-    float cameraDistance = 1.f;
-    float cameraFovDeg   = 0.f;
-
-    // 2D drop: fraction of screen width the highway spans at the hit line
-    // (centered). Higher = lanes occupy more of the screen.
-    float playfieldWidthPct = 0.9f;
-
-    // 2D drop: how tall the highway appears (camera pitch/height blend).
-    // Higher = lower, flatter camera → taller highway filling the screen.
-    float playfieldHeightPct = 0.85f;
+    // Playfield plane dimensions in world units (drop modes). 2D defaults are
+    // chosen so the default camera frames the highway like the legacy look
+    // (~90% screen width, ~50-unit runway); 3D defaults are 6 / 60.
+    float playfieldWidth  = 14.f;     // plane X extent (full width)
+    float playfieldLength = 50.f;     // plane Z depth toward the vanishing point
 
     // 3D DropNotes: sky judgment line height (world Y).
     // Arc height [0..1] maps from ground (GROUND_Y) to this value.

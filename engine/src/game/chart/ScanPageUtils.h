@@ -120,7 +120,7 @@ inline std::vector<ScanPageInfo> buildScanPageTable(
 // Expand sparse per-page overrides into ScanSpeedEvents. Emits one zero-
 // duration step event at each overridden page's startTime, plus a return-
 // to-1.0 event at the following page's startTime if the next page has no
-// override. CytusRenderer's buildPhaseTable handles zero-duration events as
+// override. ScanLineRenderer's buildPhaseTable handles zero-duration events as
 // instantaneous step changes (sampleSpeed returns targetSpeed when duration
 // <= 1e-6).
 inline std::vector<ScanSpeedEvent> expandScanPagesToSpeedEvents(

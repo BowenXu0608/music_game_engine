@@ -1,9 +1,9 @@
 #include "Engine.h"
-#include "game/modes/BandoriRenderer.h"
-#include "game/modes/CytusRenderer.h"
+#include "game/modes/Drop2DRenderer.h"
+#include "game/modes/ScanLineRenderer.h"
 #include "game/modes/PhigrosRenderer.h"
-#include "game/modes/ArcaeaRenderer.h"
-#include "game/modes/LanotaRenderer.h"
+#include "game/modes/Drop3DRenderer.h"
+#include "game/modes/CircleRenderer.h"
 #include "game/chart/ChartLoader.h"
 #include "renderer/ParticleSlots.h"
 #include "input/TouchTypes.h"
@@ -181,7 +181,7 @@ void Engine::init(uint32_t width, uint32_t height, const std::string& title,
     m_input.init();
 
     // Keyboard callback (backward compat — desktop lane input).
-    // Hold notes now carry Bandori-style sample points (authored by dropping
+    // Hold notes now carry Drop2D-style sample points (authored by dropping
     // a Tap inside the hold's zone). For keyboard play we must actually start
     // an ActiveHold on press so consumeSampleTicks can gate ticks against the
     // currently-pressed lane — otherwise the sample points never fire on
@@ -227,13 +227,13 @@ void Engine::init(uint32_t width, uint32_t height, const std::string& title,
         if (!m_activeMode || !m_sceneViewer.isPlaying()) return;
         double t = m_clock.songTime();
 
-        if (dynamic_cast<ArcaeaRenderer*>(m_activeMode.get()))
-            handleGestureArcaea(evt, t);
+        if (dynamic_cast<Drop3DRenderer*>(m_activeMode.get()))
+            handleGestureDrop3D(evt, t);
         else if (dynamic_cast<PhigrosRenderer*>(m_activeMode.get()))
             handleGesturePhigros(evt, t);
-        else if (auto* lan = dynamic_cast<LanotaRenderer*>(m_activeMode.get()))
+        else if (auto* lan = dynamic_cast<CircleRenderer*>(m_activeMode.get()))
             handleGestureCircle(*lan, evt, t);
-        else if (auto* cyt = dynamic_cast<CytusRenderer*>(m_activeMode.get()))
+        else if (auto* cyt = dynamic_cast<ScanLineRenderer*>(m_activeMode.get()))
             handleGestureScanLine(*cyt, evt, t);
         else
             handleGestureLaneBased(evt, t);
@@ -288,14 +288,14 @@ void Engine::openProject(const std::string& projectPath) {
     // cheap and covers the editor-adds-a-new-mat-file case.
     m_materialLibrary.loadFromProject(projectPath);
 
-    // Load + seed the particle-effect library for the project. Bandori is the
+    // Load + seed the particle-effect library for the project. Drop2D is the
     // only mode with a slot table today (Phase 5 extends this); seeding is
     // idempotent and preserves user edits.
     m_particleLibrary.loadFromProject(projectPath);
-    m_particleLibrary.seedDefaultEffects("bandori");
-    m_particleLibrary.seedDefaultEffects("cytus");
-    m_particleLibrary.seedDefaultEffects("arcaea");
-    m_particleLibrary.seedDefaultEffects("lanota");
+    m_particleLibrary.seedDefaultEffects("drop2d");
+    m_particleLibrary.seedDefaultEffects("scanline");
+    m_particleLibrary.seedDefaultEffects("drop3d");
+    m_particleLibrary.seedDefaultEffects("circle");
     m_particleLibrary.seedUiTapEffect();   // shared button-tap feedback effect
 
     // Determine which modes the project actually uses (from chart filenames)
@@ -441,7 +441,7 @@ void Engine::update(float dt) {
                 m_activeMode->showJudgment(m.lane, Judgment::Miss);
         }
 
-        // Hold sample-point ticks — Bandori-style. Each tick checks whether
+        // Hold sample-point ticks — Drop2D-style. Each tick checks whether
         // the player's touch is on the lane the cross-lane hold expects at
         // that moment. A match awards Perfect; a mismatch awards Miss and
         // counts toward breaking the hold.
@@ -478,7 +478,7 @@ void Engine::update(float dt) {
 
         // Scan-line slide sample ticks — compare touch position against
         // expected path position and score Perfect/Miss.
-        if (auto* cyt = dynamic_cast<CytusRenderer*>(m_activeMode.get())) {
+        if (auto* cyt = dynamic_cast<ScanLineRenderer*>(m_activeMode.get())) {
             auto slideTicks = cyt->consumeSlideTicks(songT);
             for (auto& st : slideTicks) {
                 // Autoplay awards Perfect for every sample tick, mirroring the
@@ -620,6 +620,11 @@ void Engine::render() {
     // to the previous page.
     const EditorLayer renderedLayer = m_currentLayer;
 
+    // Cleared each frame before page render; a player screen may set it during
+    // its render (e.g. hovering the Music Selection song wheel) to suppress the
+    // button-tap spark for this frame's click.
+    m_suppressUiTapParticle = false;
+
     switch (renderedLayer) {
         case EditorLayer::ProjectHub:
             m_hub.render(this);
@@ -681,10 +686,17 @@ void Engine::tickUiTapParticles(EditorLayer renderedLayer) {
     if (!isTestMode() || !playerScreen) return;
 
     ImGuiIO& io = ImGui::GetIO();
+    if (!io.MouseClicked[0]) return;
     // A primary tap that landed on an interactive widget this frame. The
     // gameplay scene is an ImGui::Image in a NoInputs window, so note/lane taps
     // register no item and are excluded automatically; only real buttons fire.
-    if (!io.MouseClicked[0] || !ImGui::IsAnyItemHovered()) return;
+    // Exception: the Start Screen is a single full-window "Tap to Start" surface
+    // (hover, not an ImGui item) — treat any tap there as a button press so the
+    // player still gets feedback on the most prominent tap in the flow.
+    const bool startScreenTap = (renderedLayer == EditorLayer::StartScreen);
+    if (!startScreenTap && !ImGui::IsAnyItemHovered()) return;
+    // The song wheel asks for no spark — it plays a sound instead.
+    if (m_suppressUiTapParticle) return;
 
     const ParticleEffectAsset* a = m_particleLibrary.get(kUiTapEffectName);
     ParticleEmit fx = a ? particleEmitFromAsset(*a, 0) : ParticleEmit{};
@@ -794,18 +806,18 @@ std::unique_ptr<GameModeRenderer> Engine::createRenderer(const GameModeConfig& c
     switch (config.type) {
         case GameModeType::DropNotes:
             if (config.dimension == DropDimension::ThreeD)
-                return std::make_unique<ArcaeaRenderer>();
-            return std::make_unique<BandoriRenderer>();
+                return std::make_unique<Drop3DRenderer>();
+            return std::make_unique<Drop2DRenderer>();
         case GameModeType::Circle:
-            // Circle = rotating disk with ring notes (Lanota-style).
+            // Circle = rotating disk with ring notes (Circle-style).
             // Dimension toggle isn't exposed for this mode in the editor, so
             // there's only one renderer here regardless of config.dimension.
-            return std::make_unique<LanotaRenderer>();
+            return std::make_unique<CircleRenderer>();
         case GameModeType::ScanLine:
-            // ScanLine = horizontal sweep line crossing notes (Cytus-style).
-            return std::make_unique<CytusRenderer>();
+            // ScanLine = horizontal sweep line crossing notes (ScanLine-style).
+            return std::make_unique<ScanLineRenderer>();
     }
-    return std::make_unique<BandoriRenderer>();
+    return std::make_unique<Drop2DRenderer>();
 }
 
 // ── Gameplay lifecycle ───────────────────────────────────────────────────────
@@ -832,12 +844,12 @@ void Engine::launchGameplay(const SongInfo& song, Difficulty difficulty,
     switch (song.gameMode.type) {
         case GameModeType::DropNotes:
             chartMode = (song.gameMode.dimension == DropDimension::ThreeD)
-                        ? MaterialModeKey::Arcaea
-                        : MaterialModeKey::Bandori;
+                        ? MaterialModeKey::Drop3D
+                        : MaterialModeKey::Drop2D;
             break;
-        case GameModeType::Circle:   chartMode = MaterialModeKey::Lanota; break;
-        case GameModeType::ScanLine: chartMode = MaterialModeKey::Cytus;  break;
-        default:                     chartMode = MaterialModeKey::Bandori; break;
+        case GameModeType::Circle:   chartMode = MaterialModeKey::Circle; break;
+        case GameModeType::ScanLine: chartMode = MaterialModeKey::ScanLine;  break;
+        default:                     chartMode = MaterialModeKey::Drop2D; break;
     }
     m_materialLibrary.migrateChartToAssets(chart, chartStem, chartMode);
 
@@ -1232,7 +1244,7 @@ void Engine::handleGestureLaneBased(const GestureEvent& evt, double songTime) {
         }
         // A held finger that starts moving turns into a Slide. For cross-lane
         // holds we feed every position update back into the detector so the
-        // sample-tick gate (Bandori-style) sees the player's current lane.
+        // sample-tick gate (Drop2D-style) sees the player's current lane.
         case GestureType::SlideBegin:
         case GestureType::SlideMove: {
             auto it = m_activeTouches.find(evt.touchId);
@@ -1260,7 +1272,7 @@ void Engine::handleGestureLaneBased(const GestureEvent& evt, double songTime) {
     }
 }
 
-void Engine::handleGestureArcaea(const GestureEvent& evt, double songTime) {
+void Engine::handleGestureDrop3D(const GestureEvent& evt, double songTime) {
     glm::vec2 screenSize{static_cast<float>(m_renderer.width()),
                          static_cast<float>(m_renderer.height())};
 
@@ -1316,9 +1328,9 @@ void Engine::handleGesturePhigros(const GestureEvent& evt, double songTime) {
     }
 }
 
-// ── Circle (Lanota) gesture dispatch ─────────────────────────────────────────
+// ── Circle gesture dispatch ─────────────────────────────────────────
 // Touch input for the rotating-disk mode.  Unlike the lane-based handler, this
-// asks the LanotaRenderer to *pick* the specific note whose current screen
+// asks the CircleRenderer to *pick* the specific note whose current screen
 // position is closest to the tap, then asks HitDetector to consume that note
 // by id.  We bypass dispatchHitResult so that visual feedback can be emitted
 // at the picked note's exact disk position rather than via lane-based search.
@@ -1326,7 +1338,7 @@ void Engine::handleGesturePhigros(const GestureEvent& evt, double songTime) {
 // CIRCLE_PICK_DP is in density-independent pixels (160-DPI reference); on a
 // 480-DPI phone it expands to 144 px so a fingertip-sized region around the
 // tap is searched for notes.  See engine/src/input/ScreenMetrics.h.
-void Engine::handleGestureCircle(LanotaRenderer& lan,
+void Engine::handleGestureCircle(CircleRenderer& lan,
                                  const GestureEvent& evt, double songTime) {
     constexpr float CIRCLE_PICK_DP = 48.f;  // ≈ 7.6 mm fingertip radius
     const float pickPx = ScreenMetrics::dp(CIRCLE_PICK_DP);
@@ -1384,8 +1396,8 @@ void Engine::handleGestureCircle(LanotaRenderer& lan,
     }
 }
 
-// ── Scan Line (Cytus) gesture dispatch ───────────────────────────────────────
-// Free-position 2D mode. CytusRenderer::pickNoteAt maps the tap to the
+// ── Scan Line gesture dispatch ───────────────────────────────────────
+// Free-position 2D mode. ScanLineRenderer::pickNoteAt maps the tap to the
 // nearest chart note within a fingertip-sized pixel tolerance *and* a
 // timing window; HitDetector then validates/consumes that note by id and
 // JudgmentSystem classifies the timing error. Visual feedback is emitted
@@ -1395,7 +1407,7 @@ void Engine::handleGestureCircle(LanotaRenderer& lan,
 // state machine is lane-based, and scan-line slides travel a free path
 // rather than a lane index. This is a documented follow-up.
 
-void Engine::handleGestureScanLine(CytusRenderer& cyt,
+void Engine::handleGestureScanLine(ScanLineRenderer& cyt,
                                    const GestureEvent& evt, double songTime) {
     constexpr float SCAN_PICK_DP = 48.f; // ~fingertip radius (DPI-normalized)
     const float pickPx = ScreenMetrics::dp(SCAN_PICK_DP);

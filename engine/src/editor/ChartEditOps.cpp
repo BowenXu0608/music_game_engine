@@ -38,8 +38,8 @@ const char* typeName(EditorNoteType t) {
     return "?";
 }
 
-// Arcaea easing codes → EditorNote::arcEaseX/Y float encoding. Matches the
-// convention used by ArcaeaRenderer::parseArcaeaEase. Unknown codes fall
+// Drop3D easing codes → EditorNote::arcEaseX/Y float encoding. Matches the
+// convention used by Drop3DRenderer::parseDrop3DEase. Unknown codes fall
 // back to linear (0.f).
 float parseArcEase(const std::string& s) {
     if (s == "s")    return  0.f;
@@ -1076,41 +1076,41 @@ bool isOpAllowedForMode(const ChartEditOp& op, const std::string& modeName) {
     return std::visit([&](const auto& o) -> bool {
         using T = std::decay_t<decltype(o)>;
         (void)o;
-        // Arc family: 3D Arcaea only.
+        // Arc family: 3D Drop3D only.
         if constexpr (std::is_same_v<T, AddArcOp>
                    || std::is_same_v<T, DeleteArcOp>
                    || std::is_same_v<T, ShiftArcHeightOp>
                    || std::is_same_v<T, AddArcTapOp>
                    || std::is_same_v<T, DeleteArcTapOp>) {
-            return modeName == "arcaea";
+            return modeName == "drop3d";
         }
-        // Slide family: ScanLine / Cytus only.
+        // Slide family: ScanLine / ScanLine only.
         if constexpr (std::is_same_v<T, AddSlideOp>
                    || std::is_same_v<T, DeleteSlideOp>) {
-            return modeName == "cytus";
+            return modeName == "scanline";
         }
-        // Hold-waypoint family: anywhere Hold exists — bandori, arcaea,
-        // lanota. Cytus uses page-based holds and doesn't expose the
+        // Hold-waypoint family: anywhere Hold exists — drop2d, drop3d,
+        // circle. ScanLine uses page-based holds and doesn't expose the
         // same waypoint model.
         if constexpr (std::is_same_v<T, AddHoldWaypointOp>
                    || std::is_same_v<T, RemoveHoldWaypointOp>
                    || std::is_same_v<T, SetHoldTransitionOp>) {
-            return modeName == "bandori"
-                || modeName == "arcaea"
-                || modeName == "lanota";
+            return modeName == "drop2d"
+                || modeName == "drop3d"
+                || modeName == "circle";
         }
-        // Disk animation family: Circle / Lanota only.
+        // Disk animation family: Circle / Circle only.
         if constexpr (std::is_same_v<T, AddDiskRotationOp>
                    || std::is_same_v<T, AddDiskMoveOp>
                    || std::is_same_v<T, AddDiskScaleOp>
                    || std::is_same_v<T, DeleteDiskEventOp>) {
-            return modeName == "lanota";
+            return modeName == "circle";
         }
-        // Scan-speed family: ScanLine / Cytus only.
+        // Scan-speed family: ScanLine / ScanLine only.
         if constexpr (std::is_same_v<T, SetPageSpeedOp>
                    || std::is_same_v<T, AddScanSpeedEventOp>
                    || std::is_same_v<T, DeleteScanSpeedEventOp>) {
-            return modeName == "cytus";
+            return modeName == "scanline";
         }
         // All shared ops are allowed in every mode.
         return true;

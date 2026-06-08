@@ -1,0 +1,13 @@
+{
+  "version": 2,
+  "class": "pbr",
+  "name": "default_circle_hold_note_head_active",
+  "baseColor": [0.4, 0.9, 1, 1],
+  "metallic": 0,
+  "roughness": 0.5,
+  "emissiveColor": [0.4, 0.9, 1],
+  "emissiveIntensity": 1,
+  "useNormalMap": false,
+  "targetMode": "circle",
+  "targetSlot": "hold_note_head_active"
+}

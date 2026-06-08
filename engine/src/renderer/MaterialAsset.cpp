@@ -1,4 +1,5 @@
 #include "MaterialAsset.h"
+#include "MaterialSlots.h"
 #include <fstream>
 #include <sstream>
 
@@ -171,7 +172,7 @@ bool loadMaterialAsset(const std::filesystem::path& loadPath, MaterialAsset& out
     out.name = scanStringField(src, "name");
     if (out.name.empty()) out.name = loadPath.stem().string();
 
-    out.targetMode     = scanStringField(src, "targetMode");
+    out.targetMode     = normalizeModeToken(scanStringField(src, "targetMode"));
     out.targetSlotSlug = scanStringField(src, "targetSlot");
 
     bool isV2 = hasField(src, "version") || hasField(src, "class");

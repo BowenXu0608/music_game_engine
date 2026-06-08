@@ -47,7 +47,7 @@ struct MaterialAsset {
     // Compatibility constraints for slot-aware pickers. A material appears in
     // a SongEditor slot dropdown only when both fields match the slot's
     // (mode, slug), OR the field is empty ("any").
-    std::string            targetMode;         // "bandori"/"arcaea"/"cytus"/"lanota"/"phigros"/""
+    std::string            targetMode;         // "drop2d"/"drop3d"/"scanline"/"circle"/"phigros"/""
     std::string            targetSlotSlug;     // e.g. "click_note", "playfield_ground", ""
 
     // Transient (not serialized): true when this asset was read from a legacy

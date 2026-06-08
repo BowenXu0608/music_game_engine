@@ -26,16 +26,20 @@ Engine creates renderers via `createRenderer(GameModeConfig)` factory.
 
 ## BandoriRenderer (2D Drop Notes)
 
-**Dynamic lane count** from `config->trackCount`. **Auto lane spacing** computed each `onResize` so the highway bottom hits `playfieldWidthPct` of the screen.
+**Dynamic lane count** from `config->trackCount`. **Lane spacing is world-direct**: `m_laneSpacing = playfieldWidth / laneCount` (world units), computed each `onResize`.
 
-### Camera model (reworked 2026-06-04 — `onResize`)
+### Camera model — free 3D camera (reworked 2026-06-08 — `onResize`)
 
-The camera is **fixed**: `camEye {0,5,8}`, `camTarget {0,0,-24}`, baseline FOV 55° (overridden when `cameraFovDeg > 0`). Position, pitch and FOV never change, so the lane-convergence **angle is constant** under every author knob. The two drop-camera knobs are orthogonal, angle-preserving, and do **not** scale the field:
+> Supersedes the 2026-06-04 angle-locked model. The user reconceived the scene as a real 3D space where the playfield is a **plane** and a **free camera** (Unity-style) looks at it. The old abstract knobs (Camera Distance / Playfield Width%/Height% + the clip-space Y-shift hack) are gone.
 
-- **Camera Distance → visible track length** (`m_approachZ`, member; baseline `APPROACH_Z=-55` kept only as the reference constant). `dN=(clamp(camDistance,0.5,2)-0.5)/1.5`, `m_approachZ=-mix(20,110,dN)`. The track quad, lane dividers, hold-body `zFar`, hold sample-tick cull, and note cull all use `m_approachZ`, so a higher value draws + reveals more track toward the vanishing point (bottom width + angle unchanged).
-- **Playfield Height → judgment-line screen position** (`anchorNdcY`). `hN=(clamp(playfieldHeightPct,0.3,1)-0.3)/0.7`, `anchorNdcY=mix(0.2,0.85,hN)` (flipped NDC, +1=bottom; higher % = lower line, more room above). Applied as a **clip-space vertical shift** after `lookAt`: project hit point `(0,0,0)`, then `proj[k][1] += (anchorNdcY - hitNdcY)*proj[k][3]` for k=0..3 (only `proj[2][3]≠0`, so it is `proj[2][1] -= delta` = uniform NDC-Y translate). Leaves the view matrix, FOV, X axis and `proj[1][1]` (note sizing) untouched.
+The camera is built by the shared **`buildGameplayCamera(const GameModeConfig&, float aspect)`** (`engine/src/renderer/CameraConfig.{h,cpp}`) from per-song fields: `cameraProjection` (Perspective|Orthographic), `cameraPosition[3]`, `cameraRotationDeg[3]` (Euler pitch/yaw/roll, camera looks down its local −Z, up +Y), `cameraFovYDeg`, `cameraOrthoSize`, and the now-fixed `cameraNearClip`/`cameraFarClip`. View = `inverse(translate(pos) · mat4_cast(quat(radians(euler))))`. Ortho flips `proj[1][1]` to match the Vulkan Y-flip `makePerspective` applies.
 
-`cameraDistance`/`playfieldHeightPct`/`playfieldWidthPct`/`cameraFovDeg` are per-chart (`GameModeConfig`, saved in `music_selection.json`). The legacy `cameraEye/Target/Fov` config fields are vestigial for both drop renderers. **This whole block is duplicated in `SongEditor::renderSceneView` (2D branch)** — keep them in sync. 3D drop (Arcaea) keeps its eye-dolly + `APPROACH_Z=-55` (gated by `preview3D`). See devlog 2026-06-04 for the full rationale + the four failed attempts.
+BandoriRenderer draws in **screen space** (ortho `makeOrtho(0,w,h,0)` batcher camera; everything hand-projected via `w2s(world, m_perspVP, …)`), so the free camera is consumed by simply storing `m_perspVP = buildGameplayCamera(m_camCfg, aspect).viewProjection()` in `onResize` (config copied into `m_camCfg` in `onInit`). The judgment line projects world `z=0` through `m_perspVP`, so it now follows the camera naturally — no Y-shift hack.
+
+- **Plane dimensions** come straight from the config in world units: `m_laneSpacing = playfieldWidth/laneCount`; `m_farCullZ = -playfieldLength` (far draw/cull edge, used by the track quad, lane dividers, hold-body `zFar`, hold sample-tick cull, and note cull).
+- **Near/Far clip** are fixed (near 0 → clamped to 0.001 in the builder; far 300) and **not author-exposed** — `playfieldLength` alone bounds the runway.
+
+`cameraProjection`/`cameraPosition`/`cameraRotationDeg`/`cameraFovYDeg`/`cameraOrthoSize`/`cameraNearClip`/`cameraFarClip`/`playfieldWidth`/`playfieldLength` are per-chart (`GameModeConfig`, saved in `music_selection.json`). The legacy `cameraDistance`/`playfieldWidthPct`/`playfieldHeightPct`/`cameraEye/Target/Fov` fields were **removed**. **`SongEditor::renderSceneView` and ArcaeaRenderer now call the same `buildGameplayCamera`** — no more verbatim-duplicated camera math (that was a recurring divergence bug). Defaults reproduce the legacy framing (see sys7 → camera controls). See devlog 2026-06-08 for the full plan + rationale.
 
 **Rendering:** Perspective-projected ground-plane notes scrolling toward hit zone. Hold bodies tessellated as ribbon strips with multi-waypoint cross-lane paths (Straight/Angle90/Curve/Rhomboid transitions). Hold sample-point markers along the ribbon.
 
@@ -90,19 +94,19 @@ The camera is **fixed**: `camEye {0,5,8}`, `camTarget {0,0,-24}`, baseline FOV 5
 
 Arcaea-style 3D highway with a ground lane, an elevated sky band, and arc holds that curve between them. Uses `checkHitPosition` / `beginHoldPosition` for spatial input. Arc holds scored holistically on release via `judgeArc(accuracy)`.
 
-### Playfield geometry — single source of truth (2026-04-17)
+### Playfield geometry — single source of truth (2026-04-17; lane dims config-driven 2026-06-08)
 
-All mesh construction references five constants in the header; do **not** introduce parallel magic numbers elsewhere in the file:
+All mesh construction references these in the header; do **not** introduce parallel magic numbers elsewhere in the file:
 
 ```
-SCROLL_SPEED    = 8.f    // world units/sec notes scroll toward camera
-GROUND_Y        = -2.f   // ground plane (world y)
-LANE_HALF_WIDTH = 3.f    // lane near-edge spans x ∈ [-3, +3]
-LANE_FAR_Z      = -60.f  // lane back edge (far)
-JUDGMENT_Z      = 0.f    // lane front edge / judgment plane
+SCROLL_SPEED    = 8.f    // world units/sec notes scroll toward camera (constexpr)
+GROUND_Y        = -2.f   // ground plane (world y) (constexpr)
+JUDGMENT_Z      = 0.f    // lane front edge / judgment plane (constexpr)
+m_laneHalfWidth = playfieldWidth * 0.5f   // member, from config (was constexpr 3.f)
+m_laneFarZ      = -playfieldLength         // member, from config (was constexpr -60.f)
 ```
 
-The ground mesh, the judgment gate, the tap-lane mapping, and the arc/arctap coordinate transforms all derive from these. Changing lane width means editing *one* line.
+`m_laneHalfWidth`/`m_laneFarZ` are now derived from `GameModeConfig::playfieldWidth`/`playfieldLength` in `onInit` **before** the meshes build. The ground mesh, judgment gate, tap-lane mapping, and arc/arctap transforms all reference them; the note-cull `z > 30.f` literals became `z > playfieldLength`. Camera comes from the shared `buildGameplayCamera` (see BandoriRenderer "Camera model"); the old baked eye-dolly (`eye = baseTarget + (baseEye−baseTarget)·cameraDistance`) is gone. **Live playfield-width edits need a renderer re-init** (meshes build once). Default `playfieldWidth=6`/`playfieldLength=60` exactly reproduce the old `LANE_HALF_WIDTH=3`/`LANE_FAR_Z=-60`.
 
 ### Rectangle judgment gate (2026-04-17)
 
