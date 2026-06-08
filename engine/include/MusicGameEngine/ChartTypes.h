@@ -43,7 +43,7 @@ struct PhigrosNoteData {
     float    duration;
 };
 
-struct LanotaRingData {
+struct CircleRingData {
     float angle;
     int   ringIndex;
     int   laneSpan = 1; // how many adjacent lanes the note covers (1, 2, or 3)
@@ -55,7 +55,7 @@ struct NoteEvent {
     uint32_t id;
     double   beatPosition = 0.0;  // accumulated beats from song start (set by computeBeatPositions)
     std::variant<TapData, HoldData, FlickData,
-                 ArcData, PhigrosNoteData, LanotaRingData> data;
+                 ArcData, PhigrosNoteData, CircleRingData> data;
 };
 
 // ── Timing ───────────────────────────────────────────────────────────────────

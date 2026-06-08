@@ -8,9 +8,9 @@ public:
     static ChartData load(const std::string& path);
 
 private:
-    static ChartData loadBandori(const std::string& path);
+    static ChartData loadDrop2D(const std::string& path);
     static ChartData loadPhigros(const std::string& path);
-    static ChartData loadArcaea(const std::string& path);
-    static ChartData loadCytus(const std::string& path);
-    static ChartData loadLanota(const std::string& path);
+    static ChartData loadDrop3D(const std::string& path);
+    static ChartData loadScanLine(const std::string& path);
+    static ChartData loadCircle(const std::string& path);
 };

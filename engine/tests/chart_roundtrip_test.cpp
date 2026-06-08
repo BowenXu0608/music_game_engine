@@ -322,12 +322,12 @@ int main() {
         CHECK_EQ(liveNotes[1].arcTapParent, 0, "arctap parent rewritten");
     }
 
-    // Mode gating: arc ops must be rejected outside arcaea.
+    // Mode gating: arc ops must be rejected outside drop3d.
     AddArcOp probe;
-    CHECK(isOpAllowedForMode(probe, "arcaea"),  "add_arc allowed in arcaea");
-    CHECK(!isOpAllowedForMode(probe, "bandori"),"add_arc blocked in bandori");
-    CHECK(!isOpAllowedForMode(probe, "lanota"), "add_arc blocked in lanota");
-    CHECK(!isOpAllowedForMode(probe, "cytus"),  "add_arc blocked in cytus");
+    CHECK(isOpAllowedForMode(probe, "drop3d"),  "add_arc allowed in drop3d");
+    CHECK(!isOpAllowedForMode(probe, "drop2d"),"add_arc blocked in drop2d");
+    CHECK(!isOpAllowedForMode(probe, "circle"), "add_arc blocked in circle");
+    CHECK(!isOpAllowedForMode(probe, "scanline"),  "add_arc blocked in scanline");
 
     // ── Phase 5: slide ops regression ────────────────────────────────────────
     const char* kSlideOpsJson = R"JSON({
@@ -373,10 +373,10 @@ int main() {
 
     // Mode gating for slide ops
     AddSlideOp slideProbe;
-    CHECK(isOpAllowedForMode(slideProbe, "cytus"),    "add_slide allowed in cytus");
-    CHECK(!isOpAllowedForMode(slideProbe, "bandori"), "add_slide blocked in bandori");
-    CHECK(!isOpAllowedForMode(slideProbe, "arcaea"),  "add_slide blocked in arcaea");
-    CHECK(!isOpAllowedForMode(slideProbe, "lanota"),  "add_slide blocked in lanota");
+    CHECK(isOpAllowedForMode(slideProbe, "scanline"),    "add_slide allowed in scanline");
+    CHECK(!isOpAllowedForMode(slideProbe, "drop2d"), "add_slide blocked in drop2d");
+    CHECK(!isOpAllowedForMode(slideProbe, "drop3d"),  "add_slide blocked in drop3d");
+    CHECK(!isOpAllowedForMode(slideProbe, "circle"),  "add_slide blocked in circle");
 
     // ── Phase 6: hold-waypoint ops regression ────────────────────────────────
     // Seed a lone Hold, then exercise add/remove/setTransition.
@@ -442,10 +442,10 @@ int main() {
 
     // Mode gating for hold ops
     AddHoldWaypointOp hwpProbe;
-    CHECK(isOpAllowedForMode(hwpProbe, "bandori"), "hold wp allowed in bandori");
-    CHECK(isOpAllowedForMode(hwpProbe, "arcaea"),  "hold wp allowed in arcaea");
-    CHECK(isOpAllowedForMode(hwpProbe, "lanota"),  "hold wp allowed in lanota");
-    CHECK(!isOpAllowedForMode(hwpProbe, "cytus"),  "hold wp blocked in cytus");
+    CHECK(isOpAllowedForMode(hwpProbe, "drop2d"), "hold wp allowed in drop2d");
+    CHECK(isOpAllowedForMode(hwpProbe, "drop3d"),  "hold wp allowed in drop3d");
+    CHECK(isOpAllowedForMode(hwpProbe, "circle"),  "hold wp allowed in circle");
+    CHECK(!isOpAllowedForMode(hwpProbe, "scanline"),  "hold wp blocked in scanline");
 
     // ── Phase 7: disk + scan-speed ops regression ────────────────────────────
     // `isExtendedOp` routes these through applyChartEditOpExtended, so the
@@ -461,12 +461,12 @@ int main() {
     CHECK(!isExtendedOp(dProbe),       "delete_range is not extended");
 
     // Mode gating for the extended families
-    CHECK(isOpAllowedForMode(diskProbe, "lanota"),   "disk rot allowed in lanota");
-    CHECK(!isOpAllowedForMode(diskProbe, "bandori"), "disk rot blocked in bandori");
-    CHECK(!isOpAllowedForMode(diskProbe, "arcaea"),  "disk rot blocked in arcaea");
-    CHECK(!isOpAllowedForMode(diskProbe, "cytus"),   "disk rot blocked in cytus");
-    CHECK(isOpAllowedForMode(pageProbe, "cytus"),    "page speed allowed in cytus");
-    CHECK(!isOpAllowedForMode(pageProbe, "lanota"),  "page speed blocked in lanota");
+    CHECK(isOpAllowedForMode(diskProbe, "circle"),   "disk rot allowed in circle");
+    CHECK(!isOpAllowedForMode(diskProbe, "drop2d"), "disk rot blocked in drop2d");
+    CHECK(!isOpAllowedForMode(diskProbe, "drop3d"),  "disk rot blocked in drop3d");
+    CHECK(!isOpAllowedForMode(diskProbe, "scanline"),   "disk rot blocked in scanline");
+    CHECK(isOpAllowedForMode(pageProbe, "scanline"),    "page speed allowed in scanline");
+    CHECK(!isOpAllowedForMode(pageProbe, "circle"),  "page speed blocked in circle");
 
     // Parse a bundle of disk/scan ops and confirm the JSON dispatch builds
     // each variant. We can't exercise applyChartEditOpExtended here without
