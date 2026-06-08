@@ -172,15 +172,21 @@ void Renderer::endFrame() {
     // Swapchain render pass stays open for ImGui (no composite drawn)
 }
 
-void Renderer::flushUiParticles() {
+void Renderer::flushUiParticles(float dispW, float dispH) {
     int frame = m_sync.currentFrame();
     auto ext = m_swapchain.extent();
     // Screen-space ortho: emit positions are window pixels (top-left origin),
-    // matching ImGui MousePos. Drawn into the swapchain pass that endFrame()
-    // left open, so these particles sit on top of the ImGui UI.
+    // matching ImGui MousePos. Use the caller's ImGui DisplaySize when given so
+    // the mapping holds under OS display scaling (logical px != physical
+    // framebuffer px); fall back to the swapchain extent otherwise. Drawn into
+    // the swapchain pass that endFrame() left open, so these sit on top of UI.
+    float w = (dispW > 0.f) ? dispW : static_cast<float>(ext.width);
+    float h = (dispH > 0.f) ? dispH : static_cast<float>(ext.height);
     FrameUBO ubo{};
-    ubo.viewProj = Camera::makeOrtho(0.f, static_cast<float>(ext.width),
-                                     static_cast<float>(ext.height), 0.f).viewProjection();
+    // bottom=0, top=h: maps screen y=0 (top) → Vulkan NDC -1 (top), so emit
+    // positions (ImGui top-left origin) are NOT vertically flipped. Using
+    // glm::ortho's OpenGL form (0,w,h,0) here would mirror Y in this pipeline.
+    ubo.viewProj = Camera::makeOrtho(0.f, w, 0.f, h).viewProjection();
     m_uiParticles.updateFrameUBO(ubo, frame);
     m_uiParticles.flush(m_currentCmd, frame, m_whiteTexSet);
 }

@@ -505,7 +505,7 @@ void AndroidEngine::render() {
     ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), m_renderer.currentCmd());
 
     // UI tap particles render on top of the ImGui UI (swapchain pass still open).
-    m_renderer.flushUiParticles();
+    m_renderer.flushUiParticles(io.DisplaySize.x, io.DisplaySize.y);
 
     m_renderer.finishFrame();
 }

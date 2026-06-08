@@ -90,7 +90,11 @@ public:
     // Draw the UI particle instance into the still-open swapchain render pass
     // (call AFTER ImGui has been rendered, BEFORE finishFrame()). Uses a
     // screen-space ortho projection so emit positions are window pixels.
-    void flushUiParticles();
+    // dispW/dispH = ImGui DisplaySize — the logical pixel space MousePos / emit
+    // positions live in. This may differ from the physical swapchain extent
+    // under OS display scaling; using it keeps particles aligned with the
+    // cursor/ImGui. Pass <=0 to fall back to the swapchain extent.
+    void flushUiParticles(float dispW = 0.f, float dispH = 0.f);
 
 private:
     void recordFrame(uint32_t imageIndex);

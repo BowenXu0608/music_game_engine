@@ -669,8 +669,12 @@ void Engine::render() {
     m_imgui.render(m_renderer.currentCmd());
 
     // Draw the UI tap particles ON TOP of the ImGui UI (swapchain pass is still
-    // open until finishFrame()).
-    m_renderer.flushUiParticles();
+    // open until finishFrame()). Pass DisplaySize so emit (MousePos) positions
+    // map correctly even under OS display scaling.
+    {
+        ImVec2 ds = ImGui::GetIO().DisplaySize;
+        m_renderer.flushUiParticles(ds.x, ds.y);
+    }
 
     m_renderer.finishFrame();
 }
