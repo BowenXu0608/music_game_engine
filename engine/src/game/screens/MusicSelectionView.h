@@ -81,10 +81,22 @@ protected:
     void renderSetWheel(ImVec2 origin, float width, float height, IPlayerEngine* engine);
     void renderSongWheel(ImVec2 origin, float width, float height, IPlayerEngine* engine);
 
+    // Identifies which roller currently owns the drag gesture.
+    enum class DragWheel { None, Set, Song };
+
+    // Shared iOS-picker physics + input for one roller. Captures drag (1:1
+    // finger tracking), momentum/flick, snap-to-center, mouse-wheel impulse and
+    // tap-to-select; advances `cur`/`vel`; plays the scroll SFX when the
+    // centered row changes. Returns the centered (selected) index.
+    int tickWheelInput(IPlayerEngine* engine, const char* areaId, ImVec2 origin,
+                       float width, float height, int count, float rowPitch,
+                       float angleStep, float radius, float& cur, float& tgt,
+                       float& vel, DragWheel which, int prevCentered);
+
     // Play a configured wheel SFX (project-relative path). No-op if unset.
     void playWheelSfx(IPlayerEngine* engine, const std::string& relPath);
     void renderCoverPhoto(ImVec2 origin, float size);
-    void renderDifficultyButtons(ImVec2 origin, float width);
+    void renderDifficultyButtons(ImVec2 origin, float width, IPlayerEngine* engine);
     void renderPlayButton(ImVec2 origin, float width, IPlayerEngine* engine);
 
     // ── Texture cache ────────────────────────────────────────────────────────
@@ -115,9 +127,12 @@ protected:
     std::string m_fcImage;  // Full Combo badge
     std::string m_apImage;  // All Perfect badge
 
-    // Project-level wheel sounds (relative paths). Played when the song/set
-    // wheel scrolls to a new entry / when a card is clicked. Empty = silent.
+    // Project-level player SFX (relative paths). Empty = silent.
+    //  - scroll     SFX: fires each time a roller's centered row changes.
+    //  - difficulty SFX: fires when the player clicks a difficulty button.
+    //  - click      SFX: fires when the player presses START to launch a song.
     std::string m_wheelScrollSfx;
+    std::string m_difficultySfx;
     std::string m_wheelClickSfx;
 
     // Audio preview state (dwell-then-play 30 s clip).
@@ -128,11 +143,20 @@ protected:
     std::string m_previewPath;
     float       m_previewStopT   = 0.f;
 
-    // ── Wheel scroll state (smooth animation) ────────────────────────────────
-    float m_setScrollTarget   = 0.f;
+    // ── Wheel scroll state (iOS-picker physics) ──────────────────────────────
+    // *Current = animated row position; *Vel = momentum in rows/sec.
+    float m_setScrollTarget   = 0.f;   // kept for seeding / external reads
     float m_setScrollCurrent  = 0.f;
+    float m_setScrollVel      = 0.f;
     float m_songScrollTarget  = 0.f;
     float m_songScrollCurrent = 0.f;
+    float m_songScrollVel     = 0.f;
+
+    // Drag-gesture tracking (shared by both rollers).
+    DragWheel m_dragWheel = DragWheel::None;
+    float     m_dragLastY = 0.f;   // mouse Y last frame while dragging
+    float     m_dragTotal = 0.f;   // accumulated |movement| to tell tap vs drag
+    bool      m_dragMoved = false;
 
     // ── Cover texture cache (also used for page background) ──────────────────
     struct CoverEntry { Texture tex; VkDescriptorSet desc = VK_NULL_HANDLE; };

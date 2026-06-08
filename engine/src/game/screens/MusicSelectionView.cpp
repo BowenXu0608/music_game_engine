@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <cstring>
 #include <cmath>
+#include <cfloat>
 #include <iostream>
 #ifdef _WIN32
 #include <windows.h>
@@ -19,6 +20,74 @@
 
 namespace fs = std::filesystem;
 using json = nlohmann::json;
+
+namespace {
+// One row of an iOS-style picker mapped onto a vertical cylinder.
+//  t       : signed offset in rows from the centered item.
+//  depth   : 1 at the center, easing to 0 at the rim (edge-on).
+//  alpha   : visibility, faded by depth.
+//  y       : screen-space Y of the row's center.
+struct CylSample { float y; float depth; float alpha; bool vis; };
+CylSample cylSample(float t, float centerY, float radius, float angleStep) {
+    float theta = t * angleStep;
+    CylSample s;
+    s.vis   = std::fabs(theta) < 1.48f;          // ~85deg; beyond is edge-on
+    float c = std::cos(theta);
+    s.depth = c > 0.f ? c : 0.f;
+    s.y     = centerY + radius * std::sin(theta);
+    s.alpha = std::pow(s.depth, 1.35f);
+    return s;
+}
+
+// The fixed center selection band: faint accent fill + two hairlines, iOS-style.
+void drawWheelBand(ImDrawList* dl, ImVec2 origin, float width, float centerY,
+                   float rowPitch, ImU32 accent) {
+    float pad = width * 0.06f;
+    float x0 = origin.x + pad, x1 = origin.x + width - pad;
+    float y0 = centerY - rowPitch * 0.5f, y1 = centerY + rowPitch * 0.5f;
+    ImU32 fill = (accent & 0x00FFFFFFu) | (30u << 24);   // low-alpha accent
+    dl->AddRectFilled(ImVec2(x0, y0), ImVec2(x1, y1), fill, 6.f);
+    ImU32 line = IM_COL32(255, 255, 255, 48);
+    dl->AddLine(ImVec2(x0, y0), ImVec2(x1, y0), line, 1.2f);
+    dl->AddLine(ImVec2(x0, y1), ImVec2(x1, y1), line, 1.2f);
+}
+
+// One cover+name roller row, cylinder-projected (foreshortened + faded).
+// Returns the right edge X of the cover so callers can append extras.
+float drawRollerRow(ImDrawList* dl, ImFont* font, float baseFont, ImVec2 origin,
+                    float width, float rowPitch, const CylSample& cs,
+                    VkDescriptorSet cover, const char* name, bool isSel,
+                    ImU32 /*accent*/) {
+    int ai = (int)(cs.alpha * 255.f);
+    if (ai <= 3) return origin.x;
+    float ds = 0.62f + 0.38f * cs.depth;
+    float coverBase = std::min(rowPitch * 0.70f, width * 0.26f);
+    float cw  = coverBase * ds;
+    float ch  = cw * (0.45f + 0.55f * cs.depth);       // vertical foreshorten
+    float cxc = origin.x + width * 0.09f + cw * 0.5f;
+    float cyc = cs.y;
+    ImVec2 c0(cxc - cw * 0.5f, cyc - ch * 0.5f), c1(cxc + cw * 0.5f, cyc - ch * 0.5f),
+           c2(cxc + cw * 0.5f, cyc + ch * 0.5f), c3(cxc - cw * 0.5f, cyc + ch * 0.5f);
+    if (cover)
+        dl->AddImageQuad((ImTextureID)(uint64_t)cover, c0, c1, c2, c3,
+                         ImVec2(0, 0), ImVec2(1, 0), ImVec2(1, 1), ImVec2(0, 1),
+                         IM_COL32(255, 255, 255, ai));
+    else
+        dl->AddRectFilled(c0, c2, IM_COL32(70, 72, 90, (int)(ai * 0.8f)), 3.f);
+
+    float fontSz = baseFont * (0.86f + 0.30f * cs.depth);
+    ImU32 col = isSel ? IM_COL32(255, 255, 255, ai)
+                      : IM_COL32(206, 210, 226, (int)(ai * 0.85f));
+    float tx  = cxc + cw * 0.5f + width * 0.06f;
+    float trx = origin.x + width - width * 0.05f;
+    ImVec2 tsz = font->CalcTextSizeA(fontSz, FLT_MAX, 0.f, name);
+    float ty = cyc - tsz.y * 0.5f;
+    dl->PushClipRect(ImVec2(tx, cyc - rowPitch), ImVec2(trx, cyc + rowPitch), true);
+    dl->AddText(font, fontSz, ImVec2(tx, ty), col, name);
+    dl->PopClipRect();
+    return cxc + cw * 0.5f;
+}
+}  // namespace
 
 // Re-encode `s` as valid UTF-8 (CP_ACP fallback on Windows). See
 // MusicSelectionEditor.cpp for the original rationale; duplicated here so the
@@ -125,6 +194,7 @@ void MusicSelectionView::load(const std::string& projectPath) {
     m_fcImage        = j.value("fcImage", "");
     m_apImage        = j.value("apImage", "");
     m_wheelScrollSfx = j.value("wheelScrollSfx", "");
+    m_difficultySfx  = j.value("difficultySfx", "");
     m_wheelClickSfx  = j.value("wheelClickSfx", "");
 
     if (j.contains("sets") && j["sets"].is_array()) {
@@ -400,6 +470,7 @@ void MusicSelectionView::save() {
     j["fcImage"]        = toUtf8(m_fcImage);
     j["apImage"]        = toUtf8(m_apImage);
     j["wheelScrollSfx"] = toUtf8(m_wheelScrollSfx);
+    j["difficultySfx"]  = toUtf8(m_difficultySfx);
     j["wheelClickSfx"]  = toUtf8(m_wheelClickSfx);
 
     std::ofstream out(m_projectPath + "/music_selection.json");
@@ -476,10 +547,8 @@ void MusicSelectionView::playWheelSfx(IPlayerEngine* engine, const std::string& 
 }
 
 void MusicSelectionView::update(float dt, IPlayerEngine* engine) {
-    float lerpSpeed = 8.f;
-    m_setScrollCurrent  += (m_setScrollTarget  - m_setScrollCurrent)  * std::min(1.f, lerpSpeed * dt);
-    m_songScrollCurrent += (m_songScrollTarget - m_songScrollCurrent) * std::min(1.f, lerpSpeed * dt);
-
+    // Roller scroll physics (drag/flick/snap) live in tickWheelInput, called
+    // each frame from the wheel render. update() only seeds initial selection.
     if (m_selectedSet < 0 && !m_sets.empty()) {
         m_selectedSet     = 0;
         m_setScrollTarget = 0.f;
@@ -561,10 +630,82 @@ void MusicSelectionView::renderGamePreview(ImVec2 p, ImVec2 size, IPlayerEngine*
     renderCoverPhoto(ImVec2(centerX, coverY), coverSize);
 
     float diffY = coverY + coverSize + ph * 0.04f;
-    renderDifficultyButtons(ImVec2(centerX, diffY), centerW);
+    renderDifficultyButtons(ImVec2(centerX, diffY), centerW, engine);
 
     float playY = diffY + 50.f;
     renderPlayButton(ImVec2(centerX, playY), centerW, engine);
+}
+
+int MusicSelectionView::tickWheelInput(IPlayerEngine* engine, const char* areaId,
+        ImVec2 origin, float width, float height, int count, float rowPitch,
+        float angleStep, float radius, float& cur, float& tgt, float& vel,
+        DragWheel which, int prevCentered) {
+    ImGuiIO& io = ImGui::GetIO();
+    float dt = (io.DeltaTime > 0.f && io.DeltaTime < 0.1f) ? io.DeltaTime : 1.f / 60.f;
+    float maxIdx  = (float)(count - 1);
+    float centerY = origin.y + height * 0.5f;
+
+    // Full-area transparent capture for drag/tap (covers the whole roller band).
+    ImGui::SetCursorScreenPos(origin);
+    ImGui::InvisibleButton(areaId, ImVec2(width, height), ImGuiButtonFlags_MouseButtonLeft);
+    bool active      = ImGui::IsItemActive();
+    bool activated   = ImGui::IsItemActivated();
+    bool deactivated = ImGui::IsItemDeactivated();
+    bool hovered     = ImGui::IsItemHovered();
+
+    if (activated) {
+        m_dragWheel = which;
+        m_dragLastY = io.MousePos.y;
+        m_dragTotal = 0.f;
+        m_dragMoved = false;
+        vel = 0.f;
+    }
+    bool owning = (m_dragWheel == which);
+
+    if (active && owning) {
+        // 1:1 finger tracking — content follows the drag.
+        float dy = io.MousePos.y - m_dragLastY;
+        m_dragLastY  = io.MousePos.y;
+        m_dragTotal += std::fabs(dy);
+        if (m_dragTotal > 6.f) m_dragMoved = true;
+        if (rowPitch > 0.f && dy != 0.f) {
+            float drows = -dy / rowPitch;
+            cur += drows;
+            vel  = drows / dt;            // carried into momentum on release
+        }
+        cur = std::clamp(cur, 0.f, maxIdx);
+        tgt = cur;
+    } else {
+        if (hovered && io.MouseWheel != 0.f)   // desktop wheel = flick impulse
+            vel += -io.MouseWheel * 7.f;
+
+        if (std::fabs(vel) > 0.5f) {
+            cur += vel * dt;
+            vel *= std::exp(-9.f * dt);        // friction
+            if (cur <= 0.f)    { cur = 0.f;    vel = 0.f; }
+            if (cur >= maxIdx) { cur = maxIdx; vel = 0.f; }
+            tgt = std::round(std::clamp(cur, 0.f, maxIdx));
+        } else {
+            vel = 0.f;                          // settle: snap to nearest row
+            cur += (tgt - cur) * std::min(1.f, 14.f * dt);
+        }
+    }
+
+    if (deactivated && owning) {
+        if (!m_dragMoved && angleStep != 0.f && radius != 0.f) {
+            // Tap (no drag): bring the tapped row to center.
+            float ratio = std::clamp((io.MousePos.y - centerY) / radius, -1.f, 1.f);
+            float t     = std::asin(ratio) / angleStep;
+            tgt = std::round(std::clamp(cur + t, 0.f, maxIdx));
+            vel = 0.f;
+        }
+        m_dragWheel = DragWheel::None;
+    }
+
+    int centered = (int)std::lround(std::clamp(cur, 0.f, maxIdx));
+    if (centered != prevCentered)
+        playWheelSfx(engine, m_wheelScrollSfx);
+    return centered;
 }
 
 void MusicSelectionView::renderSetWheel(ImVec2 origin, float width, float height, IPlayerEngine* engine) {
@@ -582,131 +723,48 @@ void MusicSelectionView::renderSetWheel(ImVec2 origin, float width, float height
     }
 
     int count = (int)m_sets.size();
-    float centerX = origin.x + width * 0.5f;
     float centerY = origin.y + height * 0.5f;
-    float cardW = width * 0.82f;
-    float cardH = 80.f;
-    float cardHalfW = cardW * 0.5f;
-    float cardHalfH = cardH * 0.5f;
 
-    ImVec2 mousePos = ImGui::GetIO().MousePos;
-    if (mousePos.x >= origin.x && mousePos.x <= origin.x + width &&
-        mousePos.y >= origin.y && mousePos.y <= origin.y + height) {
-        float wheel = ImGui::GetIO().MouseWheel;
-        if (wheel != 0.f) {
-            int prevSel = m_selectedSet;
-            m_setScrollTarget -= wheel;
-            m_setScrollTarget = std::clamp(m_setScrollTarget, 0.f, (float)(count - 1));
-            m_selectedSet = (int)std::round(m_setScrollTarget);
-            m_selectedSong = -1;
-            m_songScrollTarget = 0.f;
-            if (m_selectedSet != prevSel) playWheelSfx(engine, m_wheelScrollSfx);
-        }
+    float rowPitch  = std::clamp(height / 7.f, 46.f, 100.f);
+    float angleStep = 0.34f;                       // radians between rows
+    float radius    = rowPitch / std::sin(angleStep);
+
+    // Input + physics (drag / flick / snap / wheel); plays scroll SFX on change.
+    int prevSel = (m_selectedSet < 0) ? 0 : m_selectedSet;
+    int sel = tickWheelInput(engine, "##setwheel_area", origin, width, height,
+                             count, rowPitch, angleStep, radius,
+                             m_setScrollCurrent, m_setScrollTarget, m_setScrollVel,
+                             DragWheel::Set, prevSel);
+    if (sel != m_selectedSet) {
+        m_selectedSet = sel;
+        // Changing the set resets the song roller to its first entry.
+        m_songScrollCurrent = 0.f;
+        m_songScrollTarget  = 0.f;
+        m_songScrollVel     = 0.f;
+        m_selectedSong = m_sets[sel].songs.empty() ? -1 : 0;
     }
 
-    int maxVisible = 5;
-    struct CardToDraw { int index; float offset; };
-    std::vector<CardToDraw> cards;
+    drawWheelBand(dl, origin, width, centerY, rowPitch, IM_COL32(96, 132, 232, 255));
+
+    // Far rows first so the centered row paints on top.
+    std::vector<int> order;
     for (int i = 0; i < count; ++i) {
-        float offset = (float)i - m_setScrollCurrent;
-        if (std::abs(offset) <= (float)maxVisible * 0.5f + 0.5f)
-            cards.push_back({i, offset});
+        if (std::fabs((float)i - m_setScrollCurrent) <= 5.0f) order.push_back(i);
     }
-    std::sort(cards.begin(), cards.end(), [](const CardToDraw& a, const CardToDraw& b) {
-        return std::abs(a.offset) > std::abs(b.offset);
+    std::sort(order.begin(), order.end(), [&](int a, int b) {
+        return std::fabs((float)a - m_setScrollCurrent) >
+               std::fabs((float)b - m_setScrollCurrent);
     });
 
-    for (auto& card : cards) {
-        float t = card.offset;
-        float absT = std::abs(t);
-
-        float scaleFactor = std::max(0.55f, 1.f - absT * 0.12f);
-        float alphaFactor = std::max(0.15f, 1.f - absT * 0.25f);
-        float yShift = t * cardH * 0.55f;
-        float skew = std::min(0.30f, absT * 0.08f);
-
-        float sw = cardHalfW * scaleFactor;
-        float sh = cardHalfH * scaleFactor;
-        float cx = centerX;
-        float cy = centerY + yShift;
-
-        float nearHalfW = sw;
-        float farHalfW  = sw * (1.f - skew);
-
-        ImVec2 tl, tr, br, bl;
-        if (t >= 0.f) {
-            tl = ImVec2(cx - farHalfW,  cy - sh);
-            tr = ImVec2(cx + farHalfW,  cy - sh);
-            br = ImVec2(cx + nearHalfW, cy + sh);
-            bl = ImVec2(cx - nearHalfW, cy + sh);
-        } else {
-            tl = ImVec2(cx - nearHalfW, cy - sh);
-            tr = ImVec2(cx + nearHalfW, cy - sh);
-            br = ImVec2(cx + farHalfW,  cy + sh);
-            bl = ImVec2(cx - farHalfW,  cy + sh);
-        }
-
-        int alpha = (int)(220 * alphaFactor);
-        bool isSelected = (card.index == m_selectedSet);
-
-        ImU32 bgCol = isSelected
-            ? IM_COL32(60, 80, 160, alpha)
-            : IM_COL32(40, 42, 55, alpha);
-        dl->AddQuadFilled(tl, tr, br, bl, bgCol);
-
-        if (isSelected) {
-            dl->AddQuad(tl, tr, br, bl, IM_COL32(120, 160, 255, (int)(255 * alphaFactor)), 2.f);
-        }
-
-        float thumbFrac = 0.25f;
-        VkDescriptorSet coverDesc = getCoverDesc(m_sets[card.index].coverImage);
-        ImVec2 ttl = tl;
-        ImVec2 ttr(tl.x + (tr.x - tl.x) * thumbFrac, tl.y + (tr.y - tl.y) * thumbFrac);
-        ImVec2 tbr(bl.x + (br.x - bl.x) * thumbFrac, bl.y + (br.y - bl.y) * thumbFrac);
-        ImVec2 tbl = bl;
-
-        float inset = 4.f;
-        ImVec2 itl(ttl.x + inset, ttl.y + inset);
-        ImVec2 itr(ttr.x,         ttr.y + inset);
-        ImVec2 ibr(tbr.x,         tbr.y - inset);
-        ImVec2 ibl(tbl.x + inset, tbl.y - inset);
-
-        if (coverDesc) {
-            dl->AddImageQuad((ImTextureID)(uint64_t)coverDesc,
-                             itl, itr, ibr, ibl,
-                             ImVec2(0,0), ImVec2(1,0), ImVec2(1,1), ImVec2(0,1),
-                             IM_COL32(255, 255, 255, (int)(255 * alphaFactor)));
-        } else {
-            dl->AddQuadFilled(itl, itr, ibr, ibl,
-                              IM_COL32(60, 60, 80, (int)(200 * alphaFactor)));
-        }
-
-        float quadCX = (tl.x + tr.x + br.x + bl.x) * 0.25f;
-        float quadCY = (tl.y + tr.y + br.y + bl.y) * 0.25f;
-        float textOffsetX = sw * thumbFrac * 0.5f;
-
-        const char* setName = m_sets[card.index].name.c_str();
-        ImVec2 textSz = ImGui::CalcTextSize(setName);
-        dl->AddText(ImVec2(quadCX + textOffsetX - textSz.x * 0.5f,
-                           quadCY - textSz.y * 0.5f),
-                    IM_COL32(230, 230, 240, (int)(255 * alphaFactor)),
-                    setName);
-
-        float minX = std::min({tl.x, tr.x, br.x, bl.x});
-        float minY = std::min({tl.y, tr.y, br.y, bl.y});
-        float maxX = std::max({tl.x, tr.x, br.x, bl.x});
-        float maxY = std::max({tl.y, tr.y, br.y, bl.y});
-
-        ImGui::SetCursorScreenPos(ImVec2(minX, minY));
-        char btnId[32];
-        snprintf(btnId, sizeof(btnId), "##setcard_%d", card.index);
-        if (ImGui::InvisibleButton(btnId, ImVec2(maxX - minX, maxY - minY))) {
-            m_selectedSet = card.index;
-            m_setScrollTarget = (float)card.index;
-            m_selectedSong = -1;
-            m_songScrollTarget = 0.f;
-            playWheelSfx(engine, m_wheelClickSfx);
-        }
+    ImFont* font = ImGui::GetFont();
+    float baseFont = ImGui::GetFontSize();
+    for (int i : order) {
+        CylSample cs = cylSample((float)i - m_setScrollCurrent, centerY, radius, angleStep);
+        if (!cs.vis) continue;
+        bool isSel = (i == sel);
+        drawRollerRow(dl, font, baseFont, origin, width, rowPitch, cs,
+                      getCoverDesc(m_sets[i].coverImage), m_sets[i].name.c_str(),
+                      isSel, IM_COL32(150, 180, 255, 255));
     }
 }
 
@@ -734,227 +792,95 @@ void MusicSelectionView::renderSongWheel(ImVec2 origin, float width, float heigh
     }
 
     int count = (int)songs.size();
-    float centerX = origin.x + width * 0.5f;
     float centerY = origin.y + height * 0.5f;
-    float cardW = width * 0.82f;
-    float cardH = 80.f;
-    float cardHalfW = cardW * 0.5f;
-    float cardHalfH = cardH * 0.5f;
 
-    ImVec2 mousePos = ImGui::GetIO().MousePos;
-    if (mousePos.x >= origin.x && mousePos.x <= origin.x + width &&
-        mousePos.y >= origin.y && mousePos.y <= origin.y + height) {
-        float wheel = ImGui::GetIO().MouseWheel;
-        if (wheel != 0.f) {
-            int prevSel = m_selectedSong;
-            m_songScrollTarget -= wheel;
-            m_songScrollTarget = std::clamp(m_songScrollTarget, 0.f, (float)(count - 1));
-            m_selectedSong = (int)std::round(m_songScrollTarget);
-            if (m_selectedSong != prevSel) playWheelSfx(engine, m_wheelScrollSfx);
-        }
-    }
+    float rowPitch  = std::clamp(height / 7.f, 46.f, 100.f);
+    float angleStep = 0.34f;
+    float radius    = rowPitch / std::sin(angleStep);
 
-    int maxVisible = 5;
-    struct CardToDraw { int index; float offset; };
-    std::vector<CardToDraw> cards;
-    for (int i = 0; i < count; ++i) {
-        float offset = (float)i - m_songScrollCurrent;
-        if (std::abs(offset) <= (float)maxVisible * 0.5f + 0.5f)
-            cards.push_back({i, offset});
-    }
-    std::sort(cards.begin(), cards.end(), [](const CardToDraw& a, const CardToDraw& b) {
-        return std::abs(a.offset) > std::abs(b.offset);
+    int prevSel = (m_selectedSong < 0) ? 0 : m_selectedSong;
+    int sel = tickWheelInput(engine, "##songwheel_area", origin, width, height,
+                             count, rowPitch, angleStep, radius,
+                             m_songScrollCurrent, m_songScrollTarget, m_songScrollVel,
+                             DragWheel::Song, prevSel);
+    m_selectedSong = sel;
+
+    // Double-click the centered row to launch immediately (editor hook).
+    if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))
+        onSongCardDoubleClick(sel);
+
+    drawWheelBand(dl, origin, width, centerY, rowPitch, IM_COL32(228, 96, 140, 255));
+
+    std::vector<int> order;
+    for (int i = 0; i < count; ++i)
+        if (std::fabs((float)i - m_songScrollCurrent) <= 5.0f) order.push_back(i);
+    std::sort(order.begin(), order.end(), [&](int a, int b) {
+        return std::fabs((float)a - m_songScrollCurrent) >
+               std::fabs((float)b - m_songScrollCurrent);
     });
 
-    for (auto& card : cards) {
-        float t = card.offset;
-        float absT = std::abs(t);
+    ImFont* font = ImGui::GetFont();
+    float baseFont = ImGui::GetFontSize();
 
-        float scaleFactor = std::max(0.55f, 1.f - absT * 0.12f);
-        float alphaFactor = std::max(0.15f, 1.f - absT * 0.25f);
-        float yShift = t * cardH * 0.55f;
-        float skew = std::min(0.30f, absT * 0.08f);
-
-        float sw = cardHalfW * scaleFactor;
-        float sh = cardHalfH * scaleFactor;
-        float cx = centerX;
-        float cy = centerY + yShift;
-
-        float nearHalfW = sw;
-        float farHalfW  = sw * (1.f - skew);
-
-        ImVec2 tl, tr, br, bl;
-        if (t >= 0.f) {
-            tl = ImVec2(cx - farHalfW,  cy - sh);
-            tr = ImVec2(cx + farHalfW,  cy - sh);
-            br = ImVec2(cx + nearHalfW, cy + sh);
-            bl = ImVec2(cx - nearHalfW, cy + sh);
-        } else {
-            tl = ImVec2(cx - nearHalfW, cy - sh);
-            tr = ImVec2(cx + nearHalfW, cy - sh);
-            br = ImVec2(cx + farHalfW,  cy + sh);
-            bl = ImVec2(cx - farHalfW,  cy + sh);
-        }
-
-        int alpha = (int)(220 * alphaFactor);
-        bool isSelected = (card.index == m_selectedSong);
-        auto& song = songs[card.index];
-
-        ImU32 bgCol = isSelected
-            ? IM_COL32(160, 60, 100, alpha)
-            : IM_COL32(40, 42, 55, alpha);
-        dl->AddQuadFilled(tl, tr, br, bl, bgCol);
-
-        if (isSelected) {
-            dl->AddQuad(tl, tr, br, bl, IM_COL32(255, 120, 180, (int)(255 * alphaFactor)), 2.f);
-        }
-
-        float thumbFrac = 0.25f;
-        VkDescriptorSet coverDesc = getCoverDesc(song.coverImage);
-        ImVec2 ttl = tl;
-        ImVec2 ttr(tl.x + (tr.x - tl.x) * thumbFrac, tl.y + (tr.y - tl.y) * thumbFrac);
-        ImVec2 tbr(bl.x + (br.x - bl.x) * thumbFrac, bl.y + (br.y - bl.y) * thumbFrac);
-        ImVec2 tbl = bl;
-
-        float inset = 4.f;
-        ImVec2 itl(ttl.x + inset, ttl.y + inset);
-        ImVec2 itr(ttr.x,         ttr.y + inset);
-        ImVec2 ibr(tbr.x,         tbr.y - inset);
-        ImVec2 ibl(tbl.x + inset, tbl.y - inset);
-
-        if (coverDesc) {
-            dl->AddImageQuad((ImTextureID)(uint64_t)coverDesc,
-                             itl, itr, ibr, ibl,
-                             ImVec2(0,0), ImVec2(1,0), ImVec2(1,1), ImVec2(0,1),
-                             IM_COL32(255, 255, 255, (int)(255 * alphaFactor)));
-        } else {
-            dl->AddQuadFilled(itl, itr, ibr, ibl,
-                              IM_COL32(80, 40, 60, (int)(200 * alphaFactor)));
-        }
-
-        ImVec2 cardMin(std::min({tl.x, tr.x, br.x, bl.x}),
-                       std::min({tl.y, tr.y, br.y, bl.y}));
-        ImVec2 cardMax(std::max({tl.x, tr.x, br.x, bl.x}),
-                       std::max({tl.y, tr.y, br.y, bl.y}));
-        dl->PushClipRect(cardMin, cardMax, true);
-
-        float quadCX = (tl.x + tr.x + br.x + bl.x) * 0.25f;
-        float quadCY = (tl.y + tr.y + br.y + bl.y) * 0.25f;
-
-        float cardWFull   = sw * 2.f;
-        float coverW      = cardWFull * thumbFrac;
-        float padding     = sw * 0.04f;
-        float rhombusH    = std::min(sh * 1.60f, cardWFull * 0.20f);
-        float rhombusW    = rhombusH;
-        float overlap     = rhombusW * 0.25f;
-        float rhombusPairW = rhombusW + (rhombusW - overlap);
-        float rhombusAreaW = rhombusPairW + padding;
-
-        float textColLeft  = tl.x + coverW + padding;
-        float textColRight = tr.x - rhombusAreaW;
-        if (textColRight < textColLeft + 10.f)
-            textColRight = textColLeft + 10.f;
-        float textBaseX    = (textColLeft + textColRight) * 0.5f;
-
-        int diffScore = 0;
-        const std::string* diffAch = nullptr;
+    // Per-difficulty score + achievement for the centered row's badges.
+    int diffScore = 0;
+    const std::string* diffAch = nullptr;
+    {
+        auto& s = songs[std::clamp(sel, 0, count - 1)];
         switch (m_selectedDifficulty) {
-            case Difficulty::Easy:
-                diffScore = song.scoreEasy;   diffAch = &song.achievementEasy;   break;
-            case Difficulty::Medium:
-                diffScore = song.scoreMedium; diffAch = &song.achievementMedium; break;
-            case Difficulty::Hard:
-                diffScore = song.scoreHard;   diffAch = &song.achievementHard;   break;
+            case Difficulty::Easy:   diffScore = s.scoreEasy;   diffAch = &s.achievementEasy;   break;
+            case Difficulty::Medium: diffScore = s.scoreMedium; diffAch = &s.achievementMedium; break;
+            case Difficulty::Hard:   diffScore = s.scoreHard;   diffAch = &s.achievementHard;   break;
         }
+    }
+    bool fcUnlocked = false, apUnlocked = false;
+    if (diffAch && !diffAch->empty()) {
+        std::string low = *diffAch;
+        for (char& c : low) c = (char)std::tolower((unsigned char)c);
+        if      (low == "ap") { fcUnlocked = apUnlocked = true; }
+        else if (low == "fc") { fcUnlocked = true; }
+    }
 
-        VkDescriptorSet fcTex = m_fcImage.empty()
-            ? VK_NULL_HANDLE : getCoverDesc(m_fcImage);
-        VkDescriptorSet apTex = m_apImage.empty()
-            ? VK_NULL_HANDLE : getCoverDesc(m_apImage);
+    VkDescriptorSet fcTex = m_fcImage.empty() ? VK_NULL_HANDLE : getCoverDesc(m_fcImage);
+    VkDescriptorSet apTex = m_apImage.empty() ? VK_NULL_HANDLE : getCoverDesc(m_apImage);
 
-        bool fcUnlocked = false, apUnlocked = false;
-        if (diffAch && !diffAch->empty()) {
-            std::string low = *diffAch;
-            for (char& c : low) c = (char)std::tolower((unsigned char)c);
-            if      (low == "ap") { fcUnlocked = true; apUnlocked = true; }
-            else if (low == "fc") { fcUnlocked = true; }
-        }
+    for (int i : order) {
+        CylSample cs = cylSample((float)i - m_songScrollCurrent, centerY, radius, angleStep);
+        if (!cs.vis) continue;
+        bool isSel = (i == sel);
+        float coverR = drawRollerRow(dl, font, baseFont, origin, width, rowPitch, cs,
+                                     getCoverDesc(songs[i].coverImage),
+                                     songs[i].name.c_str(), isSel,
+                                     IM_COL32(255, 150, 195, 255));
 
-        const char* songName = song.name.c_str();
-        ImVec2 nameSz  = ImGui::CalcTextSize(songName);
+        if (!isSel || cs.depth <= 0.85f) continue;
+
+        // Centered row extras: score line + FC/AP rhombus badges.
+        int ai = (int)(cs.alpha * 255.f);
         char scoreBuf[32];
         snprintf(scoreBuf, sizeof(scoreBuf), "%d", diffScore);
-        ImVec2 scoreSz = ImGui::CalcTextSize(scoreBuf);
+        float scoreSz = baseFont * 0.80f;
+        dl->AddText(font, scoreSz, ImVec2(coverR + width * 0.06f, cs.y + rowPitch * 0.22f),
+                    IM_COL32(208, 212, 230, ai), scoreBuf);
 
-        float nameY  = quadCY - sh * 0.32f;
-        float scoreY = quadCY + sh * 0.12f;
-        float rhombusRight = tr.x - padding;
-        float apCX = rhombusRight - rhombusW * 0.5f;
-        float fcCX = apCX - (rhombusW - overlap);
-        float rhombusCY = quadCY;
-
-        auto drawRhombusSlot = [&](float cx_, float cy_,
-                                    VkDescriptorSet tex, bool unlocked,
-                                    ImU32 fillCol) {
-            float hw = rhombusW * 0.5f;
-            float hh = rhombusH * 0.5f;
-            ImVec2 pN(cx_,      cy_ - hh);
-            ImVec2 pE(cx_ + hw, cy_);
-            ImVec2 pS(cx_,      cy_ + hh);
-            ImVec2 pW(cx_ - hw, cy_);
-
-            ImU32 back = unlocked
-                ? fillCol
-                : IM_COL32(45, 48, 60, (int)(180 * alphaFactor));
-            dl->AddQuadFilled(pN, pE, pS, pW, back);
-
-            if (tex) {
-                int a = unlocked ? (int)(230 * alphaFactor)
-                                 : (int)( 60 * alphaFactor);
+        float rW   = std::min(rowPitch * 0.40f, width * 0.13f);
+        float apCX = origin.x + width - width * 0.09f - rW * 0.5f;
+        float fcCX = apCX - rW * 0.85f;
+        auto rhombus = [&](float cx, VkDescriptorSet tex, bool unlocked, ImU32 fill) {
+            float hw = rW * 0.5f;
+            ImVec2 pN(cx, cs.y - hw), pE(cx + hw, cs.y), pS(cx, cs.y + hw), pW(cx - hw, cs.y);
+            dl->AddQuadFilled(pN, pE, pS, pW,
+                unlocked ? fill : IM_COL32(45, 48, 60, (int)(170 * cs.alpha)));
+            if (tex)
                 dl->AddImageQuad((ImTextureID)(uint64_t)tex, pN, pE, pS, pW,
-                                 ImVec2(0.5f, 0),   ImVec2(1, 0.5f),
-                                 ImVec2(0.5f, 1),   ImVec2(0, 0.5f),
-                                 IM_COL32(255, 255, 255, a));
-            }
-
-            ImU32 outline = unlocked
-                ? IM_COL32(255, 255, 255, (int)(200 * alphaFactor))
-                : IM_COL32(150, 150, 170, (int)(140 * alphaFactor));
-            dl->AddQuad(pN, pE, pS, pW, outline, 1.5f);
+                    ImVec2(0.5f, 0), ImVec2(1, 0.5f), ImVec2(0.5f, 1), ImVec2(0, 0.5f),
+                    IM_COL32(255, 255, 255, unlocked ? (int)(230 * cs.alpha) : (int)(55 * cs.alpha)));
+            dl->AddQuad(pN, pE, pS, pW,
+                unlocked ? IM_COL32(255, 255, 255, (int)(200 * cs.alpha))
+                         : IM_COL32(150, 150, 170, (int)(120 * cs.alpha)), 1.4f);
         };
-
-        drawRhombusSlot(fcCX, rhombusCY, fcTex, fcUnlocked,
-                        IM_COL32( 40, 110, 150, (int)(170 * alphaFactor)));
-        drawRhombusSlot(apCX, rhombusCY, apTex, apUnlocked,
-                        IM_COL32(150, 120,  40, (int)(170 * alphaFactor)));
-
-        dl->AddText(ImVec2(textBaseX - nameSz.x * 0.5f, nameY),
-                    IM_COL32(240, 240, 250, (int)(255 * alphaFactor)),
-                    songName);
-        dl->AddText(ImVec2(textBaseX - scoreSz.x * 0.5f, scoreY),
-                    IM_COL32(200, 200, 220, (int)(220 * alphaFactor)),
-                    scoreBuf);
-
-        dl->PopClipRect();
-
-        float minX = std::min({tl.x, tr.x, br.x, bl.x});
-        float minY = std::min({tl.y, tr.y, br.y, bl.y});
-        float maxX = std::max({tl.x, tr.x, br.x, bl.x});
-        float maxY = std::max({tl.y, tr.y, br.y, bl.y});
-
-        ImGui::SetCursorScreenPos(ImVec2(minX, minY));
-        char btnId[32];
-        snprintf(btnId, sizeof(btnId), "##songcard_%d", card.index);
-        if (ImGui::InvisibleButton(btnId, ImVec2(maxX - minX, maxY - minY))) {
-            m_selectedSong = card.index;
-            m_songScrollTarget = (float)card.index;
-            playWheelSfx(engine, m_wheelClickSfx);
-        }
-        if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
-            m_selectedSong = card.index;
-            m_songScrollTarget = (float)card.index;
-            onSongCardDoubleClick(card.index);
-        }
+        rhombus(fcCX, fcTex, fcUnlocked, IM_COL32(40, 110, 150, (int)(180 * cs.alpha)));
+        rhombus(apCX, apTex, apUnlocked, IM_COL32(150, 120, 40, (int)(180 * cs.alpha)));
     }
 }
 
@@ -1005,7 +931,7 @@ void MusicSelectionView::renderCoverPhoto(ImVec2 origin, float size) {
     }
 }
 
-void MusicSelectionView::renderDifficultyButtons(ImVec2 origin, float /*width*/) {
+void MusicSelectionView::renderDifficultyButtons(ImVec2 origin, float /*width*/, IPlayerEngine* engine) {
     ImDrawList* dl = ImGui::GetWindowDrawList();
 
     struct DiffInfo {
@@ -1047,6 +973,8 @@ void MusicSelectionView::renderDifficultyButtons(ImVec2 origin, float /*width*/)
         char id[32];
         snprintf(id, sizeof(id), "##diff_%d", i);
         if (ImGui::InvisibleButton(id, ImVec2(btnW, btnH))) {
+            if (diffs[i].diff != m_selectedDifficulty)
+                playWheelSfx(engine, m_difficultySfx);
             m_selectedDifficulty = diffs[i].diff;
         }
     }
@@ -1095,6 +1023,7 @@ void MusicSelectionView::renderPlayButton(ImVec2 origin, float /*width*/, IPlaye
     ImGui::SetCursorScreenPos(ImVec2(bx, by));
     if (ImGui::InvisibleButton("##play_btn", ImVec2(btnW, btnH)) && canPlay) {
         if (engine) {
+            playWheelSfx(engine, m_wheelClickSfx);   // confirm/click SFX on START
             auto& song = m_sets[m_selectedSet].songs[m_selectedSong];
             engine->launchGameplay(song, m_selectedDifficulty, m_projectPath, m_autoPlay);
         }

@@ -1,6 +1,7 @@
 {
   "apImage": "assets/textures/_cgi-bin_mmwebwx-bin_webwxgetmsgimg__&MsgID=6560311396711576903&skey=@crypt_fe033b05_37901c151e3a0950a9b03cdfef2f6453&mmweb_appid=wx_webfilehelper.jpg",
   "background": "assets/textures/3302789baba9c5c1f1556f240f1fa72c.JPG",
+  "difficultySfx": "",
   "fcImage": "assets/textures/_cgi-bin_mmwebwx-bin_webwxgetmsgimg__&MsgID=1949234573562479640&skey=@crypt_fe033b05_37901c151e3a0950a9b03cdfef2f6453&mmweb_appid=wx_webfilehelper.jpg",
   "sets": [
     {

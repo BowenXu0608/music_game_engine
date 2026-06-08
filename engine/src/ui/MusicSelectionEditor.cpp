@@ -430,7 +430,7 @@ void MusicSelectionEditor::renderPreview(float width, float height) {
     renderCoverPhoto(ImVec2(centerX, coverY), coverSize);
 
     float diffY = coverY + coverSize + diffGap;
-    renderDifficultyButtons(ImVec2(centerX, diffY), centerW);
+    renderDifficultyButtons(ImVec2(centerX, diffY), centerW, m_engine);
 
     float playY = diffY + playGap;
     renderPlayButton(ImVec2(centerX, playY), centerW, m_engine);
@@ -616,9 +616,11 @@ void MusicSelectionEditor::renderHierarchy(float width, float height) {
         ImGui::TextUnformatted("Wheel Sounds:");
         ImGui::TextDisabled("Drag an audio asset onto a slot. Empty = silent.");
         ImGui::Spacing();
-        sfxDropZone("Scroll Sound", "wheelscroll", m_wheelScrollSfx);
+        sfxDropZone("Scroll Sound",     "wheelscroll", m_wheelScrollSfx);
         ImGui::Spacing();
-        sfxDropZone("Click Sound",  "wheelclick",  m_wheelClickSfx);
+        sfxDropZone("Difficulty Sound", "diffclick",   m_difficultySfx);
+        ImGui::Spacing();
+        sfxDropZone("Click Sound",      "wheelclick",  m_wheelClickSfx);
         ImGui::Spacing();
         ImGui::Separator();
         ImGui::Spacing();
